@@ -71,6 +71,10 @@ const char* InstallKindName(InstallKind kind);
 // `exe_dir` without a trailing backslash. Looks at the path and for unins000.exe beside the exe;
 // `dir_writable` says whether this user can replace files there (an all-users install can't).
 InstallKind DetectInstallKind(const std::wstring& exe_dir, bool has_uninstaller, bool dir_writable);
+// Scoop runs an app from scoop\apps\<app>\<version>\ and repoints the `current` junction on every
+// update, so a path that must outlive this version (the autostart Run value) goes through
+// `current`. Any other path comes back unchanged.
+std::wstring ScoopStablePath(const std::wstring& exe_path);
 
 // What SafeToApplyNow looks at, gathered by the engine (GatherApplyGate).
 struct ApplyGate {

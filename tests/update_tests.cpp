@@ -93,6 +93,16 @@ TEST_CASE("update: install kind") {
     CHECK(DetectInstallKind(L"C:\\Users\\a\\scoop\\apps\\ombra\\current", true, true) == InstallKind::Scoop);
 }
 
+TEST_CASE("update: Scoop stable path") {
+    CHECK(ScoopStablePath(L"C:\\Users\\a\\Scoop\\apps\\ombra\\0.1.0\\ombra.exe") ==
+          L"C:\\Users\\a\\Scoop\\apps\\ombra\\current\\ombra.exe");
+    CHECK(ScoopStablePath(L"C:\\Users\\a\\scoop\\apps\\ombra\\current\\ombra.exe") ==
+          L"C:\\Users\\a\\scoop\\apps\\ombra\\current\\ombra.exe");
+    CHECK(ScoopStablePath(L"C:\\Users\\a\\AppData\\Local\\Programs\\Ombra\\ombra.exe") ==
+          L"C:\\Users\\a\\AppData\\Local\\Programs\\Ombra\\ombra.exe");
+    CHECK(ScoopStablePath(L"C:\\scoop\\apps\\ombra") == L"C:\\scoop\\apps\\ombra");
+}
+
 TEST_CASE("update: apply gate") {
     ApplyGate g;
     g.idle_ms = kApplyIdleMs;

@@ -3,6 +3,7 @@
 #include "ombra/audio.h"
 #include "ombra/log.h"
 #include "ombra/paths.h"
+#include "ombra/update.h"
 #include "ombra/util.h"
 
 #include <windows.h>
@@ -79,7 +80,7 @@ bool SetWindowsAutostart(bool enable) {
         wchar_t self_path[MAX_PATH];
         DWORD n = GetModuleFileNameW(nullptr, self_path, MAX_PATH);
         if (n > 0 && n < MAX_PATH) {
-            std::wstring val = L"\"" + std::wstring(self_path) + L"\"";
+            std::wstring val = L"\"" + ScoopStablePath(self_path) + L"\"";
             RegSetValueExW(key, L"" OMBRA_INSTALL_ID, 0, REG_SZ,
                             reinterpret_cast<const BYTE*>(val.c_str()),
                             static_cast<DWORD>((val.size() + 1) * sizeof(wchar_t)));

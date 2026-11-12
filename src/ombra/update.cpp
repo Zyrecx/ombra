@@ -185,6 +185,19 @@ InstallKind DetectInstallKind(const std::wstring& exe_dir, bool has_uninstaller,
     return InstallKind::Portable;
 }
 
+std::wstring ScoopStablePath(const std::wstring& exe_path) {
+    std::wstring lower = exe_path;
+    for (wchar_t& c : lower) c = static_cast<wchar_t>(towlower(c));
+    const std::wstring_view marker = L"\\scoop\\apps\\";
+    const size_t at = lower.find(marker);
+    if (at == std::wstring::npos) return exe_path;
+    const size_t app_end = lower.find(L'\\', at + marker.size());
+    if (app_end == std::wstring::npos) return exe_path;
+    const size_t version_end = lower.find(L'\\', app_end + 1);
+    if (version_end == std::wstring::npos) return exe_path;
+    return exe_path.substr(0, app_end + 1) + L"current" + exe_path.substr(version_end);
+}
+
 bool SafeToApplyNow(const ApplyGate& g) {
     return g.idle_ms >= kApplyIdleMs && !g.busy_fullscreen && !g.game_running && !g.save_in_flight &&
            !g.other_ombra_processes;
