@@ -15,7 +15,7 @@
   <a href="../../releases/latest">Release notes</a> &nbsp;·&nbsp; <a href="#install">Other downloads</a>
 </p>
 
-https://github.com/user-attachments/assets/DEMO-VIDEO-PLACEHOLDER
+https://github.com/user-attachments/assets/71b22455-5001-4e01-9d42-29788f312d0d
 
 Ombra keeps the last minutes of your screen and sound in a rolling buffer, encoded on your NVIDIA or
 AMD GPU or on the CPU. When something happens worth keeping, one key turns the buffer into a clip,
