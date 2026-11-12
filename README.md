@@ -72,9 +72,8 @@ choose the folder and shortcuts, and keeps Ombra up to date.
 
 <table>
 <tr><td><b>Portable</b></td><td><a href="../../releases/latest"><code>Ombra-Portable.zip</code></a>: unzip anywhere and run <code>ombra.exe</code></td></tr>
-<tr><td><b>winget</b></td><td>Pending</td></tr>
-<tr><td><b>Scoop</b></td><td>Pending</td></tr>
-<tr><td><b>PowerShell</b></td><td>Pending</td></tr>
+<tr><td><b>winget</b></td><td><code>winget install Zyrecx.Ombra</code> (in review)</td></tr>
+<tr><td><b>Scoop</b></td><td><code>scoop bucket add zyrecx https://github.com/Zyrecx/scoop-bucket</code><br><code>scoop install zyrecx/ombra</code></td></tr>
 </table>
 
 </details>
