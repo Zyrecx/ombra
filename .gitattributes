@@ -1,0 +1,6 @@
+* text=auto
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.h264 binary
+docs/img/ombra-mark.svg text eol=lf
+*.ttf binary

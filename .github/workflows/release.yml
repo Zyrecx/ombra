@@ -1,0 +1,93 @@
+# First hosted build, package download and release upload still need verification.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out the version tag
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Check tag against the build version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:GITHUB_REF_NAME
+          if ($tag -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+              throw "Expected a version tag such as v0.1.0, got $tag"
+          }
+          $project = [regex]::Match((Get-Content CMakeLists.txt -Raw),
+              '(?m)^project\(ombra VERSION ([0-9]+\.[0-9]+\.[0-9]+) LANGUAGES CXX\)')
+          if (-not $project.Success -or $tag.Substring(1) -ne $project.Groups[1].Value) {
+              throw 'Tag version must match project VERSION in CMakeLists.txt'
+          }
+          # The release notes are the annotated tag's message, read from the API so it doesn't
+          # depend on how checkout fetched the tag.
+          $ref = gh api "repos/$env:GH_REPO/git/ref/tags/$tag" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Tag lookup failed ($LASTEXITCODE)" }
+          if ($ref.object.type -ne 'tag') { throw "$tag is a lightweight tag; release notes need an annotated one" }
+          $notes = (gh api "repos/$env:GH_REPO/git/tags/$($ref.object.sha)" | ConvertFrom-Json).message
+          if ($LASTEXITCODE -ne 0) { throw "Tag message lookup failed ($LASTEXITCODE)" }
+          if (-not $notes -or -not $notes.Trim()) { throw "$tag has an empty message; it becomes the release notes" }
+          [IO.File]::WriteAllText("$env:RUNNER_TEMP/notes.md", $notes.Trim() + "`n")
+
+      - name: Build Release
+        env:
+          OMBRA_SENTRY_DSN: https://a803cc12f4688d24812e8177b182fa4b@o4512245239578624.ingest.de.sentry.io/4512384661782608
+        run: powershell -ExecutionPolicy Bypass -File build.ps1
+
+      - name: Package installer and portable zip
+        run: powershell -ExecutionPolicy Bypass -File scripts/package.ps1
+
+      # Keep symbols with the exact source revision; these are not public release assets.
+      - name: Archive PDBs
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: Ombra-PDBs-${{ github.ref_name }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: build/Release/*.pdb
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assets = @('out/installer/Ombra-Setup.exe', 'out/installer/Ombra-Portable.zip',
+                      'LICENSE', 'THIRD-PARTY-NOTICES.txt')
+          foreach ($asset in $assets) {
+              if (-not (Test-Path -LiteralPath $asset -PathType Leaf) -or (Get-Item -LiteralPath $asset).Length -eq 0) {
+                  throw "Missing or empty release asset: $asset"
+              }
+          }
+          # sha256sum format (LF, two spaces) for manual downloads; the updater uses GitHub's digest.
+          $sums = foreach ($asset in $assets[0..1]) {
+              '{0}  {1}' -f (Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash.ToLowerInvariant(), (Split-Path -Leaf $asset)
+          }
+          [IO.File]::WriteAllText("$PWD/out/installer/SHA256SUMS.txt", (($sums -join "`n") + "`n"))
+          $assets += 'out/installer/SHA256SUMS.txt'
+          gh release create $env:GITHUB_REF_NAME @assets --verify-tag --notes-file "$env:RUNNER_TEMP/notes.md" --title "Ombra $($env:GITHUB_REF_NAME.Substring(1))"
+          if ($LASTEXITCODE -ne 0) { throw "Release upload failed ($LASTEXITCODE)" }

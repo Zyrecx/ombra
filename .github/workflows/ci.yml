@@ -1,0 +1,66 @@
+# Builds and runs the tests that need no GPU or audio device. Publishes nothing.
+name: CI
+
+# Pushes that change only text or README images skip it (ui_tests reads docs/img/ombra-mark.svg).
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'docs/img/readme/**'
+      - 'docs/img/social-preview.png'
+      - 'docs/img/download-windows.svg'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/FUNDING.yml'
+      - '.github/pull_request_template.md'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/img/readme/**'
+      - 'docs/img/social-preview.png'
+      - 'docs/img/download-windows.svg'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/FUNDING.yml'
+      - '.github/pull_request_template.md'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Build Release
+        run: powershell -ExecutionPolicy Bypass -File build.ps1
+
+      # The tests check saved files with ffmpeg and ffprobe. Pinned and hash-checked.
+      - name: Download ffmpeg
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '8.1.2'
+          $hash = 'DB580001CAA24AC104C8CB856CD113A87B0A443F7BDF47D8C12B1D740584A2EC'
+          $name = "ffmpeg-$version-essentials_build"
+          $zip = Join-Path $env:RUNNER_TEMP "$name.zip"
+          Invoke-WebRequest "https://github.com/GyanD/codexffmpeg/releases/download/$version/$name.zip" -OutFile $zip
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $hash) { throw 'ffmpeg download hash mismatch' }
+          Expand-Archive $zip $env:RUNNER_TEMP
+          "OMBRA_FFMPEG_DIR=$(Join-Path $env:RUNNER_TEMP "$name\bin")" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Run tests
+        run: |
+          build\Release\ombra-tests.exe
+          if ($LASTEXITCODE -ne 0) { throw "Tests failed ($LASTEXITCODE)" }

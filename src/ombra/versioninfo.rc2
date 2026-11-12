@@ -1,0 +1,37 @@
+// The VERSIONINFO block both executables embed (Explorer's Details tab, Task Manager's
+// description, Apps & features once installed). Before including, define
+// OMBRA_FILE_DESCRIPTION and OMBRA_ORIGINAL_FILENAME. Unsigned builds still show
+// "Unknown publisher" at UAC and SmartScreen: only an Authenticode signature changes that.
+#include <winver.h>
+
+#include "ombra/brand.h"
+#include "ombra/version_defs.h"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION    OMBRA_VERSION_MAJOR, OMBRA_VERSION_MINOR, OMBRA_VERSION_PATCH, 0
+PRODUCTVERSION OMBRA_VERSION_MAJOR, OMBRA_VERSION_MINOR, OMBRA_VERSION_PATCH, 0
+FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+FILEFLAGS      0
+FILEOS         VOS_NT_WINDOWS32
+FILETYPE       VFT_APP
+FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      OMBRA_PUBLISHER
+            VALUE "FileDescription",  OMBRA_FILE_DESCRIPTION
+            VALUE "FileVersion",      OMBRA_VERSION
+            VALUE "InternalName",     OMBRA_ORIGINAL_FILENAME
+            VALUE "LegalCopyright",   "GPL-3.0-or-later"
+            VALUE "OriginalFilename", OMBRA_ORIGINAL_FILENAME
+            VALUE "ProductName",      OMBRA_PRODUCT_NAME
+            VALUE "ProductVersion",   OMBRA_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

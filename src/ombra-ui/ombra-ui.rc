@@ -1,0 +1,7 @@
+// Same icon as ombra.rc: ombra-ui.exe is a separate PE and gets no icon from the engine's.
+#include "ombra/resource.h"
+IDI_APP_ICON ICON "ombra/ombra.ico"
+
+#define OMBRA_FILE_DESCRIPTION OMBRA_PRODUCT_NAME " Overlay"
+#define OMBRA_ORIGINAL_FILENAME OMBRA_UI_EXE
+#include "ombra/versioninfo.rc2"

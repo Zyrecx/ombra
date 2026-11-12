@@ -1,0 +1,10 @@
+// The .exe's own icon resource: Task Manager, Explorer and Alt+Tab read it; the tray icon is
+// rendered separately (tray.cpp) in the accent colour. ombra/ombra.ico is generated at build time
+// from the brand mark (CMakeLists.txt, ombra-icongen) and found on the include path.
+#include "ombra/resource.h"
+IDI_APP_ICON ICON "ombra/ombra.ico"
+
+// Bare: Windows shows this as the app (Task Manager, Startup apps, "... is using your microphone").
+#define OMBRA_FILE_DESCRIPTION OMBRA_PRODUCT_NAME
+#define OMBRA_ORIGINAL_FILENAME OMBRA_ENGINE_EXE
+#include "ombra/versioninfo.rc2"

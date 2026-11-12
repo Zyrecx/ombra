@@ -1,0 +1,12 @@
+build/
+out/
+.vs/
+.cache/
+*.user
+*.h264
+!tests/fixtures/*.h264
+*.mp4
+*.dat
+compile_commands.json
+.clangd
+__pycache__/

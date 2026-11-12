@@ -1,0 +1,67 @@
+name: Bug report
+description: Something doesn't work, crashes, or a clip comes out wrong.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+      placeholder: |
+        I pressed Alt+F10 in VALORANT. I expected a 2-minute clip; the clip was 3 seconds long.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: If you can make it happen again, how.
+      placeholder: |
+        1. Set the replay length to 2 minutes
+        2. Start a game
+        3. Press Alt+F10 after a minute
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often
+      options:
+        - Every time
+        - Sometimes
+        - Once so far
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Ombra version
+      description: The first line of the newest log, or ombra.exe → Properties → Details.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU(s) and encoder
+      description: Every GPU in the PC, and which one records (Settings → Capture). Say if it's a laptop.
+      placeholder: "Laptop: RTX 4060 (records, NVENC AV1) + Radeon 780M"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      description: "Win+R, type `winver`."
+      placeholder: "Windows 11 24H2 (26100)"
+  - type: input
+    id: game
+    attributes:
+      label: Game or app
+      description: What was being recorded, and whether it ran fullscreen, borderless or windowed.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        In Settings → Advanced → Diagnostics, **Send to developer** uploads them and gives you a
+        reference to paste here. Or right-click Ombra's tray icon, choose **Get logs**, and drag the
+        zip from Downloads in here. Paths and window titles are removed either way.

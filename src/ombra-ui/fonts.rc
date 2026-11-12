@@ -1,0 +1,7 @@
+// The embedded UI fonts (third_party/fonts/README.md). Linked into ombra-ui and ombra-tests; CMake
+// puts the repo root on this file's include path, which rc.exe also searches for RCDATA files.
+#include "ombra-ui/ui/fonts.h"
+OMBRA_RC_FONT_INTER_REGULAR  RCDATA "third_party/fonts/inter/Inter-Regular.ttf"
+OMBRA_RC_FONT_INTER_SEMIBOLD RCDATA "third_party/fonts/inter/Inter-SemiBold.ttf"
+OMBRA_RC_FONT_GEIST_REGULAR  RCDATA "third_party/fonts/geist/Geist-Regular.ttf"
+OMBRA_RC_FONT_GEIST_SEMIBOLD RCDATA "third_party/fonts/geist/Geist-SemiBold.ttf"
