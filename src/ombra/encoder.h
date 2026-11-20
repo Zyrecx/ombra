@@ -1,16 +1,9 @@
-// NVENC AV1/H.264 encoder. Loaded at runtime via LoadLibrary — no import lib,
-// no SDK install, only the vendored third_party/ffnvcodec/nvEncodeAPI.h.
-//
-// Synchronous mode, one registered D3D11 input texture, one bitstream buffer, since the driver
-// caps the NVENC API version.
+// The video encoder seam (IVideoEncoder) and its factory. The implementations: NVENC (nvenc.h),
+// AMF (amf_encoder.h), x264 (x264_encoder.h).
 #pragma once
 
 #include <windows.h>
 #include <d3d11.h>
-
-#pragma warning(push, 0)
-#include "ffnvcodec/nvEncodeAPI.h"
-#pragma warning(pop)
 
 #include "ombra/encode_target.h"
 #include "ombra/video_codec.h"
@@ -79,6 +72,10 @@ public:
     // The codec Open() actually opened: options.codec, or H.264 when that was AV1 and the GPU
     // can't encode it.
     virtual VideoCodec Codec() const = 0;
+    // The codec Open() will open when asked for `requested`, where that is known before opening
+    // (an encoder or API with no AV1); the bitrate is sized for it. A GPU without AV1 is only found
+    // inside Open, so it still answers `requested`.
+    virtual VideoCodec CodecFor(VideoCodec requested) const { return requested; }
 
     // The codec header pulled once at Open(): H.264 SPS/PPS in Annex-B (start-code-prefixed)
     // form, or the AV1 sequence header OBU. Every key frame also carries it in-band, but the
@@ -129,6 +126,9 @@ public:
     // The same fault as a stable token for error reports (the failing call and its status, no
     // sizes or driver text), under FaultReason()'s threading rule. Empty when not known.
     virtual std::string FaultCode() const { return {}; }
+    // FaultCode() when the NVIDIA driver predates every NVENC API this build carries (11.1, nvenc.h):
+    // a driver update fixes it, so the UI says so. The text is the Sentry issue's: keep it stable.
+    static constexpr const char* kFaultDriverTooOld = "driver older than the vendored nvEncodeAPI.h";
     // AUs that arrived only after the encoder's normal wait ran out, and the longest such wait.
     // Plain atomics: any thread may read them while the pacer runs.
     virtual uint64_t LateFrames() const { return 0; }
@@ -148,53 +148,6 @@ public:
     // *base-class* slice and leak the derived class's NVENC session on every teardown, silently
     // reintroducing the session-exhaustion bug this comment describes.
     virtual ~IVideoEncoder() = default;
-};
-
-// NVENC implementation of IVideoEncoder (AV1 or H.264). Loaded at runtime via LoadLibrary — no import lib,
-// no SDK install, only the vendored third_party/ffnvcodec/nvEncodeAPI.h.
-//
-// Synchronous mode, one registered D3D11 input texture, one bitstream buffer, since the driver
-// caps the NVENC API version.
-class NvencEncoder : public IVideoEncoder {
-public:
-    bool Open(ID3D11Device* device, uint32_t width, uint32_t height, uint32_t fps,
-              uint32_t bitrate_kbps, uint32_t keyframe_sec,
-              const EncoderOptions& options = {}) override;
-    bool TryOpen(ID3D11Device* device, uint32_t width, uint32_t height, uint32_t fps,
-                 uint32_t bitrate_kbps, uint32_t keyframe_sec,
-                 const EncoderOptions& options = {}) override;
-    VideoCodec Codec() const override { return codec_; }
-    const std::vector<uint8_t>& SequenceParams() const override { return sequence_params_; }
-    bool RegisterSlot(ID3D11Texture2D* tex, uint32_t width, uint32_t height) override;
-    AccessUnit EncodeSlot(uint32_t slot, uint32_t width, uint32_t height,
-                           uint64_t timestamp) override;
-    void UnlockLast() override;
-    bool               Faulted() const override { return faulted_.load(std::memory_order_acquire); }
-    const std::string& FaultReason() const override { return fault_reason_; }
-    std::string        FaultCode() const override { return fault_code_; }
-    void Close() override;
-
-    ~NvencEncoder() override { Close(); }
-
-private:
-    bool SupportsCodec(const GUID& codec_guid);
-    [[noreturn]] void DieNv(const char* what, NVENCSTATUS s);
-    // Non-fatal counterpart to DieNv, for the runtime-reachable calls in EncodeSlot/UnlockLast.
-    void ReportFault(const char* what, NVENCSTATUS s);
-
-    bool                                 nonfatal_open_ = false;  // set by TryOpen
-    HMODULE                              dll_ = nullptr;
-    NV_ENCODE_API_FUNCTION_LIST          fn_{};
-    void*                                enc_ = nullptr;
-    std::vector<NV_ENC_REGISTERED_PTR>   reg_;
-    NV_ENC_OUTPUT_PTR                    bs_  = nullptr;
-    bool                                 locked_ = false;
-    VideoCodec                           codec_ = VideoCodec::H264;
-    std::vector<uint8_t>                 sequence_params_;
-
-    std::atomic<bool> faulted_{false};
-    std::string       fault_reason_;
-    std::string       fault_code_;
 };
 
 // Factory: the one place a backend becomes a concrete encoder. Which backend (and which adapter)

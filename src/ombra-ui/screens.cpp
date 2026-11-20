@@ -885,17 +885,20 @@ void SettingsScreen::ApplyRecordingGpus(const ombra::JsonValue& status) {
     for (const auto& g : list->arr) {
         if (g.type != ombra::JsonValue::Type::Object) continue;
         recording_gpus_.push_back({str(g, "vendor"), str(g, "backend"), str(g, "name"), flag(g, "hevc"), flag(g, "av1"),
-                                   align(g, "av1_align_w"), align(g, "av1_align_h"), flag(g, "drives_display")});
+                                   align(g, "av1_align_w"), align(g, "av1_align_h"), flag(g, "drives_display"),
+                                   flag(g, "driver_too_old"), flag(g, "av1_needs_driver")});
     }
     recording_gpu_now_ = str(status, "encoder_adapter");
     recording_on_cpu_  = str(status, "encoder_backend") == "x264";
+    driver_too_old_    = str(status, "encoder_fallback") == "driver_too_old";
     display_owner_gpu_ = str(status, "gpu_display_owner");
     codec_now_         = str(status, "encoder_codec");
 }
 
 std::vector<ombra::RecordingGpuCaps> SettingsScreen::RecordingGpuCapsNow() const {
     std::vector<ombra::RecordingGpuCaps> caps;
-    for (const auto& g : recording_gpus_) caps.push_back({g.vendor, g.av1, g.av1_align_w, g.av1_align_h, g.drives_display});
+    for (const auto& g : recording_gpus_)
+        caps.push_back({g.vendor, g.av1, g.av1_align_w, g.av1_align_h, g.drives_display, !g.driver_too_old});
     return caps;
 }
 
@@ -907,7 +910,9 @@ const SettingsScreen::RecordingGpu* SettingsScreen::StagedRecordingGpu() const {
     return picked ? &recording_gpus_[static_cast<size_t>(picked - caps.data())] : nullptr;
 }
 
-void SettingsScreen::SeedRecordingGpusForSnapshot(bool cpu_fallback, bool panel, bool game_on_rtx) {
+void SettingsScreen::SeedRecordingGpusForSnapshot(bool cpu_fallback, bool panel, bool game_on_rtx,
+                                                  SnapshotNvidiaDriver driver) {
+    const bool driver_too_old = driver == SnapshotNvidiaDriver::TooOld;
     recording_gpus_ = {{"nvidia", "NVENC", "NVIDIA GeForce RTX 5060 Laptop GPU", true, true, 1, 1, !panel},
                        {"amd", "AMF", "AMD Radeon 780M Graphics", true, true, 64, 16, panel},
                        {"cpu", "x264", "CPU (x264)", false, false}};
@@ -916,8 +921,22 @@ void SettingsScreen::SeedRecordingGpusForSnapshot(bool cpu_fallback, bool panel,
     display_owner_gpu_ = owner;
     codec_now_         = "av1";
     recording_on_cpu_  = cpu_fallback;
+    driver_too_old_    = cpu_fallback && driver_too_old;
+    if (driver_too_old) {  // the probe lists it flagged, without codecs
+        recording_gpus_[0].driver_too_old = true;
+        recording_gpus_[0].hevc = recording_gpus_[0].av1 = false;
+        // With an AMD GPU, auto would record there; the CPU fallback is a desktop with only the RTX.
+        recording_gpus_.erase(recording_gpus_.begin() + 1);
+        recording_gpus_[0].drives_display = true;
+        display_owner_gpu_ = recording_gpus_[0].name;
+    }
+    if (driver == SnapshotNvidiaDriver::NoAv1) {  // the 11.1 copy: H.264 only
+        recording_gpus_[0].av1 = false;
+        recording_gpus_[0].av1_needs_driver = true;
+        codec_now_ = "h264";
+    }
     if (cpu_fallback) {
-        recording_gpu_now_ = "AMD Radeon 780M Graphics";  // the adapter capture runs on
+        recording_gpu_now_ = driver_too_old ? recording_gpus_[0].name : "AMD Radeon 780M Graphics";  // the adapter capture runs on
         codec_now_         = "h264";
     }
 }
@@ -2189,7 +2208,9 @@ void SettingsScreen::BuildReplayQualityPage() {
             // AV1 the staged encoder can't record: say so here; Advanced > Encoder explains why.
             if (const RecordingGpu* gpu = StagedRecordingGpu();
                 codec == "av1" && (recording_on_cpu_ || (gpu && (gpu->vendor == "cpu" || !gpu->av1)))) {
-                row->help = L"This GPU can't record AV1, so it falls back to H.264";
+                row->help = gpu && gpu->av1_needs_driver && !recording_on_cpu_
+                                ? L"Your NVIDIA driver is too old for AV1, so it falls back to H.264"
+                                : L"This GPU can't record AV1, so it falls back to H.264";
                 row->help_tone = SettingRow::Tone::Warning;
             }
             card->rows.push_back(row);
@@ -2976,9 +2997,10 @@ void SettingsScreen::BuildAdvancedEncoderPage() {
                                                                    : ShortGpuName(g.name));
             }
         }
+        // Warning tone marks the cause (a tile's driver, the AV1 row), not the CPU it fell back to.
         if (recording_on_cpu_ && pref == "auto") {
             automatic->note = L"Fell back to the CPU";
-            automatic->note_tone = SettingRow::Tone::Warning;
+            automatic->note_tone = SettingRow::Tone::Neutral;
         }
         add_tile(automatic, "auto");
 
@@ -2991,13 +3013,23 @@ void SettingsScreen::BuildAdvancedEncoderPage() {
                 tile->detail = L"x264 · heavy on the CPU";
                 if (recording_on_cpu_) {
                     tile->note = L"Recording now";
-                    tile->note_tone = SettingRow::Tone::Warning;
+                    tile->note_tone = SettingRow::Tone::Neutral;
                 }
                 add_tile(tile, g.vendor);
                 continue;
             }
             tile->title = ShortGpuName(g.name);
             tile->detail = Utf8ToWide(g.backend) + (g.drives_display ? L" · drives the display" : L"");
+            if (g.driver_too_old) {
+                // Pale but still selectable: a saved pick stays visible, and the next probe after a
+                // driver update lists it as usual.
+                tile->chips.clear();
+                tile->dimmed    = true;
+                tile->note      = L"Driver too old";
+                tile->note_tone = SettingRow::Tone::Warning;
+                add_tile(tile, g.vendor);
+                continue;
+            }
             if (g.av1) tile->chips.push_back(L"AV1");
             if (!recording_on_cpu_ && g.name == recording_gpu_now_) {
                 tile->note = L"Recording now";
@@ -3009,8 +3041,12 @@ void SettingsScreen::BuildAdvancedEncoderPage() {
 
         if (recording_gpus_.empty()) {
             card->help = L"Waiting for the engine to report its GPUs.";
+        } else if (recording_on_cpu_ && pref != "cpu" && driver_too_old_) {
+            card->help = L"Your NVIDIA driver is too old for " OMBRA_PRODUCT_NAME "'s GPU encoder, so it records on the CPU. "
+                         L"That takes several cores and can lower your game's FPS. Update the driver from NVIDIA's "
+                         L"website or the NVIDIA app, then restart " OMBRA_PRODUCT_NAME ".";
         } else if (recording_on_cpu_ && pref != "cpu") {
-            card->help = L"No GPU encoder would start, so " OMBRA_PRODUCT_NAME " records on the CPU. That takes several cores and can "
+            card->help =L"No GPU encoder would start, so " OMBRA_PRODUCT_NAME " records on the CPU. That takes several cores and can "
                          L"lower your game's FPS; updating the GPU driver usually fixes it.";
         } else if (pref == "cpu") {
             card->help = L"The CPU encoder works on any PC but takes several cores while recording, which can lower "
@@ -3034,6 +3070,11 @@ void SettingsScreen::BuildAdvancedEncoderPage() {
         auto size_text = [](ombra::VideoSize sz) { return std::to_wstring(sz.width) + L"×" + std::to_wstring(sz.height); };
         if (av1 && ((staged_gpu && staged_gpu->vendor == "cpu") || recording_on_cpu_)) {
             auto row = row_of(L"AV1", L"The CPU encoder records H.264: AV1 on the CPU is too slow to record live.", {});
+            row->help_tone = SettingRow::Tone::Warning;
+            card->rows.push_back(row);
+        } else if (av1 && staged_gpu && staged_gpu->av1_needs_driver) {
+            auto row = row_of(L"AV1", L"Your NVIDIA driver is too old for AV1, so this GPU records H.264. Update the "
+                                      L"driver from NVIDIA's website or the NVIDIA app, then restart " OMBRA_PRODUCT_NAME ".", {});
             row->help_tone = SettingRow::Tone::Warning;
             card->rows.push_back(row);
         } else if (av1 && staged_gpu && !staged_gpu->av1) {

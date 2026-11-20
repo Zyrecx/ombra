@@ -12,7 +12,9 @@ This is what OBS does.
 (copy, modify, merge, publish, distribute, sublicense, sell — attribution only). That is
 GPLv2-compatible, so vendoring it does not conflict with Ombra's licence.
 
-**To update:** re-copy `include/ffnvcodec/nvEncodeAPI.h` from a newer tag and bump the tag above.
+**To update:** re-copy `include/ffnvcodec/nvEncodeAPI.h` from a newer tag, bump the tag above, and
+bump `kNvencApi13_0` (`src/ombra/nvenc.h`): `nvenc13.cpp`'s static_assert fails until both agree.
+Only `nvenc13.cpp` includes this header; drivers older than it use `third_party/ffnvcodec-11.1`.
 
 **Why 13.0 and not 13.1:** driver 596.36 reports `NvEncodeAPIGetMaxSupportedVersion` = 13.0, and
 NVENC refuses an `apiVersion` newer than the driver. Bump this only alongside a driver that

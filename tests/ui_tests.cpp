@@ -3553,8 +3553,9 @@ TEST_CASE("ui: the Recording GPU card stages encode.adapter; no B-frames or look
     CHECK(preset->help.rfind(L"On AMD", 0) == 0);
 }
 
-// No GPU encoder would open, so Auto records on the CPU: the warning sits on the tiles that caused it.
-TEST_CASE("ui: a CPU fallback warns on the Auto and CPU tiles") {
+// No GPU encoder would open, so Auto records on the CPU: the card says so, but the Auto and CPU
+// tiles only state it; warning tone is for a cause (the AV1 row, a GPU's driver).
+TEST_CASE("ui: a CPU fallback states itself on the Auto and CPU tiles without warning tone") {
     FakeScreenHost host;
     SettingsScreen screen(&host);
     const auto specs = RealSpecs();
@@ -3571,13 +3572,65 @@ TEST_CASE("ui: a CPU fallback warns on the Auto and CPU tiles") {
     auto tiles = CardTiles(card);
     REQUIRE(tiles.size() == 4);
     CHECK(tiles[0]->note == L"Fell back to the CPU");
-    CHECK(tiles[0]->note_tone == SettingRow::Tone::Warning);
+    CHECK(tiles[0]->note_tone == SettingRow::Tone::Neutral);
     CHECK(tiles[1]->note.empty());
     CHECK(tiles[3]->note == L"Recording now");
-    CHECK(tiles[3]->note_tone == SettingRow::Tone::Warning);
+    CHECK(tiles[3]->note_tone == SettingRow::Tone::Neutral);
     // AV1 is the default codec; the CPU records H.264, and a row says so.
     auto av1 = RowTitled(*card, L"AV1");
     REQUIRE(av1);
+    CHECK(av1->help_tone == SettingRow::Tone::Warning);
+}
+
+// The NVIDIA driver predates the NVENC API: its tile is listed dimmed, says why, and the card
+// tells the user to update.
+TEST_CASE("ui: an NVIDIA driver too old dims its tile and names the cause") {
+    FakeScreenHost host;
+    SettingsScreen screen(&host);
+    const auto specs = RealSpecs();
+    const auto config = DefaultConfigJson();
+    screen.InitSchema(specs, &config);
+    screen.SeedRecordingGpusForSnapshot(/*cpu_fallback=*/true, false, false,
+                                        SettingsScreen::SnapshotNvidiaDriver::TooOld);
+    screen.SetActiveRail(kRailAdvanced);
+    screen.SetActiveSubTab(0);
+    screen.Layout(D2D1::RectF(0, 0, 1280, 800), 1.0f);
+
+    auto card = ContainerTitled(screen, L"Recording GPU");
+    REQUIRE(card);
+    CHECK(card->help.rfind(L"Your NVIDIA driver is too old", 0) == 0);
+    auto tiles = CardTiles(card);
+    REQUIRE(tiles.size() == 3);  // Auto, the RTX, the CPU: a desktop without another GPU
+    CHECK(tiles[1]->dimmed);
+    CHECK(tiles[1]->chips.empty());
+    CHECK(tiles[1]->note == L"Driver too old");
+    CHECK(tiles[1]->note_tone == SettingRow::Tone::Warning);
+    CHECK(tiles[0]->note_tone == SettingRow::Tone::Neutral);
+}
+
+// A driver between NVENC API 11.1 and 13.0 records on the RTX through the 11.1 copy, H.264 only:
+// the tile is a normal one without AV1, and the AV1 row names the driver instead of the GPU.
+TEST_CASE("ui: a driver too old for AV1 says the driver, not the GPU, lacks it") {
+    FakeScreenHost host;
+    SettingsScreen screen(&host);
+    const auto specs = RealSpecs();
+    const auto config = DefaultConfigJson();
+    screen.InitSchema(specs, &config);
+    screen.SeedRecordingGpusForSnapshot(false, false, false, SettingsScreen::SnapshotNvidiaDriver::NoAv1);
+    screen.SetActiveRail(kRailAdvanced);
+    screen.SetActiveSubTab(0);
+    screen.Layout(D2D1::RectF(0, 0, 1280, 800), 1.0f);
+
+    auto card = ContainerTitled(screen, L"Recording GPU");
+    REQUIRE(card);
+    auto tiles = CardTiles(card);
+    REQUIRE(tiles.size() == 4);
+    CHECK_FALSE(tiles[1]->dimmed);
+    CHECK(tiles[1]->chips == std::vector<std::wstring>{L"H.264"});
+    CHECK(tiles[1]->note == L"Recording now");
+    auto av1 = RowTitled(*card, L"AV1");  // AV1 is the default codec
+    REQUIRE(av1);
+    CHECK(av1->help.rfind(L"Your NVIDIA driver is too old for AV1", 0) == 0);
     CHECK(av1->help_tone == SettingRow::Tone::Warning);
 }
 

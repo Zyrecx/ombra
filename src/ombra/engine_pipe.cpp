@@ -868,6 +868,10 @@ JsonValue PipeRequest::OnGetStatus() {
     resp.Set("gpu_display_owner", gpu_summary.display_owner_description.empty()
                  ? JsonValue{} : JsonValue::MakeStr(NarrowUtf8(gpu_summary.display_owner_description)));
     resp.Set("encoder_backend", JsonValue::MakeStr(BackendName(encode_adapter.backend)));
+    // Why it is on the CPU when that wasn't the pick: only a reason the user can act on.
+    if (encode_adapter.backend == EncoderBackend::X264 &&
+        supervisor.CpuFallbackCode() == IVideoEncoder::kFaultDriverTooOld)
+        resp.Set("encoder_fallback", JsonValue::MakeStr("driver_too_old"));
     // What the running pipeline opened (AV1 falls back to H.264 inside the encoder); absent
     // before the first pipeline build.
     if (const auto params = supervisor.CurrentParams(); params.width > 0)
@@ -901,6 +905,8 @@ JsonValue PipeRequest::OnGetStatus() {
             o.Set("av1_align_w", JsonValue::MakeNum(g.av1_align_w));
             o.Set("av1_align_h", JsonValue::MakeNum(g.av1_align_h));
             o.Set("drives_display", JsonValue::MakeBool(g.drives_display));
+            if (g.driver_too_old) o.Set("driver_too_old", JsonValue::MakeBool(true));
+            if (g.av1_needs_driver) o.Set("av1_needs_driver", JsonValue::MakeBool(true));
             gpus.arr.push_back(std::move(o));
         }
         resp.Set("recording_gpus", std::move(gpus));

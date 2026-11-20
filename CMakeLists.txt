@@ -119,6 +119,9 @@ add_library(ombra_core STATIC
     src/ombra/games.cpp
     src/ombra/game_library.cpp
     src/ombra/encoder.cpp
+    src/ombra/nvenc.cpp
+    src/ombra/nvenc13.cpp
+    src/ombra/nvenc11.cpp
     src/ombra/encode_target.cpp
     src/ombra/amf_encoder.cpp
     src/ombra/x264_encoder.cpp

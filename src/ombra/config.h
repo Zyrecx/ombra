@@ -455,10 +455,13 @@ struct RecordingGpuCaps {
     bool        av1 = false;
     uint32_t    av1_align_w = 1, av1_align_h = 1;
     bool        drives_display = false;  // owns the recorded monitor
+    bool        usable = true;  // false: listed only to say why it can't record (a driver too old)
 };
 // The GPU encode.adapter resolves to among `gpus`, as PickEncodeAdapter orders it: the named
 // vendor if present, else the GPU that drives the display, else NVIDIA, AMD, the CPU. Null when
 // the list is empty. Auto's pick with no game running: one on the NVIDIA GPU moves it there.
+// An unusable GPU is passed over (auto records on the next one); named, it gives the CPU, as the
+// supervisor's fallback does.
 const RecordingGpuCaps* PickRecordingGpu(const std::vector<RecordingGpuCaps>& gpus, const std::string& adapter);
 // The codec a pipeline records for these settings: H.264 on a GPU (or the CPU) without AV1, or
 // where PlanEncode falls back; else the requested one. An empty `gpus` (not probed: tests, an older

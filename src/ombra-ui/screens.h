@@ -411,7 +411,11 @@ public:
     void SeedMemoryForSnapshot(bool with_projection);
     // --snapshots only: this laptop's two GPUs, the RTX driving the display and recording (`panel`: the
     // 780M does both, the laptop's own screen; `game_on_rtx`: and a game on the RTX records there).
-    void SeedRecordingGpusForSnapshot(bool cpu_fallback = false, bool panel = false, bool game_on_rtx = false);
+    // `driver`: the RTX's driver is current, older than any NVENC API this build carries (records on
+    // the CPU), or stops below the API with AV1 (records H.264 through the 11.1 copy).
+    enum class SnapshotNvidiaDriver { Current, TooOld, NoAv1 };
+    void SeedRecordingGpusForSnapshot(bool cpu_fallback = false, bool panel = false, bool game_on_rtx = false,
+                                      SnapshotNvidiaDriver driver = SnapshotNvidiaDriver::Current);
     // --snapshots only: a list_games reply like this laptop's (17 entries, some not games, two
     // added by hand including a javaw.exe) plus two "looked like a game" apps.
     void SeedGamesForSnapshot();
@@ -905,9 +909,12 @@ private:
         bool        hevc = false, av1 = false;
         uint32_t    av1_align_w = 1, av1_align_h = 1;  // sizes its AV1 codes exactly (ombra::PlanEncode)
         bool        drives_display = false;  // owns the recorded monitor: auto's first choice
+        bool        driver_too_old = false;  // its encoder won't open until the driver is updated
+        bool        av1_needs_driver = false;  // has AV1, but its driver's encoder API doesn't
     };
     std::vector<RecordingGpu> recording_gpus_;
     bool                      recording_on_cpu_ = false;  // get_status.encoder_backend == "x264"
+    bool                      driver_too_old_   = false;  // get_status.encoder_fallback == "driver_too_old"
     std::string               recording_gpu_now_;  // the adapter the engine records on right now
     std::string               codec_now_;          // get_status encoder_codec: "av1"/"h264", "" before a pipeline runs
     std::string               display_owner_gpu_;

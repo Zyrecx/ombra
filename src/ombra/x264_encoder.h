@@ -38,6 +38,7 @@ public:
                  const EncoderOptions& options = {}) override;
     // Always H.264: an AV1 request records H.264, the same fallback as a GPU without AV1.
     VideoCodec Codec() const override { return VideoCodec::H264; }
+    VideoCodec CodecFor(VideoCodec) const override { return VideoCodec::H264; }
     const std::vector<uint8_t>& SequenceParams() const override { return sequence_params_; }
     bool RegisterSlot(ID3D11Texture2D* tex, uint32_t width, uint32_t height) override;
     AccessUnit EncodeSlot(uint32_t slot, uint32_t width, uint32_t height,

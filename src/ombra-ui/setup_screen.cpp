@@ -295,6 +295,7 @@ void SetupScreen::Open(const JsonValue* status, const JsonValue* config) {
     if (status) {
         if (const JsonValue* list = status->Find("recording_gpus"); list && list->type == JsonValue::Type::Array) {
             for (const JsonValue& g : list->arr) {
+                if (BoolOf(&g, "driver_too_old", false)) continue;  // can't record: nothing to recommend
                 GpuInfo info;
                 info.vendor = StrOf(&g, "vendor", "");
                 info.name = Wide(StrOf(&g, "name", ""));

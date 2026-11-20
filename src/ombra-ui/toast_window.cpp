@@ -118,6 +118,7 @@ bool LookupToastInfo(const std::wstring& event, ToastInfo* out) {
     if (event == L"buffer_off")  { *out = {IconType::Replay, L"Buffer Off", ToastTone::Muted}; return true; }
     // The engine fell back to x264 because no GPU encoder would open (supervisor.h).
     if (event == L"cpu_encoder") { *out = {IconType::Alert, L"GPU encoder failed \u2014 recording on the CPU", ToastTone::Warning}; return true; }
+    if (event == L"cpu_encoder_old_driver") { *out = {IconType::Alert, L"NVIDIA driver too old — recording on the CPU", ToastTone::Warning}; return true; }
     return false;
 }
 

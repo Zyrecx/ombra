@@ -18,6 +18,7 @@
 #include "ombra/controller.h"
 #include "ombra/encode_target.h"
 #include "ombra/encoder.h"
+#include "ombra/nvenc.h"
 #include "ombra/engine_pipe.h"
 #include "ombra/json.h"
 #include "ombra/audio_tracks.h"
@@ -290,6 +291,59 @@ TEST_CASE("gpu: an AV1 pipeline on a GPU without AV1 saves H.264" * doctest::tes
     SetAv1UnsupportedForTest(false);
 }
 
+// A driver that stops at NVENC API 11.x records through the 11.1 copy: AV1 asked for, H.264 saved.
+TEST_CASE("gpu: NVENC through API 11.1 in the real pipeline saves a clean H.264 clip" * doctest::test_suite("gpu")) {
+    NvencApiCapForTest cap(kNvencApi11_1);
+    SaveAv1Through("nvidia", L"nvenc-api11", "h264", VideoCodec::H264);
+}
+
+// Below 11.1 the pipeline records on the CPU, and the fallback names the driver for the notice.
+TEST_CASE("gpu: an NVIDIA driver below API 11.1 falls back to x264 and names the driver" * doctest::test_suite("gpu")) {
+    NvencApiCapForTest cap(0xB0);
+    EncoderOptions opts;
+    opts.adapter = "nvidia";
+    PipelineRig      rig(L"nvenc-too-old", opts);
+    std::atomic<int> fallbacks{0};
+    std::string      code_seen;
+    rig.supervisor.SetEncoderFallbackCallback([&](const std::string& code) {
+        code_seen = code;
+        ++fallbacks;
+    });
+    rig.Start();
+    CHECK(rig.supervisor.CurrentEncodeAdapter().backend == EncoderBackend::X264);
+    CHECK(rig.supervisor.CpuFallbackCode() == IVideoEncoder::kFaultDriverTooOld);
+    CHECK(fallbacks.load() == 1);
+    CHECK(code_seen == IVideoEncoder::kFaultDriverTooOld);
+    std::this_thread::sleep_for(3500ms);
+    REQUIRE(rig.Save(QpcNow()) == SaveOutcome::kSaved);
+    CheckCleanH264(rig.SavedPath(), 320, 180);
+}
+
+// Switching to the NVIDIA GPU in Settings with a driver below 11.1: straight to the CPU, without
+// the backoff through builds that can't open (1 + 2 s with nothing recording).
+TEST_CASE("gpu: picking an NVIDIA GPU whose driver is too old records on the CPU at once" * doctest::test_suite("gpu")) {
+    NvencApiCapForTest cap(0xB0);
+    EncoderOptions     opts;
+    opts.adapter = "cpu";
+    PipelineRig rig(L"nvenc-too-old-switch", opts);
+    rig.Start();
+    REQUIRE(rig.supervisor.CurrentEncodeAdapter().backend == EncoderBackend::X264);
+
+    PipelineSupervisor::SupervisorReconfigParams req;
+    req.tier             = ApplyTier::Rebuild;
+    req.fps              = kFps;
+    req.bitrate_kbps     = kBitrateKbps;
+    req.keyframe_sec     = kKeyframeSec;
+    req.encoder_opts     = opts;
+    req.encoder_opts.adapter = "nvidia";
+    const auto t0 = std::chrono::steady_clock::now();
+    REQUIRE(rig.supervisor.RequestReconfigure(req));
+    REQUIRE(WaitFor([&] { return !rig.supervisor.CpuFallbackCode().empty(); }, 15000ms));
+    CHECK(std::chrono::steady_clock::now() - t0 < 1500ms);
+    CHECK(rig.supervisor.CpuFallbackCode() == IVideoEncoder::kFaultDriverTooOld);
+    CHECK(rig.supervisor.CurrentEncodeAdapter().backend == EncoderBackend::X264);
+}
+
 TEST_CASE("gpu: a synthetic source through the real pipeline saves a clean constant-rate clip" *
           doctest::test_suite("gpu")) {
     PipelineRig rig(L"basic");
@@ -468,6 +522,7 @@ namespace {
 // A hardware encoder that never opens: a broken driver, an exhausted NVENC session limit.
 class UnopenableEncoder final : public IVideoEncoder {
 public:
+    explicit UnopenableEncoder(std::string code = {}) : code_(std::move(code)) {}
     bool Open(ID3D11Device*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, const EncoderOptions&) override {
         FAIL("a hardware encoder must open non-fatally");
         return false;
@@ -483,9 +538,11 @@ public:
     void               UnlockLast() override {}
     bool               Faulted() const override { return faulted_; }
     const std::string& FaultReason() const override { return reason_; }
+    std::string        FaultCode() const override { return code_; }
     void               Close() override {}
 
 private:
+    std::string          code_;
     bool                 faulted_ = false;
     std::string          reason_  = "injected: session limit";
     std::vector<uint8_t> none_;
@@ -503,8 +560,8 @@ TEST_CASE("gpu: a hardware encoder that won't open falls back to x264, once per 
         if (b == EncoderBackend::X264) return CreateVideoEncoder(b);
         return std::make_unique<UnopenableEncoder>();
     });
-    rig.supervisor.SetEncoderFallbackCallback([&](const std::string& reason) {
-        CHECK(reason.find("injected") != std::string::npos);
+    rig.supervisor.SetEncoderFallbackCallback([&](const std::string& code) {
+        CHECK(code.empty());  // a fault without a known cause: the generic notice
         ++fallbacks;
     });
     rig.Start();  // startup: falls back on the first failure instead of dying
@@ -540,12 +597,14 @@ public:
         return inner_->TryOpen(d, w, h, fps, kbps, key, o);
     }
     VideoCodec                  Codec() const override { return inner_->Codec(); }
+    VideoCodec                  CodecFor(VideoCodec c) const override { return inner_->CodecFor(c); }
     const std::vector<uint8_t>& SequenceParams() const override { return inner_->SequenceParams(); }
     bool RegisterSlot(ID3D11Texture2D* t, uint32_t w, uint32_t h) override { return inner_->RegisterSlot(t, w, h); }
     AccessUnit EncodeSlot(uint32_t a, uint32_t b, uint32_t c, uint64_t d) override { return inner_->EncodeSlot(a, b, c, d); }
     void               UnlockLast() override { inner_->UnlockLast(); }
     bool               Faulted() const override { return inner_->Faulted(); }
     const std::string& FaultReason() const override { return inner_->FaultReason(); }
+    std::string        FaultCode() const override { return inner_->FaultCode(); }
     void               Close() override { inner_->Close(); }
 
 private:
@@ -575,6 +634,27 @@ TEST_CASE("gpu: a fallback that changes the codec opens at that codec's preset b
     rig.Start();
     CHECK(rig.supervisor.CurrentEncodeAdapter().backend == EncoderBackend::X264);
     CHECK(x264_kbps.load() == expect);
+}
+
+// A driver at NVENC API 11.x with AV1 asked for: the preset was sized for the H.264 it records, and
+// the 11.1 copy opens at that bitrate, not AV1's smaller share.
+TEST_CASE("gpu: NVENC through API 11.1 opens at H.264's preset bitrate when AV1 is asked for" *
+          doctest::test_suite("gpu")) {
+    NvencApiCapForTest cap(kNvencApi11_1);
+    EncoderOptions     opts;
+    opts.adapter              = "nvidia";
+    opts.codec                = VideoCodec::AV1;
+    opts.preset_bitrate_codec = VideoCodec::H264;  // RecordedCodec: the probe lists no AV1 there
+    std::atomic<uint32_t> nvenc_kbps{0};
+    PipelineRig rig(L"nvenc-api11-bitrate", opts);
+    rig.supervisor.SetEncoderFactory([&](EncoderBackend b) -> std::unique_ptr<IVideoEncoder> {
+        if (b == EncoderBackend::Nvenc) return std::make_unique<BitrateSpyEncoder>(CreateVideoEncoder(b), nvenc_kbps);
+        return CreateVideoEncoder(b);
+    });
+    rig.Start();
+    REQUIRE(rig.supervisor.CurrentEncodeAdapter().backend == EncoderBackend::Nvenc);
+    CHECK(rig.supervisor.CurrentParams().codec == VideoCodec::H264);
+    CHECK(nvenc_kbps.load() == kBitrateKbps);
 }
 
 // Mid driver install: NVIDIA is listed but can't encode. Stays on a working AMD, not x264.
@@ -670,6 +750,46 @@ TEST_CASE("gpu: auto records on the other GPU when the display GPU's encoder won
     CHECK(rig.supervisor.CurrentEncodeAdapter().backend == EncoderBackend::Nvenc);
     CHECK(amf_tries.load() == 1);
     CHECK(fallbacks.load() == 0);
+}
+
+// Auto on the NVIDIA GPU, whose driver is below every NVENC API: AMD records, and the return check
+// never tears it down to try NVENC again (the driver won't change until an update and a restart).
+TEST_CASE("gpu: auto never returns to an NVIDIA GPU whose driver is too old" * doctest::test_suite("gpu")) {
+    SetAmfAdapterCaps(AllAmdH264Caps());
+    const auto adapters = EnumerateAdapters(nullptr);
+    const auto amd = PickEncodeAdapter(adapters, "amd", AmfAdapterCapsSnapshot());
+    const auto nvidia = PickEncodeAdapter(adapters, "nvidia", {});
+    if (!amd || amd->backend != EncoderBackend::Amf || !nvidia || nvidia->backend != EncoderBackend::Nvenc) {
+        MESSAGE("needs both an AMD and an NVIDIA GPU: skipped");
+        return;
+    }
+    EncoderOptions opts;
+    opts.adapter = "auto";
+    // Declared before the rig: its destructor joins the watchdog that calls the lambdas reading them.
+    std::atomic<int> fallbacks{0}, nvenc_tries{0};
+    PipelineRig rig(L"adapter-driver-too-old", opts);
+    rig.supervisor.SetAdapterResolver(
+        [&](const LUID* exclude, const LUID*) -> std::optional<EncodeAdapter> {
+            return exclude && SameLuid(*exclude, nvidia->luid) ? *amd : *nvidia;
+        },
+        200ms);
+    rig.supervisor.SetEncoderFactory([&](EncoderBackend b) -> std::unique_ptr<IVideoEncoder> {
+        if (b == EncoderBackend::Nvenc) {
+            ++nvenc_tries;
+            return std::make_unique<UnopenableEncoder>(IVideoEncoder::kFaultDriverTooOld);
+        }
+        return CreateVideoEncoder(b);
+    });
+    rig.supervisor.SetEncoderFallbackCallback([&](const std::string&) { ++fallbacks; });
+    rig.Start();
+    REQUIRE(WaitFor([&] { return rig.supervisor.CurrentEncodeAdapter().backend == EncoderBackend::Amf; }, 5000ms));
+    const int opens = rig.scene->opens.load();
+    std::this_thread::sleep_for(2500ms);  // a dozen return checks
+    CHECK(rig.scene->opens.load() == opens);
+    CHECK(rig.supervisor.CurrentEncodeAdapter().backend == EncoderBackend::Amf);
+    CHECK(nvenc_tries.load() == 1);
+    CHECK(fallbacks.load() == 0);
+    CHECK(rig.Save(QpcNow()) == SaveOutcome::kSaved);
 }
 
 TEST_CASE("gpu: audio placed by QPC lines up with video through the real pacer" *

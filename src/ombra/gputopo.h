@@ -52,8 +52,10 @@ std::vector<AdapterFacts> EnumerateAdapters(HMONITOR target_monitor, bool driver
 // `fail_reason`, not exit()'d.
 struct NvencProbe {
     bool        session_ok = false;
-    bool        h264 = false, hevc = false, av1 = false;
+    bool        h264 = false, hevc = false, av1 = false;  // what this build records there
+    bool        av1_needs_newer_driver = false;  // the GPU has AV1, the driver's NVENC API doesn't (nvenc.h)
     std::string driver_version;   // "13.0" style, from NvEncodeAPIGetMaxSupportedVersion
+    bool        driver_too_old = false;  // below every NVENC API this build carries: no session tried
     std::string fail_reason;
 };
 NvencProbe ProbeNvenc(IDXGIAdapter1* adapter);
@@ -134,6 +136,8 @@ struct StartupGpuSummary {
         bool         hevc = false, av1 = false;
         uint32_t     av1_align_w = 1, av1_align_h = 1;  // EncodeAdapter's, for the UI's Codec card
         bool         drives_display = false;  // owns the first recorded monitor: auto records here
+        bool         driver_too_old = false;  // NVENC won't open until the driver is updated
+        bool         av1_needs_driver = false;  // records H.264 only until the driver is updated
     };
     std::vector<RecordingGpu> recording_gpus;
 };

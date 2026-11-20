@@ -121,8 +121,9 @@ public:
     void SetEncoderFactory(EncoderFactory factory) { encoder_factory_ = std::move(factory); }
 
     // Called on the watchdog thread when a build falls back to the CPU encoder because the hardware
-    // one wouldn't open (OpenEncodeStage). Set before Start(). The engine shows a toast.
-    using EncoderFallbackCallback = std::function<void(const std::string& reason)>;
+    // one wouldn't open (OpenEncodeStage), with the hardware encoder's FaultCode(). Set before
+    // Start(). The engine shows a toast.
+    using EncoderFallbackCallback = std::function<void(const std::string& fault_code)>;
     void SetEncoderFallbackCallback(EncoderFallbackCallback cb) { encoder_fallback_cb_ = std::move(cb); }
 
     // Called on the watchdog thread when the ring's file became unusable and the buffer moved to RAM
@@ -183,6 +184,9 @@ public:
     // The adapter and backend the most recent generation was built on (encode_target.h). Before the
     // first build: a default (NVENC, zero LUID). Safe from any thread.
     EncodeAdapter CurrentEncodeAdapter() const;
+    // The hardware encoder's FaultCode() while recording on the CPU after it would not open; empty
+    // otherwise.
+    std::string CpuFallbackCode() const;
 
     // A barrier caller, with resolution change, fault-rebuild and save.overlap_policy=truncate
     // (ring.h). Disarming tears the current generation down and leaves it down — the watchdog
@@ -383,6 +387,9 @@ private:
     // Auto's pick whose encoder wouldn't open, so it went to the other GPU: later builds skip it, and
     // only the return check (ReturnToPickedAdapter, with its backoff) tries it again.
     std::optional<LUID>      refused_gpu_;
+    // A GPU whose driver is below every NVENC API this build carries: auto skips it for good (an
+    // update needs an engine restart anyway). Watchdog thread only.
+    std::optional<LUID>      unusable_gpu_;
     // SetGameGpu: the latest value, and when it was cleared (QPC; 0 while set).
     mutable std::mutex       game_gpu_mutex_;
     std::optional<LUID>      game_gpu_;
@@ -410,6 +417,7 @@ private:
     mutable std::mutex   params_mutex_;
     PipelineParams        params_;
     EncodeAdapter         encode_adapter_;  // guarded by params_mutex_
+    std::string           cpu_fallback_code_;  // guarded by params_mutex_
 
     mutable std::mutex   stats_mutex_;
     RunStats              last_stats_;

@@ -5,6 +5,7 @@
 #include "ombra/config.h"
 #include "ombra/encode_target.h"
 #include "ombra/gputopo.h"
+#include "ombra/nvenc.h"
 #include "ombra-ui/monitor_adapter.h"
 
 #include <algorithm>
@@ -183,6 +184,17 @@ TEST_CASE("PickRecordingGpu mirrors auto: the GPU that drives the display, else 
     CHECK(PickRecordingGpu(gpus, "auto")->vendor == "amd");
 }
 
+TEST_CASE("PickRecordingGpu passes over a GPU whose driver is too old, as the supervisor does") {
+    // HDMI on the RTX, its driver below every NVENC API: auto records on the AMD GPU.
+    std::vector<RecordingGpuCaps> gpus = {{"nvidia", false, 1, 1, true, false}, {"amd", true, 64, 16}, {"cpu"}};
+    CHECK(PickRecordingGpu(gpus, "auto")->vendor == "amd");
+    CHECK(RecordedCodec(gpus, "auto", "av1", "pad", {1920, 1080}) == VideoCodec::AV1);
+    // Named, it falls back to the CPU like the encoder does.
+    CHECK(PickRecordingGpu(gpus, "nvidia")->vendor == "cpu");
+    gpus.erase(gpus.begin() + 1);
+    CHECK(PickRecordingGpu(gpus, "auto")->vendor == "cpu");
+}
+
 TEST_CASE("PickEncodeAdapter: cpu captures on the adapter that drives a display") {
     // Hybrid laptop: the RTX enumerates first but the panel hangs off the iGPU.
     const std::vector<AdapterFacts> hybrid = {Adapter(kVendorNvidia, 1, L"RTX"),
@@ -271,6 +283,25 @@ TEST_CASE("ClassifyForEncoder: topology follows the recording adapter, not the v
     CHECK(ClassifyForEncoder(summary, LUID{}) == Topology::T5);      // nothing built yet / no encoder
     summary.encoder_available = false;
     CHECK(ClassifyForEncoder(summary, LUID{2, 0}) == Topology::T5);
+}
+
+// The driver's NVENC API picks the vendored copy: 13.0 from driver 570, 11.1 from 471.41, else none.
+TEST_CASE("NvencApiFor picks the newest vendored NVENC API the driver accepts") {
+    CHECK(NvencApiFor(0) == NvencApi::TooOld);
+    CHECK(NvencApiFor(0xB0) == NvencApi::TooOld);  // 11.0
+    CHECK(NvencApiFor(0xB1) == NvencApi::V11_1);
+    CHECK(NvencApiFor(0xC2) == NvencApi::V11_1);  // 12.2: a 12.x driver still refuses 13.0 structs
+    CHECK(NvencApiFor(0xD0) == NvencApi::V13_0);
+    CHECK(NvencApiFor(0xD1) == NvencApi::V13_0);
+}
+
+TEST_CASE("NvencEffectiveMaxApi caps the driver's API only downwards") {
+    SetNvencMaxApiForTest(0xB1);
+    CHECK(NvencEffectiveMaxApi(0xD0) == 0xB1);
+    CHECK(NvencEffectiveMaxApi(0xA0) == 0xA0);  // a cap never raises an older driver
+    CHECK(NvencEffectiveMaxApi(0) == 0);
+    SetNvencMaxApiForTest(0);
+    CHECK(NvencEffectiveMaxApi(0xD0) == 0xD0);
 }
 
 }  // namespace ombra::test

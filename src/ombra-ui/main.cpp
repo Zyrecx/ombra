@@ -323,6 +323,16 @@ void RenderSnapshots(const std::function<void(bool, const char*)>& check) {
                 { L"out\\snapshots\\settings_advanced_encoder_cpu_fallback.png", ombra_ui::kRailAdvanced, 0, [](ombra_ui::SettingsScreen& s) {
                       s.SeedRecordingGpusForSnapshot(/*cpu_fallback=*/true);
                   } },
+                // The same, because the NVIDIA driver predates the NVENC API this build needs.
+                { L"out\\snapshots\\settings_advanced_encoder_old_driver.png", ombra_ui::kRailAdvanced, 0, [](ombra_ui::SettingsScreen& s) {
+                      s.SeedRecordingGpusForSnapshot(/*cpu_fallback=*/true, false, false,
+                                                     ombra_ui::SettingsScreen::SnapshotNvidiaDriver::TooOld);
+                  } },
+                // A driver between NVENC API 11.1 and 13.0: the RTX records H.264, and AV1 waits for an update.
+                { L"out\\snapshots\\settings_advanced_encoder_driver_no_av1.png", ombra_ui::kRailAdvanced, 0, [](ombra_ui::SettingsScreen& s) {
+                      s.SeedRecordingGpusForSnapshot(false, false, false,
+                                                     ombra_ui::SettingsScreen::SnapshotNvidiaDriver::NoAv1);
+                  } },
                 { L"out\\snapshots\\settings_advanced_encoder_amd.png", ombra_ui::kRailAdvanced, 0, [](ombra_ui::SettingsScreen& s) {
                       s.SeedRecordingGpusForSnapshot();
                       s.SeedSourceSizeForSnapshot(1920, 1080);

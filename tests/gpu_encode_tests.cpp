@@ -16,6 +16,7 @@
 #include "ombra/config.h"
 #include "ombra/encode_target.h"
 #include "ombra/encoder.h"
+#include "ombra/nvenc.h"
 #include "ombra/x264_encoder.h"
 
 #include <optional>
@@ -298,6 +299,71 @@ TEST_CASE("gpu: an encoder asked for AV1 on a GPU without it opens H.264" * doct
         amf->Close();
     }
     SetAv1UnsupportedForTest(false);
+}
+
+namespace {
+
+}  // namespace
+
+// A driver from 471.41 to 569 stops at API 11.x: the 11.1 copy records H.264 with the same colours.
+TEST_CASE("gpu: NVENC through API 11.1 round-trips solid colours and tags the stream BT.709 limited" *
+          doctest::test_suite("gpu")) {
+    NvencApiCapForTest cap(kNvencApi11_1);
+    RoundTripColours(NvidiaAdapter(), L"colours-api11.h264");
+}
+
+TEST_CASE("gpu: NVENC through API 11.1 opens H.264 when asked for AV1, and the probe says why" *
+          doctest::test_suite("gpu")) {
+    const EncodeAdapter adapter = NvidiaAdapter();
+    winrt::com_ptr<ID3D11Device>        device;
+    winrt::com_ptr<ID3D11DeviceContext> context;
+    std::string                         error;
+    REQUIRE_MESSAGE(CreateD3D11DeviceOnAdapter(adapter.luid, device, context, error), error);
+
+    const NvencSessionProbe full = ProbeNvencSession(device.get());
+    REQUIRE_MESSAGE(full.session_ok, full.fail_reason);
+    CHECK(full.driver_max_api >= kNvencApi13_0);
+
+    NvencApiCapForTest cap(kNvencApi11_1);
+    const NvencSessionProbe p = ProbeNvencSession(device.get());
+    REQUIRE_MESSAGE(p.session_ok, p.fail_reason);
+    CHECK(p.driver_max_api == kNvencApi11_1);
+    CHECK(p.h264);
+    CHECK(p.hevc == full.hevc);
+    CHECK_FALSE(p.av1);
+    CHECK_FALSE(p.driver_too_old);
+    // Whether the GPU's AV1 shows through an 11.1 session is the driver's call; with it, the UI
+    // names the driver instead of the GPU.
+    MESSAGE("AV1 GUID listed through 11.1: " << p.av1_needs_newer_driver << " (full API av1=" << full.av1 << ")");
+    if (!full.av1) CHECK_FALSE(p.av1_needs_newer_driver);
+
+    auto           encoder = CreateVideoEncoder(adapter.backend);
+    EncoderOptions opts;
+    opts.codec = VideoCodec::AV1;
+    REQUIRE_MESSAGE(encoder->TryOpen(device.get(), 320, 180, 30, 4000, 1, opts), encoder->FaultReason());
+    CHECK(encoder->Codec() == VideoCodec::H264);
+    REQUIRE(!encoder->SequenceParams().empty());
+    CHECK(encoder->SequenceParams()[0] == 0);  // Annex-B start code, not an OBU
+    encoder->Close();
+}
+
+// Below 11.1 no copy fits: the probe and the encoder both name the driver, without trying a session.
+TEST_CASE("gpu: NVENC below API 11.1 reports the driver too old" * doctest::test_suite("gpu")) {
+    const EncodeAdapter adapter = NvidiaAdapter();
+    winrt::com_ptr<ID3D11Device>        device;
+    winrt::com_ptr<ID3D11DeviceContext> context;
+    std::string                         error;
+    REQUIRE_MESSAGE(CreateD3D11DeviceOnAdapter(adapter.luid, device, context, error), error);
+
+    NvencApiCapForTest cap(0xB0);
+    const NvencSessionProbe p = ProbeNvencSession(device.get());
+    CHECK_FALSE(p.session_ok);
+    CHECK(p.driver_too_old);
+    CHECK(p.fail_reason == IVideoEncoder::kFaultDriverTooOld);
+
+    auto encoder = CreateVideoEncoder(adapter.backend);
+    CHECK_FALSE(encoder->TryOpen(device.get(), 320, 180, 30, 4000, 1, {}));
+    CHECK(encoder->FaultCode() == IVideoEncoder::kFaultDriverTooOld);
 }
 
 

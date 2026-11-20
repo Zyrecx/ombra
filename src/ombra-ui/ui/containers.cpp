@@ -893,9 +893,11 @@ void TileControl::Draw(ID2D1DeviceContext* dc, const Theme& t, float s) {
         // notes one line even when only some have chips.
         y = (std::max)(y + z.space_xs() * s, r.bottom - pad - ch);
         const float dot = z.space_xs() * 0.75f * s;
-        q.Circle(r.left + pad + dot, y + ch * 0.5f, dot, ToneColor(c, note_tone, c.text3));
         const bool loud = note_tone == SettingRow::Tone::Error || note_tone == SettingRow::Tone::Warning;
-        q.Text(note, TypeRole::Caption, D2D1::RectF(r.left + pad + NoteIndent(z, s), y, r.right - pad, y + ch),
+        // A warning says why the tile is dimmed: it keeps full strength.
+        const Paint qn{dc, t, s, loud ? p.op : q.op};
+        qn.Circle(r.left + pad + dot, y + ch * 0.5f, dot, ToneColor(c, note_tone, c.text3));
+        qn.Text(note, TypeRole::Caption, D2D1::RectF(r.left + pad + NoteIndent(z, s), y, r.right - pad, y + ch),
                loud ? ToneColor(c, note_tone, c.text2) : c.text2, {TextAlign::Leading, false, true});
     }
 

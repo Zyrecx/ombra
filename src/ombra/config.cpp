@@ -166,13 +166,16 @@ std::string BitrateToQualityPreset(int bitrate_kbps, int width, int height, int 
 const RecordingGpuCaps* PickRecordingGpu(const std::vector<RecordingGpuCaps>& gpus, const std::string& adapter) {
     auto find = [&](const char* vendor) -> const RecordingGpuCaps* {
         for (const auto& g : gpus)
-            if (g.vendor == vendor) return &g;
+            if (g.vendor == vendor && g.usable) return &g;
         return nullptr;
     };
-    if (adapter == "nvidia" || adapter == "amd" || adapter == "cpu")
+    if (adapter == "nvidia" || adapter == "amd" || adapter == "cpu") {
         if (const auto* g = find(adapter.c_str())) return g;
+        for (const auto& g : gpus)
+            if (g.vendor == adapter) return find("cpu");
+    }
     for (const auto& g : gpus)
-        if (g.drives_display && g.vendor != "cpu") return &g;
+        if (g.drives_display && g.usable && g.vendor != "cpu") return &g;
     if (const auto* g = find("nvidia")) return g;
     if (const auto* g = find("amd")) return g;
     return find("cpu");

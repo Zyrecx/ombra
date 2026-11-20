@@ -1014,7 +1014,9 @@ int RunEngine(int argc, wchar_t** argv) {
     for (auto& mp : pipelines) audio_gate->supervisors.push_back(mp->supervisor.get());
     for (auto& mp : pipelines) {
         if (resident) {
-            mp->supervisor->SetEncoderFallbackCallback([](const std::string&) { SpawnToast(L"cpu_encoder"); });
+            mp->supervisor->SetEncoderFallbackCallback([](const std::string& code) {
+                SpawnToast(code == IVideoEncoder::kFaultDriverTooOld ? L"cpu_encoder_old_driver" : L"cpu_encoder");
+            });
             mp->supervisor->SetRingStorageLostCallback([] { SpawnToast(L"buffer_storage_lost"); });
         }
         mp->supervisor->SetRingReleaseCallbacks(

@@ -128,6 +128,7 @@ std::optional<LUID> PipelineSupervisor::EffectiveGameGpu() const {
 std::optional<EncodeAdapter> PipelineSupervisor::ResolveAdapter(const CaptureTarget& target, const LUID* exclude) {
     const std::optional<LUID> game_gpu = EffectiveGameGpu();
     const LUID* game = game_gpu ? &*game_gpu : nullptr;
+    if (!exclude && unusable_gpu_ && encoder_opts_.adapter == "auto") exclude = &*unusable_gpu_;
     if (adapter_resolver_) return adapter_resolver_(exclude, game);
     // A window's monitor is wherever the window Capture will pick is now; a move to a monitor on
     // another GPU is caught by the periodic recheck (ShouldReturnToPickedAdapter).
@@ -260,6 +261,8 @@ bool PipelineSupervisor::BuildGeneration(bool fatal_open) {
             Log::InfoW(L"encode adapter    %s  (%hs)", adapter->description.c_str(),
                        BackendName(adapter->backend));
         encode_adapter_ = *adapter;
+        // The CPU on purpose is not a fallback.
+        if (adapter->backend == EncoderBackend::X264) cpu_fallback_code_.clear();
     }
 
     std::unique_ptr<ICaptureSource> capture =
@@ -363,12 +366,11 @@ bool PipelineSupervisor::OpenEncodeStage(ICaptureSource& capture, bool fatal_ope
     auto make_encoder = [this](EncoderBackend b) {
         return encoder_factory_ ? encoder_factory_(b) : CreateVideoEncoder(b);
     };
-    // x264 is H.264 whatever it's asked for. A GPU that lacks AV1 outright also opens H.264, inside Open,
-    // and keeps AV1's bitrate: EncodeAdapter doesn't say which GPUs those are.
-    const uint32_t kbps = BitrateForOpenedCodec(bitrate_kbps_, opts.preset_bitrate_codec,
-                                                hardware ? plan.codec : VideoCodec::H264);
-    if (kbps != bitrate_kbps_) Log::Info("%s: %u kbps for the codec it opened (preset gave %u)", context, kbps, bitrate_kbps_);
+    // The bitrate fits the codec the encoder will open (CodecFor: x264 and NVENC API 11.1 are H.264
+    // only). A GPU that lacks AV1 outright opens H.264 inside Open and keeps AV1's bitrate.
     encoder = make_encoder(adapter.backend);
+    const uint32_t kbps = BitrateForOpenedCodec(bitrate_kbps_, opts.preset_bitrate_codec, encoder->CodecFor(plan.codec));
+    if (kbps != bitrate_kbps_) Log::Info("%s: %u kbps for the codec it opened (preset gave %u)", context, kbps, bitrate_kbps_);
     bool opened =
         (fatal_open && !hardware)
             ? encoder->Open(capture.Device(), out.width, out.height, fps_, kbps, keyframe_sec_, opts)
@@ -376,8 +378,14 @@ bool PipelineSupervisor::OpenEncodeStage(ICaptureSource& capture, bool fatal_ope
     if (hardware && opened) {
         hw_open_failures_ = 0;
         on_cpu_fallback_  = false;
+        std::lock_guard<std::mutex> lock(params_mutex_);
+        cpu_fallback_code_.clear();
     }
-    if (hardware && !opened && (fatal_open || ++hw_open_failures_ >= kHwOpenFailuresBeforeCpu)) {
+    // A driver too old for every NVENC API this build carries won't change until it's updated: no
+    // retries, and auto never picks that GPU again in this run (ResolveAdapter).
+    const bool driver_too_old = hardware && !opened && encoder->FaultCode() == IVideoEncoder::kFaultDriverTooOld;
+    if (driver_too_old) unusable_gpu_ = adapter.luid;
+    if (hardware && !opened && (fatal_open || driver_too_old || ++hw_open_failures_ >= kHwOpenFailuresBeforeCpu)) {
         const std::string reason = std::string(BackendName(adapter.backend)) + " would not open: " +
                                    encoder->FaultReason();
         // Auto picked the display's GPU over another with a hardware encoder: that one comes before
@@ -411,9 +419,10 @@ bool PipelineSupervisor::OpenEncodeStage(ICaptureSource& capture, bool fatal_ope
             {
                 std::lock_guard<std::mutex> lock(params_mutex_);
                 encode_adapter_.backend = EncoderBackend::X264;
+                cpu_fallback_code_      = code;
             }
             // Once per fallback, not on every rebuild that tries the GPU again and falls back again.
-            if (!on_cpu_fallback_ && encoder_fallback_cb_) encoder_fallback_cb_(reason);
+            if (!on_cpu_fallback_ && encoder_fallback_cb_) encoder_fallback_cb_(code);
             on_cpu_fallback_ = true;
         }
     }
@@ -628,6 +637,11 @@ uint64_t PipelineSupervisor::CurrentTicksSubmitted() const {
 EncodeAdapter PipelineSupervisor::CurrentEncodeAdapter() const {
     std::lock_guard<std::mutex> lock(params_mutex_);
     return encode_adapter_;
+}
+
+std::string PipelineSupervisor::CpuFallbackCode() const {
+    std::lock_guard<std::mutex> lock(params_mutex_);
+    return cpu_fallback_code_;
 }
 
 PipelineSupervisor::PipelineParams PipelineSupervisor::CurrentParams() const {

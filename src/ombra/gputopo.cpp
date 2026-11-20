@@ -4,9 +4,7 @@
 #include "ombra/encode_target.h"
 #include "ombra/log.h"
 
-#pragma warning(push, 0)
-#include "ffnvcodec/nvEncodeAPI.h"
-#pragma warning(pop)
+#include "ombra/nvenc.h"
 
 #include <d3d11.h>
 #include <dxgi1_6.h>
@@ -104,81 +102,19 @@ NvencProbe ProbeNvenc(IDXGIAdapter1* adapter) {
         return result;
     }
 
-    HMODULE dll = LoadLibraryW(L"nvEncodeAPI64.dll");
-    if (!dll) {
-        result.fail_reason = "nvEncodeAPI64.dll not found (no NVIDIA driver)";
-        context->Release();
-        device->Release();
-        return result;
+    const NvencSessionProbe p = ProbeNvencSession(device);
+    result.session_ok             = p.session_ok;
+    result.h264                   = p.h264;
+    result.hevc                   = p.hevc;
+    result.av1                    = p.av1;
+    result.av1_needs_newer_driver = p.av1_needs_newer_driver;
+    result.driver_too_old         = p.driver_too_old;
+    result.fail_reason            = p.fail_reason;
+    if (p.driver_max_api) {
+        char verbuf[16];
+        snprintf(verbuf, sizeof(verbuf), "%u.%u", p.driver_max_api >> 4, p.driver_max_api & 0xF);
+        result.driver_version = verbuf;
     }
-
-    using GetMaxVer_t  = NVENCSTATUS(NVENCAPI*)(uint32_t*);
-    using CreateInst_t = NVENCSTATUS(NVENCAPI*)(NV_ENCODE_API_FUNCTION_LIST*);
-    auto get_max     = reinterpret_cast<GetMaxVer_t>(GetProcAddress(dll, "NvEncodeAPIGetMaxSupportedVersion"));
-    auto create_inst = reinterpret_cast<CreateInst_t>(GetProcAddress(dll, "NvEncodeAPICreateInstance"));
-    if (!get_max || !create_inst) {
-        result.fail_reason = "GetProcAddress failed on nvEncodeAPI64.dll";
-        FreeLibrary(dll);
-        context->Release();
-        device->Release();
-        return result;
-    }
-
-    uint32_t driver_max = 0;
-    if (get_max(&driver_max) != NV_ENC_SUCCESS) {
-        result.fail_reason = "NvEncodeAPIGetMaxSupportedVersion failed";
-        FreeLibrary(dll);
-        context->Release();
-        device->Release();
-        return result;
-    }
-    char verbuf[16];
-    snprintf(verbuf, sizeof(verbuf), "%u.%u", driver_max >> 4, driver_max & 0xF);
-    result.driver_version = verbuf;
-
-    NV_ENCODE_API_FUNCTION_LIST fn{};
-    fn.version = NV_ENCODE_API_FUNCTION_LIST_VER;
-    if (create_inst(&fn) != NV_ENC_SUCCESS || !fn.nvEncOpenEncodeSessionEx) {
-        result.fail_reason = "NvEncodeAPICreateInstance failed";
-        FreeLibrary(dll);
-        context->Release();
-        device->Release();
-        return result;
-    }
-
-    NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS open{};
-    open.version    = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
-    open.deviceType = NV_ENC_DEVICE_TYPE_DIRECTX;
-    open.device     = device;
-    open.apiVersion = NVENCAPI_VERSION;
-    void* enc = nullptr;
-    NVENCSTATUS s = fn.nvEncOpenEncodeSessionEx(&open, &enc);
-    if (s != NV_ENC_SUCCESS || !enc) {
-        result.fail_reason = "nvEncOpenEncodeSessionEx failed (not an NVIDIA adapter, or no NVENC on it)";
-        FreeLibrary(dll);
-        context->Release();
-        device->Release();
-        return result;
-    }
-    result.session_ok = true;
-
-    uint32_t guid_count = 0;
-    if (fn.nvEncGetEncodeGUIDCount(enc, &guid_count) == NV_ENC_SUCCESS && guid_count > 0) {
-        std::vector<GUID> guids(guid_count);
-        uint32_t          filled = 0;
-        if (fn.nvEncGetEncodeGUIDs(enc, guids.data(), guid_count, &filled) == NV_ENC_SUCCESS) {
-            for (uint32_t i = 0; i < filled; ++i) {
-                if (guids[i] == NV_ENC_CODEC_H264_GUID) result.h264 = true;
-                else if (guids[i] == NV_ENC_CODEC_HEVC_GUID) result.hevc = true;
-                else if (guids[i] == NV_ENC_CODEC_AV1_GUID) result.av1 = true;
-            }
-        }
-    }
-
-    // Must not leave a session open — LogGpuTopologyStartup runs before the engine's real
-    // Encoder::Open(), and NVENC sessions are limited per-process/per-adapter by the driver.
-    if (fn.nvEncDestroyEncoder) fn.nvEncDestroyEncoder(enc);
-    FreeLibrary(dll);
     context->Release();
     device->Release();
     return result;
@@ -390,7 +326,7 @@ Topology ClassifyTopology(bool encoder_present, bool display_on_encoder, bool ga
 std::vector<RecordingGpuCaps> RecordingGpuCapsOf(const StartupGpuSummary& summary) {
     std::vector<RecordingGpuCaps> caps;
     for (const auto& g : summary.recording_gpus)
-        caps.push_back({g.vendor, g.av1, g.av1_align_w, g.av1_align_h, g.drives_display});
+        caps.push_back({g.vendor, g.av1, g.av1_align_w, g.av1_align_h, g.drives_display, !g.driver_too_old});
     return caps;
 }
 
@@ -502,11 +438,12 @@ int RunGpuTest(FILE* out, DWORD pid) {
             }
             factory->Release();
         }
-        Report(out, "  Encoder  %ls  [dGPU, NVENC %s]  H264=%s HEVC=%s AV1=%s%s",
+        Report(out, "  Encoder  %ls  [dGPU, NVENC %s]  H264=%s HEVC=%s AV1=%s%s%s",
                nvidia->description.c_str(),
-               nvenc_probe.session_ok ? nvenc_probe.driver_version.c_str() : "n/a",
+               nvenc_probe.driver_version.empty() ? "n/a" : nvenc_probe.driver_version.c_str(),
                nvenc_probe.h264 ? "yes" : "no", nvenc_probe.hevc ? "yes" : "no",
                nvenc_probe.av1 ? "yes" : "no",
+               nvenc_probe.av1_needs_newer_driver ? " (the GPU has AV1, the driver's NVENC API doesn't)" : "",
                nvenc_probe.session_ok ? "" : ("  (probe failed: " + nvenc_probe.fail_reason + ")").c_str());
     } else {
         Report(out, "  Encoder  none — no NVIDIA adapter found");
@@ -523,8 +460,11 @@ int RunGpuTest(FILE* out, DWORD pid) {
     const auto encode = PickEncodeAdapter(adapters, "auto", AmfAdapterCapsSnapshot());
     const AdapterFacts* encoder = encode ? FindByLuid(adapters, encode->luid) : nullptr;
     if (encoder)
-        Report(out, "  Records  %ls  (%s, encode.adapter=auto)", encoder->description.c_str(),
-               BackendName(encode->backend));
+        Report(out, "  Records  %ls  (%s, encode.adapter=auto)%s", encoder->description.c_str(),
+               BackendName(encode->backend),
+               encode->backend == EncoderBackend::Nvenc && nvenc_probe.driver_too_old
+                   ? "  -- but the driver is too old: the engine records on the other GPU or the CPU"
+                   : "");
 
     bool                 game_found      = pid != 0;
     bool                 game_on_encoder = false;
@@ -609,12 +549,15 @@ StartupGpuSummary LogGpuTopologyStartup(const std::string& encode_preference,
                 if (desc.AdapterLuid.HighPart == nvidia->luid.HighPart &&
                     desc.AdapterLuid.LowPart == nvidia->luid.LowPart) {
                     NvencProbe p = ProbeNvenc(adapter);
-                    Log::Info("gputopo nvenc    ok=%d H264=%d HEVC=%d AV1=%d driver=%s (%s)",
-                              p.session_ok, p.h264, p.hevc, p.av1, p.driver_version.c_str(),
-                              p.fail_reason.c_str());
-                    if (p.session_ok && p.h264)
+                    Log::Info("gputopo nvenc    ok=%d H264=%d HEVC=%d AV1=%d%s driver=%s (%s)",
+                              p.session_ok, p.h264, p.hevc, p.av1,
+                              p.av1_needs_newer_driver ? " (GPU has AV1, driver API too old)" : "",
+                              p.driver_version.c_str(), p.fail_reason.c_str());
+                    // Listed with an old driver too, so Settings can say why it doesn't record.
+                    if ((p.session_ok && p.h264) || p.driver_too_old)
                         summary.recording_gpus.push_back({"nvidia", "NVENC", nvidia->description, p.hevc, p.av1,
-                                                          1, 1, nvidia->owns_target_monitor});
+                                                          1, 1, nvidia->owns_target_monitor, p.driver_too_old,
+                                                          p.av1_needs_newer_driver});
                     adapter->Release();
                     break;
                 }
