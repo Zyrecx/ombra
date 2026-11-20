@@ -81,9 +81,9 @@ choose the folder and shortcuts, and keeps Ombra up to date.
 > [!NOTE]
 > Builds aren't code-signed, so SmartScreen shows "Unknown publisher" the first time.
 
-**Requirements:** Windows 11. Hardware encoding on an NVIDIA GTX 10 series or newer with an
-up-to-date driver, or an AMD GPU with AMF; AV1 on RTX 40, RX 7000, Ryzen 7040 and newer. Any other
-PC records on the CPU.
+**Requirements:** Windows 11. Hardware encoding on an NVIDIA GTX 10 series or newer (driver
+471.41 or newer), or an AMD GPU with AMF; AV1 on RTX 40, RX 7000, Ryzen 7040 and newer (NVIDIA:
+driver 570 or newer). Any other PC records on the CPU.
 
 ## Default keys
 
