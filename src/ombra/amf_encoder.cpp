@@ -349,7 +349,26 @@ bool AmfEncoder::Open(ID3D11Device* device, uint32_t w, uint32_t h, uint32_t fps
             else caps->GetProperty(AMF_VIDEO_ENCODER_CAP_QUERY_TIMEOUT_SUPPORT, &query_timeout_ok);
             caps->GetProperty(av1 ? AMF_VIDEO_ENCODER_AV1_CAP_BFRAMES : AMF_VIDEO_ENCODER_CAP_BFRAMES,
                               &bframes_supported);
+            amf::AMFIOCapsPtr input;
+            amf_int32         min_w = 0, max_w = 0, min_h = 0, max_h = 0;
+            if (caps->GetInputCaps(&input) == AMF_OK && input) {
+                input->GetWidthRange(&min_w, &max_w);
+                input->GetHeightRange(&min_h, &max_h);
+                if (min_w > 0 && min_h > 0 && max_w >= min_w && max_h >= min_h)
+                    size_limits_ = SizeRange{static_cast<uint32_t>(min_w), static_cast<uint32_t>(min_h),
+                                             static_cast<uint32_t>(max_w), static_cast<uint32_t>(max_h)};
+            }
         }
+    }
+    // Refused here with a stable code, before a SetProperty fails on it with AMF_OUT_OF_RANGE.
+    if (size_limits_ && (w < size_limits_->min_width || h < size_limits_->min_height ||
+                         w > size_limits_->max_width || h > size_limits_->max_height)) {
+        OpenFailed("size " + std::to_string(w) + "x" + std::to_string(h) + " outside " +
+                       std::to_string(size_limits_->min_width) + "x" + std::to_string(size_limits_->min_height) + " to " +
+                       std::to_string(size_limits_->max_width) + "x" + std::to_string(size_limits_->max_height),
+                   AMF_OK);
+        fault_code_ = kFaultSizeOutOfRange;
+        return false;
     }
     // Without a blocking QueryOutput, waiting for the frame means an Ombra-side sleep loop on the
     // pacer's tick path. Every current driver supports it; refuse rather than poll.

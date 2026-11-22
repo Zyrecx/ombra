@@ -447,6 +447,10 @@ EncodePlan PlanEncode(VideoSize out, VideoCodec requested, uint32_t align_w, uin
 // to the alignment, height up to it too, except a height 8 past a multiple of 16 gains 2 lines
 // (1080 -> 1082, 184 -> 186). Only for the UI's note; the mux reads the real size from the stream.
 VideoSize PredictPaddedSize(VideoSize size, uint32_t align_w, uint32_t align_h);
+// `size` scaled uniformly into an encoder's size range, both sides even: down when a side is past the
+// maximum (5120x1440 into 4096 -> 4096x1152), up when one is under the minimum (160x28 into 128 ->
+// 732x128). A side the aspect can't keep in range is clamped.
+VideoSize FitIntoLimits(VideoSize size, uint32_t min_w, uint32_t min_h, uint32_t max_w, uint32_t max_h);
 
 // One GPU that can record, as the engine's startup probe reports it (get_status "recording_gpus",
 // StartupGpuSummary::RecordingGpu). Plain data so config.cpp and the UI share the choice below.

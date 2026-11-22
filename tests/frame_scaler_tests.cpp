@@ -91,6 +91,18 @@ TEST_CASE("encode.amf_av1_unaligned: PredictPaddedSize matches what a 780M coded
     }
 }
 
+TEST_CASE("FitIntoLimits scales a size into an encoder's range, keeping the aspect and even sides") {
+    // A minimized window's title bar, under AMF's minimum: up until the short side reaches it.
+    CHECK(FitIntoLimits({160, 28}, 128, 128, 4096, 4096) == VideoSize{732, 128});
+    // Super-ultrawide past H.264's 4096: down until the long side fits.
+    CHECK(FitIntoLimits({5120, 1440}, 128, 128, 4096, 4096) == VideoSize{4096, 1152});
+    CHECK(FitIntoLimits({8192, 8192}, 128, 128, 4096, 2304) == VideoSize{2304, 2304});
+    CHECK(FitIntoLimits({1920, 1080}, 128, 128, 4096, 4096) == VideoSize{1920, 1080});
+    // An aspect no uniform scale fits: the short side is clamped.
+    CHECK(FitIntoLimits({100, 5000}, 128, 128, 4096, 4096) == VideoSize{128, 4096});
+    CHECK(FitIntoLimits({0, 0}, 128, 128, 4096, 4096) == VideoSize{0, 0});
+}
+
 TEST_CASE("capture.resolution: a resolution change under a preset re-derives the bitrate from the encoded size") {
     Config cfg;
     cfg.encode_quality_preset = "high";

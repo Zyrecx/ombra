@@ -360,25 +360,30 @@ bool PipelineSupervisor::OpenEncodeStage(ICaptureSource& capture, bool fatal_ope
     EncoderOptions      opts    = encoder_opts_;
     const EncodePlan    plan    = PlanEncode(wanted, opts.codec, adapter.av1_align_w, adapter.av1_align_h,
                                              opts.av1_unaligned);
-    const VideoSize     out     = plan.size;
+    VideoSize           out     = plan.size;
     if (plan.codec != opts.codec || !(out == wanted))
         Log::Info("%s: AV1 codes %ux%u only padded (aligns to %ux%u); encode.amf_av1_unaligned=%s -> %s %ux%u",
                   context, wanted.width, wanted.height, adapter.av1_align_w, adapter.av1_align_h,
                   opts.av1_unaligned.c_str(), VideoCodecName(plan.codec), out.width, out.height);
     opts.codec = plan.codec;
-    if (out.width != src_w || out.height != src_h) {
+    // Null at the source size; else a scaler from the capture's slots to `size`.
+    const auto open_scaler = [&](VideoSize size) {
+        scaler.reset();
+        if (size.width == src_w && size.height == src_h) return true;
         std::vector<ID3D11Texture2D*> slots;
         for (uint32_t slot = 0; slot < ICaptureSource::kSlots; ++slot) slots.push_back(capture.SlotTexture(slot));
         scaler = std::make_unique<FrameScaler>();
         std::string error;
-        if (!scaler->Open(capture.Device(), slots, src_w, src_h, out.width, out.height, error)) {
+        if (!scaler->Open(capture.Device(), slots, src_w, src_h, size.width, size.height, error)) {
             Log::Warn("%s: %s", context, error.c_str());
             scaler.reset();
             return false;
         }
-        Log::Info("scaler  %ux%u -> %ux%u  (capture.resolution %s)", src_w, src_h, out.width, out.height,
+        Log::Info("scaler  %ux%u -> %ux%u  (capture.resolution %s)", src_w, src_h, size.width, size.height,
                   capture_resolution_.c_str());
-    }
+        return true;
+    };
+    if (!open_scaler(out)) return false;
 
     // A hardware encoder always opens non-fatally: when it won't open, the CPU encoder takes over on
     // the same capture device (at startup at once, on a rebuild after kHwOpenFailuresBeforeCpu
@@ -397,6 +402,26 @@ bool PipelineSupervisor::OpenEncodeStage(ICaptureSource& capture, bool fatal_ope
         (fatal_open && !hardware)
             ? encoder->Open(capture.Device(), out.width, out.height, fps_, kbps, keyframe_sec_, opts)
             : encoder->TryOpen(capture.Device(), out.width, out.height, fps_, kbps, keyframe_sec_, opts);
+    // A size the GPU won't take (H.264 past 4096 wide, a tiny window) is scaled into its range once,
+    // rather than leaving the GPU for the CPU, which would struggle at exactly the large sizes.
+    std::optional<IVideoEncoder::SizeRange> limits;
+    if (hardware && !opened && encoder->FaultCode() == IVideoEncoder::kFaultSizeOutOfRange) limits = encoder->SizeLimits();
+    if (limits) {
+        const VideoSize fit = FitIntoLimits(out, limits->min_width, limits->min_height, limits->max_width,
+                                            limits->max_height);
+        const EncodePlan refit = PlanEncode(fit, opts.codec, adapter.av1_align_w, adapter.av1_align_h, opts.av1_unaligned);
+        Log::Info("%s: %ux%u is outside %s's %ux%u to %ux%u -- scaling to %ux%u", context, out.width, out.height,
+                  BackendName(adapter.backend), limits->min_width, limits->min_height, limits->max_width,
+                  limits->max_height, refit.size.width, refit.size.height);
+        if (open_scaler(refit.size)) {
+            out        = refit.size;
+            opts.codec = refit.codec;
+            encoder    = make_encoder(adapter.backend);
+            opened = encoder->TryOpen(capture.Device(), out.width, out.height, fps_, kbps, keyframe_sec_, opts);
+        } else if (!open_scaler(out)) {
+            return false;
+        }
+    }
     if (hardware && opened) {
         hw_open_failures_ = 0;
         on_cpu_fallback_  = false;
@@ -429,9 +454,17 @@ bool PipelineSupervisor::OpenEncodeStage(ICaptureSource& capture, bool fatal_ope
         Telemetry::Event("encoder_fallback", "from=%s reason=\"%s\"", BackendName(adapter.backend),
                          encoder->FaultReason().c_str());
         const std::string code = encoder->FaultCode();
+        crash_upload::ErrorContext report = EncodeReportContext(capture, context, out, opts.codec);
+        if (const auto lim = encoder->SizeLimits(); lim || limits) {
+            const IVideoEncoder::SizeRange& r = lim ? *lim : *limits;
+            report.emplace_back("encoder_limits", std::to_string(r.min_width) + "x" + std::to_string(r.min_height) +
+                                                      " to " + std::to_string(r.max_width) + "x" +
+                                                      std::to_string(r.max_height));
+        }
+        if (limits) report.emplace_back("refit", "tried");
         crash_upload::ReportError(crash_upload::ErrorKind::Encoder, "fallback:" + (code.empty() ? "unknown" : code),
                                   BackendName(adapter.backend), "hardware encoder would not open, recording on the CPU",
-                                  std::nullopt, EncodeReportContext(capture, context, out, opts.codec));
+                                  std::nullopt, report);
         encoder = make_encoder(EncoderBackend::X264);
         const uint32_t x264_kbps = BitrateForOpenedCodec(bitrate_kbps_, opts.preset_bitrate_codec, VideoCodec::H264);
         opened  = fatal_open ? encoder->Open(capture.Device(), out.width, out.height, fps_, x264_kbps,

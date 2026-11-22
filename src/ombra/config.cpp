@@ -149,6 +149,26 @@ VideoSize PredictPaddedSize(VideoSize size, uint32_t align_w, uint32_t align_h) 
     return {up(size.width, align_w), h};
 }
 
+VideoSize FitIntoLimits(VideoSize size, uint32_t min_w, uint32_t min_h, uint32_t max_w, uint32_t max_h) {
+    if (size.width == 0 || size.height == 0) return size;
+    const double w = size.width, h = size.height;
+    double       scale = 1.0;
+    if (size.width > max_w || size.height > max_h) scale = (std::min)(max_w / w, max_h / h);
+    else if (size.width < min_w || size.height < min_h) scale = (std::max)(min_w / w, min_h / h);
+    // Down rounds down and up rounds up, so the side that set the scale lands on its bound.
+    const auto even = [scale](double v) {
+        const double s = v * scale;
+        const auto   n = static_cast<uint32_t>(scale < 1.0 ? std::floor(s + 1e-6) : std::ceil(s - 1e-6));
+        return scale < 1.0 ? n & ~1u : (n + 1) & ~1u;
+    };
+    const auto clamp_even = [](uint32_t v, uint32_t lo, uint32_t hi) {
+        lo = (lo + 1) & ~1u;
+        hi = hi & ~1u;
+        return hi < lo ? lo : std::clamp(v, lo, hi);
+    };
+    return {clamp_even(even(w), min_w, max_w), clamp_even(even(h), min_h, max_h)};
+}
+
 int ResolveFramerate(int64_t configured, int display_hz) {
     if (configured > 0) return static_cast<int>(configured);
     if (display_hz <= 0) return 60;

@@ -129,6 +129,15 @@ public:
     // FaultCode() when the NVIDIA driver predates every NVENC API this build carries (11.1, nvenc.h):
     // a driver update fixes it, so the UI says so. The text is the Sentry issue's: keep it stable.
     static constexpr const char* kFaultDriverTooOld = "driver older than the vendored nvEncodeAPI.h";
+    // FaultCode() when the size is outside what the encoder takes for the codec it opened (a
+    // minimized window's 160x28, H.264 past 4096 wide); SizeLimits() then says what it takes.
+    static constexpr const char* kFaultSizeOutOfRange = "size_out_of_range";
+    struct SizeRange {
+        uint32_t min_width = 0, min_height = 0, max_width = 0, max_height = 0;
+    };
+    // The size range for the codec the last Open() tried, once Open() has read it (it may have
+    // failed after). Unset when unknown: the encoder has no such caps or didn't get that far.
+    virtual std::optional<SizeRange> SizeLimits() const { return std::nullopt; }
     // AUs that arrived only after the encoder's normal wait ran out, and the longest such wait.
     // Plain atomics: any thread may read them while the pacer runs.
     virtual uint64_t LateFrames() const { return 0; }

@@ -86,6 +86,7 @@ public:
     bool               Faulted() const override { return faulted_.load(std::memory_order_acquire); }
     const std::string& FaultReason() const override { return fault_reason_; }
     std::string        FaultCode() const override { return fault_code_; }
+    std::optional<SizeRange> SizeLimits() const override { return size_limits_; }
     void               Close() override;
 
     ~NvencEncoder() override { Close(); }
@@ -103,6 +104,7 @@ private:
     NV_ENC_OUTPUT_PTR                  bs_     = nullptr;
     bool                               locked_ = false;
     VideoCodec                         codec_  = VideoCodec::H264;
+    std::optional<SizeRange>           size_limits_;  // the codec's NV_ENC_CAPS_*_MIN/MAX, read in Open
     std::vector<uint8_t>               sequence_params_;
 
     std::atomic<bool> faulted_{false};
@@ -205,6 +207,32 @@ bool NvencEncoder::Open(ID3D11Device* device, uint32_t w, uint32_t h, uint32_t f
 #else
     const GUID codec_guid = NV_ENC_CODEC_H264_GUID;
 #endif
+
+    // Refused here with a stable code instead of an nvEncInitializeEncoder INVALID_PARAM.
+    {
+        const auto cap = [&](NV_ENC_CAPS which) {
+            NV_ENC_CAPS_PARAM param{};
+            param.version     = NV_ENC_CAPS_PARAM_VER;
+            param.capsToQuery = which;
+            int value         = 0;
+            return fn_.nvEncGetEncodeCaps(enc_, codec_guid, &param, &value) == NV_ENC_SUCCESS ? value : 0;
+        };
+        const int min_w = cap(NV_ENC_CAPS_WIDTH_MIN), min_h = cap(NV_ENC_CAPS_HEIGHT_MIN);
+        const int max_w = cap(NV_ENC_CAPS_WIDTH_MAX), max_h = cap(NV_ENC_CAPS_HEIGHT_MAX);
+        if (min_w > 0 && min_h > 0 && max_w >= min_w && max_h >= min_h)
+            size_limits_ = SizeRange{static_cast<uint32_t>(min_w), static_cast<uint32_t>(min_h),
+                                     static_cast<uint32_t>(max_w), static_cast<uint32_t>(max_h)};
+        if (size_limits_ && (w < size_limits_->min_width || h < size_limits_->min_height ||
+                             w > size_limits_->max_width || h > size_limits_->max_height)) {
+            Log::Warn("encoder open failed  size %ux%u outside %ux%u to %ux%u", w, h, size_limits_->min_width,
+                      size_limits_->min_height, size_limits_->max_width, size_limits_->max_height);
+            if (!nonfatal_open_) die("NVENC: encode size outside the GPU's range");
+            faulted_      = true;
+            fault_reason_ = "size " + std::to_string(w) + "x" + std::to_string(h) + " outside the encoder's range";
+            fault_code_   = kFaultSizeOutOfRange;
+            return false;
+        }
+    }
 
     // Preset config first, then override only what we care about: the preset knows more about
     // this silicon than we do.

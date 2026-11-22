@@ -613,6 +613,69 @@ private:
 };
 }  // namespace
 
+namespace {
+// A "hardware" encoder (x264 inside) that takes nothing over 256x256, as NVENC and AMF refuse a size
+// outside their caps: fault code, limits, no session.
+class SizeLimitedEncoder final : public IVideoEncoder {
+public:
+    explicit SizeLimitedEncoder(std::atomic<int>& refused) : inner_(CreateVideoEncoder(EncoderBackend::X264)), refused_(refused) {}
+    bool Open(ID3D11Device*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, const EncoderOptions&) override {
+        FAIL("a hardware encoder must open non-fatally");
+        return false;
+    }
+    bool TryOpen(ID3D11Device* d, uint32_t w, uint32_t h, uint32_t fps, uint32_t kbps, uint32_t key, const EncoderOptions& o) override {
+        if (w > 256 || h > 256) {
+            ++refused_;
+            faulted_ = true;
+            return false;
+        }
+        return inner_->TryOpen(d, w, h, fps, kbps, key, o);
+    }
+    VideoCodec                  Codec() const override { return inner_->Codec(); }
+    VideoCodec                  CodecFor(VideoCodec) const override { return VideoCodec::H264; }
+    const std::vector<uint8_t>& SequenceParams() const override { return inner_->SequenceParams(); }
+    bool RegisterSlot(ID3D11Texture2D* t, uint32_t w, uint32_t h) override { return inner_->RegisterSlot(t, w, h); }
+    AccessUnit EncodeSlot(uint32_t a, uint32_t b, uint32_t c, uint64_t d) override { return inner_->EncodeSlot(a, b, c, d); }
+    void               UnlockLast() override { inner_->UnlockLast(); }
+    bool               Faulted() const override { return faulted_ || inner_->Faulted(); }
+    const std::string& FaultReason() const override { return faulted_ ? reason_ : inner_->FaultReason(); }
+    std::string        FaultCode() const override { return faulted_ ? kFaultSizeOutOfRange : inner_->FaultCode(); }
+    std::optional<SizeRange> SizeLimits() const override { return SizeRange{64, 64, 256, 256}; }
+    void               Close() override { inner_->Close(); }
+
+private:
+    std::unique_ptr<IVideoEncoder> inner_;
+    std::atomic<int>&              refused_;
+    bool                           faulted_ = false;
+    std::string                    reason_  = "injected: size outside the range";
+};
+}  // namespace
+
+// H.264 past 4096 wide, or a tiny window: the GPU encoder is opened again at the size scaled into
+// its range, not swapped for x264.
+TEST_CASE("gpu: a size the hardware encoder refuses is scaled into its range, not sent to the CPU" *
+          doctest::test_suite("gpu")) {
+    std::atomic<int> refused{0};
+    std::atomic<int> fallbacks{0};
+    PipelineRig rig(L"size-refit");
+    rig.supervisor.SetEncoderFactory([&](EncoderBackend b) -> std::unique_ptr<IVideoEncoder> {
+        if (b == EncoderBackend::X264) return CreateVideoEncoder(b);
+        return std::make_unique<SizeLimitedEncoder>(refused);
+    });
+    rig.supervisor.SetEncoderFallbackCallback([&](const std::string&) { ++fallbacks; });
+    rig.Start();
+    if (rig.supervisor.CurrentEncodeAdapter().backend == EncoderBackend::X264 && refused.load() == 0) {
+        MESSAGE("no hardware encoder picked on this PC: skipped");
+        return;
+    }
+    CHECK(refused.load() == 1);
+    CHECK(fallbacks.load() == 0);
+    CHECK(rig.supervisor.CurrentEncodeAdapter().backend != EncoderBackend::X264);
+    std::this_thread::sleep_for(3500ms);
+    REQUIRE(rig.Save(QpcNow()) == SaveOutcome::kSaved);
+    CheckCleanH264(rig.SavedPath(), 256, 144);  // 320x180 scaled until its long side fits
+}
+
 // A preset derived for AV1 on NVIDIA, which won't open: x264 records H.264 at H.264's share, and a
 // Custom bitrate stays the user's number.
 TEST_CASE("gpu: a fallback that changes the codec opens at that codec's preset bitrate" * doctest::test_suite("gpu")) {

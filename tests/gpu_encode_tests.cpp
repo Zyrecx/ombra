@@ -301,9 +301,43 @@ TEST_CASE("gpu: an encoder asked for AV1 on a GPU without it opens H.264" * doct
     SetAv1UnsupportedForTest(false);
 }
 
-namespace {
-
-}  // namespace
+// A minimized window's 160x28 and a size past H.264's maximum: each hardware encoder either opens,
+// or refuses with kFaultSizeOutOfRange and its range, and opens at the size FitIntoLimits makes of it.
+TEST_CASE("gpu: a hardware encoder refuses a size outside its caps with its range, and opens fitted" *
+          doctest::test_suite("gpu")) {
+    std::vector<EncodeAdapter> adapters{NvidiaAdapter()};
+    if (const auto amd = AmdAdapter()) adapters.push_back(*amd);
+    for (const EncodeAdapter& adapter : adapters) {
+        winrt::com_ptr<ID3D11Device>        device;
+        winrt::com_ptr<ID3D11DeviceContext> context;
+        std::string                         error;
+        REQUIRE_MESSAGE(CreateD3D11DeviceOnAdapter(adapter.luid, device, context, error), error);
+        for (const VideoCodec codec : {VideoCodec::H264, VideoCodec::AV1}) {
+            for (const VideoSize size : {VideoSize{160, 28}, VideoSize{8192, 2304}}) {
+                const std::string label = std::string(BackendName(adapter.backend)) + " " + VideoCodecName(codec);
+                CAPTURE(label);
+                CAPTURE(size.width);
+                EncoderOptions opts;
+                opts.codec   = codec;
+                auto encoder = CreateVideoEncoder(adapter.backend);
+                if (encoder->TryOpen(device.get(), size.width, size.height, 30, 4000, 1, opts)) {
+                    MESSAGE("opened as is");
+                    encoder->Close();
+                    continue;
+                }
+                REQUIRE_MESSAGE(encoder->FaultCode() == IVideoEncoder::kFaultSizeOutOfRange, encoder->FaultReason());
+                const auto lim = encoder->SizeLimits();
+                REQUIRE(lim);
+                MESSAGE("range ", lim->min_width, "x", lim->min_height, " to ", lim->max_width, "x", lim->max_height);
+                const VideoSize fit = FitIntoLimits(size, lim->min_width, lim->min_height, lim->max_width, lim->max_height);
+                encoder->Close();
+                encoder = CreateVideoEncoder(adapter.backend);
+                CHECK_MESSAGE(encoder->TryOpen(device.get(), fit.width, fit.height, 30, 4000, 1, opts), encoder->FaultReason());
+                encoder->Close();
+            }
+        }
+    }
+}
 
 // A driver from 471.41 to 569 stops at API 11.x: the 11.1 copy records H.264 with the same colours.
 TEST_CASE("gpu: NVENC through API 11.1 round-trips solid colours and tags the stream BT.709 limited" *

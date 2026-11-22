@@ -63,6 +63,7 @@ public:
     bool               Faulted() const override { return faulted_.load(std::memory_order_acquire); }
     const std::string& FaultReason() const override { return fault_reason_; }
     std::string        FaultCode() const override { return fault_code_; }
+    std::optional<SizeRange> SizeLimits() const override { return size_limits_; }
     void Close() override;
     uint64_t LateFrames() const override { return late_frames_.load(std::memory_order_relaxed); }
     int64_t  LongestWaitMs() const override { return longest_wait_ms_.load(std::memory_order_relaxed); }
@@ -82,6 +83,7 @@ private:
     int64_t                       pts_per_frame_ = 0;  // AMF's 100 ns units
     amf::AMFBufferPtr             last_output_;        // the AU handed out until UnlockLast()
     VideoCodec                    codec_ = VideoCodec::H264;
+    std::optional<SizeRange>      size_limits_;  // the component's input caps, read in Open
     std::vector<uint8_t>          sequence_params_;
 
     std::atomic<bool>     faulted_{false};
