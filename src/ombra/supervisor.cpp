@@ -135,7 +135,7 @@ std::optional<EncodeAdapter> PipelineSupervisor::ResolveAdapter(const CaptureTar
     HMONITOR monitor = nullptr;
     if (target.mode == CaptureTarget::Mode::Window) {
         const std::vector<WindowCandidate> windows = SnapshotTargetWindows();
-        if (const int pick = ChooseTargetWindow(target.window, windows, target.preferred_window); pick >= 0)
+        if (const int pick = ChooseWindowToOpen(target.window, windows, target.preferred_window); pick >= 0)
             monitor = MonitorFromWindow(reinterpret_cast<HWND>(windows[static_cast<size_t>(pick)].id), MONITOR_DEFAULTTONULL);
     } else {
         monitor = MonitorForDevice(target.monitor_device);

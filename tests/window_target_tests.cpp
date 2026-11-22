@@ -182,6 +182,27 @@ TEST_CASE("a minimized window is still picked when it is the only match") {
     CHECK(ChooseTargetWindow(LeagueFolder(), {client}, 1) == 0);
 }
 
+TEST_CASE("opening a capture skips a minimized current window for a restored match") {
+    WindowCandidate game = Game();
+    game.minimized       = true;
+    game.covers_monitor  = false;
+    game.area            = 0;
+    const std::vector<WindowCandidate> windows = {game, Client()};
+    // The running pipeline keeps the minimized game (no barrier on alt-tab) ...
+    CHECK(ChooseTargetWindow(LeagueFolder(), windows, /*current=*/2) == 0);
+    // ... but a new capture opens the restored client, not the game's title bar.
+    CHECK(ChooseWindowToOpen(LeagueFolder(), windows, /*current=*/2) == 1);
+    CHECK(ChooseWindowToOpen(LeagueFolder(), windows, 0) == 1);
+    // Every match minimized: the pick is minimized, and the caller declines it.
+    WindowCandidate client = Client();
+    client.minimized       = true;
+    const std::vector<WindowCandidate> all_min = {game, client};
+    const int pick = ChooseWindowToOpen(LeagueFolder(), all_min, /*current=*/2);
+    REQUIRE(pick >= 0);
+    CHECK(all_min[static_cast<size_t>(pick)].minimized);
+    CHECK(ChooseWindowToOpen(LeagueFolder(), {}, 0) == -1);
+}
+
 TEST_CASE("a fresh pick prefers the larger window over a small helper from the same folder") {
     const std::vector<WindowCandidate> windows = {
         Win(9, L"Bug Splat", L"E:\\Games\\Riot Games\\League of Legends\\BugSplat.exe", 400LL * 300), Client()};

@@ -85,6 +85,13 @@ int ChooseTargetWindow(const WindowTarget& target, const std::vector<WindowCandi
     return current;
 }
 
+int ChooseWindowToOpen(const WindowTarget& target, const std::vector<WindowCandidate>& windows,
+                       uint64_t current_id) {
+    const int pick = ChooseTargetWindow(target, windows, current_id);
+    if (pick >= 0 && windows[static_cast<size_t>(pick)].minimized) return ChooseTargetWindow(target, windows, 0);
+    return pick;
+}
+
 std::vector<WindowCandidate> SnapshotTargetWindows() {
     struct Ctx {
         HWND                         foreground;

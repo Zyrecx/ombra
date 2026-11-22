@@ -52,6 +52,10 @@ bool WindowMatchesTarget(const WindowTarget& target, const WindowCandidate& w);
 // doesn't cost a barrier.
 int ChooseTargetWindow(const WindowTarget& target, const std::vector<WindowCandidate>& windows,
                        uint64_t current_id);
+// The pick for opening a new capture: as above, except a minimized current window gives way to the
+// best match, since WGC would record its title bar. Minimized only when every match is.
+int ChooseWindowToOpen(const WindowTarget& target, const std::vector<WindowCandidate>& windows,
+                       uint64_t current_id);
 
 // The supervisor's switch debounce: a new pick must hold for `settle_ms` before it's acted on.
 // `want` is ChooseTargetWindow's pick (0: nothing matches). A recorded window that no longer
