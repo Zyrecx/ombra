@@ -91,3 +91,10 @@ jobs:
           $assets += 'out/installer/SHA256SUMS.txt'
           gh release create $env:GITHUB_REF_NAME @assets --verify-tag --notes-file "$env:RUNNER_TEMP/notes.md" --title "Ombra $($env:GITHUB_REF_NAME.Substring(1))"
           if ($LASTEXITCODE -ne 0) { throw "Release upload failed ($LASTEXITCODE)" }
+
+      # After publishing, so a Sentry outage can't hold back a release; a failure here is retried
+      # with the Upload symbols workflow, which reads the archived PDBs.
+      - name: Upload symbols to Sentry
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+        run: powershell -ExecutionPolicy Bypass -File scripts/upload-symbols.ps1 -Dir build/Release

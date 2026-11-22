@@ -1,0 +1,61 @@
+# Uploads an already published release's symbols to Sentry: the PDBs archived by its release run
+# and the executables from its portable zip. For releases made before release.yml uploaded them,
+# or when that step failed.
+name: Upload symbols
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, such as v0.1.0'
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  symbols:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out the script
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Fetch the release's executables and PDBs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:TAG -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+              throw "Expected a version tag such as v0.1.0, got $env:TAG"
+          }
+          $dir = "$env:RUNNER_TEMP/symbols"
+          New-Item -ItemType Directory -Force "$dir/pdb", "$dir/exe" | Out-Null
+
+          # Newest unexpired artifact named Ombra-PDBs-<tag>-<sha>-<attempt>: "<run id> <name>".
+          $rows = @(gh api --paginate "repos/$env:GH_REPO/actions/artifacts?per_page=100" `
+              --jq '.artifacts | sort_by(.created_at) | reverse | .[] | select(.expired | not) | "\(.workflow_run.id) \(.name)"')
+          if ($LASTEXITCODE -ne 0) { throw "Artifact lookup failed ($LASTEXITCODE)" }
+          $row = $rows | Where-Object { $_.Split(' ')[1].StartsWith("Ombra-PDBs-$env:TAG-") } | Select-Object -First 1
+          if (-not $row) { throw "No unexpired PDB artifact for $env:TAG" }
+          $runId, $name = $row.Split(' ')
+          "PDBs: $name (run $runId)"
+          gh run download $runId -n $name -D "$dir/pdb"
+          if ($LASTEXITCODE -ne 0) { throw "Artifact download failed ($LASTEXITCODE)" }
+
+          gh release download $env:TAG -p Ombra-Portable.zip -D $dir
+          if ($LASTEXITCODE -ne 0) { throw "Release download failed ($LASTEXITCODE)" }
+          Expand-Archive "$dir/Ombra-Portable.zip" "$dir/exe"
+
+      - name: Upload symbols to Sentry
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+        run: powershell -ExecutionPolicy Bypass -File scripts/upload-symbols.ps1 -Dir "$env:RUNNER_TEMP/symbols"
