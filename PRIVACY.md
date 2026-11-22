@@ -36,7 +36,9 @@ understand what went wrong.
   cleaned like the text, so it may hold a path or a window title. At most 5 crash reports a day.
 - **Error reports**, when something fails without crashing (a save, the encoder, capture, audio, an
   update, or Ombra ending without a clean exit): what failed as a fixed code, the GPU vendor
-  involved, your Windows build and GPUs, and the log lines before it. At most 3 of the same error
+  involved, your Windows build and GPUs, and the log lines before it. An encoder failure also
+  sends the recording's sizes, codec, frame rate and kind of target (screen, window, game, and
+  whether it was minimized), and the sizes the encoder accepts. At most 3 of the same error
   and 25 in all per day.
 - **A daily count**: one line per day and version saying whether Ombra crashed, ended uncleanly,
   hit an error or ran fine, so the developer can see how many installs run crash-free.
