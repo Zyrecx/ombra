@@ -168,6 +168,7 @@ public:
     // transient state that reverses itself the moment the window is restored.
     bool IsTargetMinimized() const { return target_hwnd_ && IsIconic(target_hwnd_); }
     uint64_t TargetWindowId() const override { return reinterpret_cast<uint64_t>(target_hwnd_); }
+    bool DeclinedMinimized() const { return declined_minimized_; }
 
     // For the screenshot test (capture_gpu_tests.cpp): fills slot 0 with a solid colour instead of capturing. Must be called before
     // StartCapture().
@@ -291,6 +292,7 @@ private:
     // this class watching the handle live). IsIconic() is cheap enough to call every watchdog poll
     // (200ms) with no caching needed.
     HWND target_hwnd_ = nullptr;
+    bool declined_minimized_ = false;  // the last Open's answer; see DeclinedMinimized
 
     bool        nonfatal_open_ = false;  // set by TryOpen
     std::string fault_reason_;

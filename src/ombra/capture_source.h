@@ -111,6 +111,10 @@ public:
     // Meaningful only right after a false return from Open()/TryOpen(); see TryOpen's comment on
     // the empty-string convention for the routine "not found" case.
     virtual const std::string& FaultReason() const = 0;
+    // After a false return with no FaultReason(): the window to record is there but minimized, so
+    // nothing was opened. WGC sizes a minimized window to its title bar (160x28), below what the
+    // hardware encoders accept, so the caller waits for it to be restored.
+    virtual bool DeclinedMinimized() const { return false; }
     // Frames begin landing in stage slots asynchronously from here on.
     virtual void StartCapture() = 0;
     virtual void Close()        = 0;

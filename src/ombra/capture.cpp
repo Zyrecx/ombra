@@ -462,14 +462,26 @@ bool Capture::Open(bool capture_cursor, const CaptureTarget& target, const LUID&
     // destroy-device cycle on every attempt where the answer was always going to be "not found."
     HWND target_hwnd = nullptr;
     bool use_window   = false;
+    declined_minimized_ = false;
     if (target.mode == CaptureTarget::Mode::Window ||
         target.mode == CaptureTarget::Mode::WindowWithFallback) {
         const std::vector<WindowCandidate> windows = SnapshotTargetWindows();
         const int pick = ChooseTargetWindow(target.window, windows, target.preferred_window);
         if (pick >= 0) {
             const WindowCandidate& w = windows[static_cast<size_t>(pick)];
-            target_hwnd = reinterpret_cast<HWND>(w.id);
-            Log::InfoW(L"capture target window  %s  «%s»", w.image_path.c_str(), w.title.c_str());
+            // ChooseTargetWindow prefers a restored match, so a minimized pick means every match is
+            // minimized: WGC would record its title bar (160x28). One program waits for it to be
+            // restored (silent, no fault reason, like "not found": the supervisor logs it); the
+            // game target records the display, as it does while no game is on screen.
+            if (w.minimized) {
+                if (target.mode == CaptureTarget::Mode::Window) {
+                    declined_minimized_ = true;
+                    return false;
+                }
+            } else {
+                target_hwnd = reinterpret_cast<HWND>(w.id);
+                Log::InfoW(L"capture target window  %s  «%s»", w.image_path.c_str(), w.title.c_str());
+            }
         }
         if (target_hwnd) {
             use_window = true;

@@ -246,9 +246,11 @@ namespace {
 // reason), the routine case PipelineSupervisor polls for. Creates no device, so nothing touches the GPU.
 class ClosedWindowCapture final : public ICaptureSource {
 public:
+    explicit ClosedWindowCapture(bool minimized = false) : minimized_(minimized) {}
     bool Open(bool, const CaptureTarget&, const LUID&) override { return false; }
     bool TryOpen(bool, const CaptureTarget&, const LUID&) override { return false; }
     const std::string& FaultReason() const override { return reason_; }
+    bool DeclinedMinimized() const override { return minimized_; }
     void StartCapture() override {}
     void Close() override {}
     void SetCursorCaptureEnabled(bool) override {}
@@ -275,6 +277,7 @@ public:
 
 private:
     std::string reason_;
+    bool        minimized_;
 };
 
 template <typename Pred>
@@ -310,6 +313,33 @@ TEST_CASE("supervisor: a disarm ends the wait for a closed One window program, s
     sup.SetArmed(false);
     CHECK(WaitFor([&] { return released.load(); }, std::chrono::seconds(4)));
     CHECK_FALSE(sup.Rebuilding());
+    sup.Stop();
+}
+
+TEST_CASE("supervisor: a minimized One window target is waited for, not encoded at its title-bar size") {
+    // Picking a minimized game opened WGC at 160x28: AMF refused that size and the build fell back to
+    // x264 for the rest of the session.
+    Ring video;
+    video.Init(1024 * 1024, 64 * 1024);
+    CaptureTarget target;
+    target.mode         = CaptureTarget::Mode::Window;
+    target.window.match = L"ombra-test-no-such-program.exe";
+    PipelineSupervisor sup(60, 10000, 2, &video, EncoderOptions{}, false, target);
+    sup.SetCaptureFactory([] { return std::make_unique<ClosedWindowCapture>(/*minimized=*/true); });
+    std::atomic<int> encoders{0};
+    sup.SetEncoderFactory([&](EncoderBackend) -> std::unique_ptr<IVideoEncoder> {
+        ++encoders;
+        return nullptr;
+    });
+    std::atomic<bool> fell_back{false};
+    sup.SetEncoderFallbackCallback([&](const std::string&) { fell_back = true; });
+
+    sup.Start([](const IVideoEncoder::AccessUnit&, const Tick&) {}, /*initial_armed=*/true);
+    REQUIRE(WaitFor([&] { return sup.Rebuilding(); }, std::chrono::seconds(3)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));  // at least one 1 s poll
+    CHECK(sup.Rebuilding());
+    CHECK(encoders.load() == 0);
+    CHECK_FALSE(fell_back.load());
     sup.Stop();
 }
 

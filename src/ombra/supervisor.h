@@ -353,11 +353,11 @@ private:
     std::atomic<bool> capture_cursor_{true};  // a Free-tier reconfigure writes it without reconfig_mutex_
     CaptureTarget   target_;
     std::string     capture_resolution_ = "native";  // watchdog thread / under reconfig_mutex_, like fps_
-    // True once a strict Mode::Window "not found" has already been logged for
-    // the current run of retries, so RebuildWithBackoff's 30s-capped loop doesn't re-log the same
-    // "not launched yet" line on every attempt. Cleared the moment a generation actually builds.
-    bool            target_missing_logged_ = false;
-    // The last BuildGeneration failed only because a strict window target isn't running.
+    // What a strict Mode::Window wait last logged ("not running" or "minimized"), so the retry loop
+    // logs each transition once rather than every attempt. Reset the moment a generation builds.
+    enum class TargetWait { None, Missing, Minimized };
+    TargetWait      target_wait_logged_ = TargetWait::None;
+    // The last BuildGeneration failed only because a strict window target isn't running or is minimized.
     // RebuildWithBackoff polls for it every second instead of backing off: nothing is broken, and a
     // game launched late would otherwise go unrecorded for up to the 30 s backoff cap.
     bool            last_build_target_missing_ = false;

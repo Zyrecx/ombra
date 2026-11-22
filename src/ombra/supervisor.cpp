@@ -278,18 +278,20 @@ bool PipelineSupervisor::BuildGeneration(bool fatal_open) {
             Log::Warn("pipeline build: capture open failed -- %s", capture->FaultReason().c_str());
             return false;
         }
-        // A strict Mode::Window with no match returns false with FaultReason() left empty —
-        // that's the only other reason Open()/TryOpen() returns false, a routine
-        // condition worth one log line per transition, not a flood on every RebuildWithBackoff
-        // attempt (up to every 30s, forever, until the target appears).
-        if (!target_missing_logged_) {
-            Log::Info("pipeline build: capture target not running -- checking every second");
-            target_missing_logged_ = true;
+        // A strict Mode::Window with no match, or with only a minimized one, returns false with
+        // FaultReason() left empty: a routine condition worth one log line per transition, not a
+        // flood on every RebuildWithBackoff attempt.
+        const TargetWait wait = capture->DeclinedMinimized() ? TargetWait::Minimized : TargetWait::Missing;
+        if (target_wait_logged_ != wait) {
+            Log::Info(wait == TargetWait::Minimized
+                          ? "pipeline build: capture target minimized -- waiting for it to be restored"
+                          : "pipeline build: capture target not running -- checking every second");
+            target_wait_logged_ = wait;
         }
         last_build_target_missing_ = true;
         return false;
     }
-    target_missing_logged_ = false;
+    target_wait_logged_ = TargetWait::None;
 
     std::unique_ptr<IVideoEncoder> encoder;
     std::unique_ptr<FrameScaler>   scaler;
@@ -729,11 +731,12 @@ bool PipelineSupervisor::RebuildWithBackoff(int attempt, int& backoff_index) {
             return false;
         }
 
-        // Waiting on a window: look before building, so a target that stays closed costs one
-        // window snapshot a second, not an adapter enumeration.
-        if (polling_for_target &&
-            ChooseTargetWindow(EffectiveTarget().window, SnapshotTargetWindows(), 0) < 0) {
-            continue;
+        // Waiting on a window: look before building, so a target that stays closed or minimized
+        // costs one window snapshot a second, not an adapter enumeration.
+        if (polling_for_target) {
+            const std::vector<WindowCandidate> windows = SnapshotTargetWindows();
+            const int pick = ChooseTargetWindow(EffectiveTarget().window, windows, 0);
+            if (pick < 0 || windows[static_cast<size_t>(pick)].minimized) continue;
         }
 
         bool built = false;
@@ -779,7 +782,10 @@ bool PipelineSupervisor::MaybeSwitchWindow(ICaptureSource& capture, int& backoff
     const uint64_t                     current = capture.TargetWindowId();
     const std::vector<WindowCandidate> windows = SnapshotTargetWindows();
     const int      pick = ChooseTargetWindow(EffectiveTarget().window, windows, current);
-    const uint64_t want = pick >= 0 ? windows[static_cast<size_t>(pick)].id : 0;
+    // Recording the display (the game target's fallback), a minimized match isn't worth switching
+    // to: Capture::Open would decline it and record the display again, a barrier for nothing.
+    const bool     skip = pick >= 0 && current == 0 && windows[static_cast<size_t>(pick)].minimized;
+    const uint64_t want = pick >= 0 && !skip ? windows[static_cast<size_t>(pick)].id : 0;
 
     // want == 0 with a window recorded that still exists: the target changed and it no longer
     // counts, so switch to the monitor fallback or to waiting.
