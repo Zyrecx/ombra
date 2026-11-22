@@ -385,6 +385,35 @@ TEST_CASE("an error event is grouped by kind, code and vendor and carries no ide
     CHECK(env.find("minidump") == std::string::npos);
 }
 
+TEST_CASE("an error's context survives the queue file and goes to extra, not the fingerprint") {
+    QueuedError q;
+    q.event_id = "0123456789abcdef0123456789abcdef";
+    q.kind     = "encoder";
+    q.code     = "fallback:size_out_of_range";
+    q.vendor   = "AMF";
+    q.context  = {{"capture_size", "160x28"}, {"target", "window minimized"}, {"system", "spoof"}};
+    const std::optional<QueuedError> back = ParseQueuedError(WriteQueuedError(q));
+    REQUIRE(back);
+    CHECK(back->context == q.context);
+
+    ErrorEventInput in;
+    in.error  = *back;
+    in.system = "Windows 11";
+    const std::string e = BuildErrorEventJson(in);
+    CHECK(e.find("\"capture_size\":\"160x28\"") != std::string::npos);
+    CHECK(e.find("\"fingerprint\":[\"encoder\",\"fallback:size_out_of_range\",\"AMF\"]") != std::string::npos);
+    CHECK(e.find("\"system\":\"Windows 11\"") != std::string::npos);  // a context key can't replace a fixed one
+    CHECK(e.find("spoof") == std::string::npos);
+
+    // A file queued before context existed still parses, with none.
+    std::string old = WriteQueuedError(q);
+    old.erase(old.find(",\"context\""), std::string::npos);
+    old += "}";
+    const std::optional<QueuedError> legacy = ParseQueuedError(old);
+    REQUIRE(legacy);
+    CHECK(legacy->context.empty());
+}
+
 TEST_CASE("errors queue only while sharing is on, then a pass sends them once with the day's count") {
     StubServer server(200);
     UploadEnv  env(server.port());

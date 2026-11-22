@@ -45,6 +45,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace ombra {
@@ -314,6 +315,10 @@ private:
     bool OpenEncodeStage(ICaptureSource& capture, bool fatal_open, const char* context,
                          std::unique_ptr<IVideoEncoder>& encoder, std::unique_ptr<FrameScaler>& scaler,
                          std::optional<EncodeAdapter>* other_gpu = nullptr);
+    // The fallback report's context (crash_upload::ErrorContext).
+    std::vector<std::pair<std::string, std::string>> EncodeReportContext(const ICaptureSource& capture,
+                                                                         const char* context, VideoSize out,
+                                                                         VideoCodec planned) const;
     // Reopen at a new resolution without tearing down the capture device or the ring.
     bool ReopenForResolution(uint32_t w, uint32_t h);
     // Moves the current Pacer out, joins it, and records its per-generation counters.

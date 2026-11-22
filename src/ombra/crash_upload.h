@@ -30,6 +30,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace ombra::crash_upload {
@@ -89,8 +90,11 @@ const char* ErrorKindName(ErrorKind kind);
 // kMaxErrorsPerDay in all per UTC day; past that an error is only counted, and each event sent
 // carries the day's count so far. `log` replaces the tail of today's log. Also marks today's
 // session errored. File I/O: never from the pacer's tick path.
+// `context`: key/value facts about this occurrence (sizes, modes), sent as the event's extra data and
+// never part of the fingerprint. No titles, paths or names: they are scrubbed, but shouldn't be there.
+using ErrorContext = std::vector<std::pair<std::string, std::string>>;
 void ReportError(ErrorKind kind, const std::string& code, const std::string& vendor, const std::string& detail = {},
-                 const std::optional<std::string>& log = std::nullopt);
+                 const std::optional<std::string>& log = std::nullopt, const ErrorContext& context = {});
 
 inline constexpr int kMaxErrorsPerFingerprint = 3;
 inline constexpr int kMaxErrorsPerDay         = 25;
@@ -118,6 +122,7 @@ struct QueuedError {
     std::string event_id, kind, code, vendor, detail, version, commit, day, log;
     double      timestamp = 0;
     int         occurrences = 1;  // the day's count when it was queued
+    ErrorContext context;         // absent in files queued by older versions
 };
 std::string           WriteQueuedError(const QueuedError& e);
 std::optional<QueuedError> ParseQueuedError(const std::string& text);

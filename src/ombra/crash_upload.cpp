@@ -322,6 +322,7 @@ Outcome UploadError(const Dsn& dsn, const std::wstring& name, const ErrorCounts&
     input.error        = *queued;
     input.error.detail = ScrubText(queued->detail, scrub);
     input.error.log    = ScrubText(queued->log, scrub);
+    for (auto& [key, value] : input.error.context) value = ScrubText(value, scrub);
     input.system       = ScrubText(system, scrub);
     if (UsageAllowed()) input.user_id = InstallId();
     input.occurrences_today =
@@ -728,6 +729,11 @@ std::string WriteQueuedError(const QueuedError& e) {
     j.Set("version", JsonValue::MakeStr(e.version));
     j.Set("commit", JsonValue::MakeStr(e.commit));
     j.Set("log", JsonValue::MakeStr(e.log));
+    if (!e.context.empty()) {
+        JsonValue ctx = JsonValue::MakeObject();
+        for (const auto& [key, value] : e.context) ctx.Set(key, JsonValue::MakeStr(value));
+        j.Set("context", std::move(ctx));
+    }
     return WriteJsonCompact(j);
 }
 
@@ -755,6 +761,9 @@ std::optional<QueuedError> ParseQueuedError(const std::string& text) {
     if (const JsonValue* t = j.Find("timestamp"); t && t->type == JsonValue::Type::Number) e.timestamp = t->num;
     if (const JsonValue* n = j.Find("occurrences"); n && n->type == JsonValue::Type::Number)
         e.occurrences = static_cast<int>(n->num);
+    if (const JsonValue* c = j.Find("context"); c && c->type == JsonValue::Type::Object)
+        for (const auto& [key, value] : c->obj)
+            if (value.type == JsonValue::Type::String) e.context.emplace_back(key, value.str);
     if (e.event_id.size() != 32 || e.kind.empty() || e.code.empty()) return std::nullopt;
     return e;
 }
@@ -783,6 +792,9 @@ std::string BuildErrorEventJson(const ErrorEventInput& in) {
     JsonValue extra = JsonValue::MakeObject();
     extra.Set("occurrences_today", JsonValue::MakeNum(in.occurrences_today));
     extra.Set("system", JsonValue::MakeStr(in.system));
+    // After the fixed keys, so a context key can't replace them.
+    for (const auto& [key, value] : q.context)
+        if (!extra.Find(key)) extra.Set(key, JsonValue::MakeStr(value));
     e.Set("extra", std::move(extra));
     return WriteJsonCompact(e);
 }
@@ -797,13 +809,14 @@ std::string BuildErrorEnvelope(const std::string& event_id, const std::string& e
 }
 
 void ReportError(ErrorKind kind, const std::string& code, const std::string& vendor, const std::string& detail,
-                 const std::optional<std::string>& log) {
+                 const std::optional<std::string>& log, const ErrorContext& context) {
     if (!UploadAllowed()) return;  // never queued while Off, so never sent later
     QueuedError e;
     e.kind = ErrorKindName(kind);
     e.code = code;
     e.vendor = vendor;
     e.detail = detail;
+    e.context = context;
     const std::string fingerprint = ErrorFingerprint(e.kind, code, vendor);
     std::lock_guard<std::mutex> lock(g_error_mutex);
     const std::wstring dir = crash::CrashesDir();

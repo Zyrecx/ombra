@@ -330,6 +330,26 @@ bool PipelineSupervisor::BuildGeneration(bool fatal_open) {
     return true;
 }
 
+// What a hardware open was asked to do, for the fallback report: its log line carries the same facts,
+// but the log tail is often cut before them, and Sentry can't search an attachment.
+crash_upload::ErrorContext PipelineSupervisor::EncodeReportContext(const ICaptureSource& capture, const char* context,
+                                                                   VideoSize out, VideoCodec planned) const {
+    const auto size = [](uint32_t w, uint32_t h) { return std::to_string(w) + "x" + std::to_string(h); };
+    const char* mode = target_.mode == CaptureTarget::Mode::Monitor  ? "monitor"
+                     : target_.mode == CaptureTarget::Mode::Window   ? "window"
+                                                                     : "game";
+    return {
+        {"open", context},
+        {"capture_size", size(capture.Width(), capture.Height())},
+        {"encode_size", size(out.width, out.height)},
+        {"capture_resolution", capture_resolution_},
+        {"codec", std::string(VideoCodecName(encoder_opts_.codec)) + " -> " + VideoCodecName(planned)},
+        {"target", std::string(mode) + (capture.TargetWindowId() ? " (window)" : " (display)") +
+                       (capture.IsTargetMinimized() ? ", minimized" : "")},
+        {"fps", std::to_string(fps_)},
+    };
+}
+
 bool PipelineSupervisor::OpenEncodeStage(ICaptureSource& capture, bool fatal_open, const char* context,
                                          std::unique_ptr<IVideoEncoder>& encoder,
                                          std::unique_ptr<FrameScaler>& scaler,
@@ -410,7 +430,8 @@ bool PipelineSupervisor::OpenEncodeStage(ICaptureSource& capture, bool fatal_ope
                          encoder->FaultReason().c_str());
         const std::string code = encoder->FaultCode();
         crash_upload::ReportError(crash_upload::ErrorKind::Encoder, "fallback:" + (code.empty() ? "unknown" : code),
-                                  BackendName(adapter.backend), "hardware encoder would not open, recording on the CPU");
+                                  BackendName(adapter.backend), "hardware encoder would not open, recording on the CPU",
+                                  std::nullopt, EncodeReportContext(capture, context, out, opts.codec));
         encoder = make_encoder(EncoderBackend::X264);
         const uint32_t x264_kbps = BitrateForOpenedCodec(bitrate_kbps_, opts.preset_bitrate_codec, VideoCodec::H264);
         opened  = fatal_open ? encoder->Open(capture.Device(), out.width, out.height, fps_, x264_kbps,
