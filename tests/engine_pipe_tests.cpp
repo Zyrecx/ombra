@@ -43,6 +43,14 @@ public:
                                  nullptr, nullptr, nullptr, nullptr, &raw_store);
     }
 
+    JsonValue ApiRequest(const std::string& type) {
+        JsonValue fields = JsonValue::MakeObject();
+        fields.Set("type", JsonValue::MakeStr(type));
+        return HandlePipeRequest(fields, cfg, supervisor, controller, save_ctx, StartupGpuSummary{},
+                                 nullptr, nullptr, nullptr, nullptr, &raw_store, nullptr, nullptr, {},
+                                 PipeSurface::kApi);
+    }
+
     JsonValue SetConfig(JsonValue patch) {
         JsonValue req = JsonValue::MakeObject();
         req.Set("config", std::move(patch));
@@ -199,6 +207,26 @@ TEST_CASE("engine pipe: set_armed flips the Instant Replay switch and get_status
     CHECK(IsBool(rig.Request("get_status").Find("armed"), rig.supervisor.Armed()));
 
     CHECK(IsBool(rig.Request("set_armed").Find("ok"), false));  // no "armed" field
+}
+
+TEST_CASE("engine pipe api: status answers, internal commands don't exist there") {
+    HandlerRig rig;
+    const JsonValue status = rig.ApiRequest("status");
+    CHECK(IsBool(status.Find("replay"), rig.controller.UserEnabled()));
+    CHECK(IsBool(status.Find("buffering"), rig.supervisor.Armed()));
+    const JsonValue* game = status.Find("game");
+    CHECK((game && game->type == JsonValue::Type::Null));
+    CHECK(status.Find("buffer_seconds"));
+    CHECK_FALSE(status.Find("rss_ws_mb"));
+
+    for (const char* internal : {"get_status", "set_config", "shutdown", "update_install"}) {
+        const JsonValue resp = rig.ApiRequest(internal);
+        CHECK(IsBool(resp.Find("ok"), false));
+        const JsonValue* error = resp.Find("error");
+        CHECK((error && error->type == JsonValue::Type::String && error->str == "unknown_type"));
+    }
+    // ...and the API's names don't exist on the internal surface.
+    CHECK(IsBool(rig.Request("status").Find("ok"), false));
 }
 
 TEST_CASE("engine pipe: set_config accepts a valid key and rejects a bad value and an unknown key") {

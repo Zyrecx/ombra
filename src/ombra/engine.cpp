@@ -1355,12 +1355,15 @@ int RunEngine(int argc, wchar_t** argv) {
         memory_layout.video_pipelines = pipelines.size();
         memory_layout.audio_sources   = all_sources.size();
         memory_layout.file_backed     = (cfg.buffer_storage == "file");
-        pipe_server = std::make_unique<PipeServer>([&](const JsonValue& req) {
+        auto handle = [&](const JsonValue& req, PipeSurface surface) {
             return HandlePipeRequest(req, cfg, supervisor, controller, save_ctx, gpu_summary,
                                       tray.get(), &screenshot_ctx, &autotune_ctx, &pipelines,
                                       &raw_config, &memory_layout, &audio_control,
-                                      ReplayFeedback(true));
-        });
+                                      ReplayFeedback(true), surface);
+        };
+        pipe_server = std::make_unique<PipeServer>(
+            [handle](const JsonValue& req) { return handle(req, PipeSurface::kInternal); },
+            [handle](const JsonValue& req, const PipeCaller&) { return handle(req, PipeSurface::kApi); });
         // A failed Start() here means another ombra.exe instance already owns the pipe's single-
         // instance mutex (pipe.cpp) — i.e. this IS the "Ombra is already running" case, not merely
         // "no pipe available". The message says so explicitly rather than the more generic wording

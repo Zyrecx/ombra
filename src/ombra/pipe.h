@@ -2,10 +2,9 @@
 //
 // One accept thread, one worker thread per connected client, newline-delimited compact JSON
 // framing (json.h's WriteJsonCompact on the way out; a line is read up to '\n' and handed to
-// ParseJson on the way in). The transport owns the version handshake: the first message on a
-// connection must be {"type":"hello","id":...,"v":kProtocolVersion} or the connection is closed
-// with an error response first — application code (the Handler) never sees an unversioned or
-// wrong-version client.
+// ParseJson on the way in). The transport owns the hello (protocol.h): it picks the surface
+// (internal for ombra-ui, the public API for apps) or closes the connection with an error first,
+// so a Handler never sees an unversioned, wrong-version or ungated client.
 //
 // THREADING: Handler is invoked on the connected client's own worker thread, never the accept
 // thread and never any thread main.cpp owns (the pump, the PipelineSupervisor watchdog). This
@@ -22,12 +21,15 @@
 
 #include "ombra/json.h"
 #include "ombra/paths.h"
+#include "ombra/protocol.h"
 
 #include <windows.h>
 
 #include <atomic>
 #include <functional>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -50,14 +52,29 @@ HANDLE AcquireEngineInstanceLock();
 // is ever constructed to take ownership of it.
 void ReleaseEngineInstanceLock(HANDLE lock);
 
+// Who is on the other end of an API connection: the hello's "app", and what the kernel says.
+struct PipeCaller {
+    std::string  app;
+    DWORD        pid = 0;
+    std::wstring exe;  // full image path, empty when it couldn't be read
+};
+
+// True when `exe` is the ombra-ui.exe beside this process's own image: the internal gate.
+bool IsSiblingOverlay(const std::wstring& exe);
+
 class PipeServer {
 public:
-    // Called once per complete, post-handshake message. Returning a JsonValue whose "ok"/"id"
-    // fields are unset is fine — the transport fills in "id" from the request and defaults "ok"
-    // to true if the handler didn't set it explicitly false.
-    using Handler = std::function<JsonValue(const JsonValue& request)>;
+    // Called once per complete, post-hello message. Returning a JsonValue whose "type"/"ok"/"id"
+    // fields are unset is fine — the transport fills in "type" and "id" from the request and
+    // defaults "ok" to true if the handler didn't set it explicitly false.
+    using Handler    = std::function<JsonValue(const JsonValue& request)>;
+    using ApiHandler = std::function<JsonValue(const JsonValue& request, const PipeCaller& caller)>;
+    // Decides whether a client may use the internal surface. The default allows this process
+    // (in-process tests) and IsSiblingOverlay.
+    using InternalGate = std::function<bool(DWORD pid, const std::wstring& exe)>;
 
-    explicit PipeServer(Handler handler);
+    // Without `api`, an API hello is refused with not_allowed.
+    explicit PipeServer(Handler internal, ApiHandler api = nullptr, InternalGate gate = nullptr);
     ~PipeServer();
 
     PipeServer(const PipeServer&) = delete;
@@ -83,9 +100,15 @@ public:
 private:
     void AcceptLoop(HANDLE first);  // `first`: the instance Start() created
     void ServeClient(HANDLE pipe);
+    // Answers the connection's first message into `resp`; the surface it opened, or nullopt
+    // (refused: the connection closes after `resp`).
+    std::optional<PipeSurface> Hello(const JsonValue& req, HANDLE pipe, PipeCaller& caller, JsonValue& resp);
 
     Handler                  handler_;
+    ApiHandler               api_handler_;
+    InternalGate             internal_gate_;
     std::atomic<bool>        running_{false};
+    std::atomic<int>         api_clients_{0};  // live API connections, capped at kMaxApiClients
     HANDLE                   instance_mutex_ = nullptr;  // single-instance guard, see pipe.cpp
     HANDLE                   stop_event_ = nullptr;      // manual-reset; every pipe wait includes it
     std::thread              accept_thread_;

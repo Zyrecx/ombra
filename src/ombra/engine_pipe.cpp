@@ -57,6 +57,7 @@
 #include <cstring>
 #include <cwctype>
 #include <deque>
+#include <span>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -424,6 +425,7 @@ struct PipeRequest {
     JsonValue OnGetConfig();
     JsonValue OnSetConfig();
     JsonValue OnGetStatus();
+    JsonValue OnApiStatus();
     JsonValue OnSaveNow();
     JsonValue OnScreenshot();
     JsonValue OnSetArmed();
@@ -801,6 +803,17 @@ JsonValue PipeRequest::OnSetConfig() {
                                         : ": written to config.json and applied");
     }
     if (!note.empty()) resp.Set("note", JsonValue::MakeStr(note));
+    return resp;
+}
+
+// The public API's status: a small, stable subset of get_status (protocol.h).
+JsonValue PipeRequest::OnApiStatus() {
+    const std::wstring game = controller.CurrentGamePid() ? controller.CurrentGameFolder() : std::wstring{};
+    JsonValue resp = JsonValue::MakeObject();
+    resp.Set("replay", JsonValue::MakeBool(controller.UserEnabled()));
+    resp.Set("buffering", JsonValue::MakeBool(supervisor.Armed()));
+    resp.Set("game", game.empty() ? JsonValue{} : JsonValue::MakeStr(NarrowUtf8(game)));
+    resp.Set("buffer_seconds", JsonValue::MakeNum(cfg.buffer_seconds));
     return resp;
 }
 
@@ -1404,6 +1417,11 @@ constexpr PipeCommand kPipeCommands[] = {
     {"upload_soon",               false, &PipeRequest::OnUploadSoon},
 };
 
+// The public API (protocol.h): its own names and shapes, a compatibility promise once released.
+constexpr PipeCommand kApiCommands[] = {
+    {"status", true, &PipeRequest::OnApiStatus},
+};
+
 }  // namespace
 
 JsonValue HandlePipeRequest(const JsonValue& req, Config& cfg, PipelineSupervisor& supervisor,
@@ -1412,7 +1430,8 @@ JsonValue HandlePipeRequest(const JsonValue& req, Config& cfg, PipelineSuperviso
                              ScreenshotContext* screenshot_ctx, AutotuneContext* autotune_ctx,
                              const std::vector<std::unique_ptr<MonitorPipeline>>* all_pipelines,
                              RawConfigMap* raw_store, MemoryLayout* memory,
-                             AudioSourceControl* audio_sources, const StartSaveFeedback& save_feedback) {
+                             AudioSourceControl* audio_sources, const StartSaveFeedback& save_feedback,
+                             PipeSurface surface) {
     const JsonValue* type_v = req.Find("type");
     const std::string type  = (type_v && type_v->type == JsonValue::Type::String)
                                    ? type_v->str : "";
@@ -1434,7 +1453,9 @@ JsonValue HandlePipeRequest(const JsonValue& req, Config& cfg, PipelineSuperviso
     PipeRequest request{req, cfg, supervisor, controller, save_ctx, gpu_summary, tray, screenshot_ctx,
                         autotune_ctx, all_pipelines, raw_store, memory, audio_sources, save_feedback,
                         config_lock};
-    for (const PipeCommand& command : kPipeCommands) {
+    const bool api = surface == PipeSurface::kApi;
+    for (const PipeCommand& command : api ? std::span<const PipeCommand>(kApiCommands)
+                                          : std::span<const PipeCommand>(kPipeCommands)) {
         if (type != command.type) continue;
         if (command.config_lock) config_lock.lock();
         return (request.*command.handle)();
@@ -1442,7 +1463,12 @@ JsonValue HandlePipeRequest(const JsonValue& req, Config& cfg, PipelineSuperviso
 
     JsonValue resp = JsonValue::MakeObject();
     resp.Set("ok", JsonValue::MakeBool(false));
-    resp.Set("error", JsonValue::MakeStr("unknown type"));
+    if (api) {
+        resp.Set("error", JsonValue::MakeStr("unknown_type"));
+        resp.Set("message", JsonValue::MakeStr("no command named \"" + type + "\""));
+    } else {
+        resp.Set("error", JsonValue::MakeStr("unknown type"));
+    }
     return resp;
 }
 

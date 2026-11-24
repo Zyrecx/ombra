@@ -119,7 +119,8 @@ bool PipeClient::Hello(DWORD timeout_ms, std::string* reject_reason) {
         // An explicit response, just not a success one (e.g. a version mismatch) — distinct from
         // "nothing came back at all" so a caller knows retrying can't help.
         if (reject_reason) {
-            const JsonValue* err = resp.Find("error");
+            const JsonValue* err = resp.Find("message");
+            if (!err || err->type != JsonValue::Type::String) err = resp.Find("error");
             *reject_reason = (err && err->type == JsonValue::Type::String) ? err->str
                                                                             : "rejected (no reason given)";
         }

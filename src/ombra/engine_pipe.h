@@ -10,6 +10,7 @@
 #include "ombra/gputopo.h"
 #include "ombra/hotkeys.h"
 #include "ombra/json.h"
+#include "ombra/protocol.h"
 #include "ombra/reconfig.h"
 #include "ombra/ring.h"
 #include "ombra/save.h"
@@ -171,6 +172,8 @@ JsonValue HandlePipeRequest(const JsonValue& req, Config& cfg, PipelineSuperviso
                              // new source list (set_config). nullptr: audio_status answers with no
                              // sources and audio.sources edits apply on the next start.
                              AudioSourceControl* audio_sources = nullptr,
-                             const StartSaveFeedback& save_feedback = {});
+                             const StartSaveFeedback& save_feedback = {},
+                             // kApi answers only kApiCommands (protocol.h's public API).
+                             PipeSurface surface = PipeSurface::kInternal);
 
 }  // namespace ombra

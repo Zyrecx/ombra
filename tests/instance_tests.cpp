@@ -25,6 +25,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace ombra::test {
 
@@ -423,6 +424,232 @@ TEST_CASE("pipe: malformed JSON gets an error and the connection closed") {
     REQUIRE(client.WriteRaw("{\"type\":\n"));
     CHECK(OkIs(client.Receive(), false));
     CHECK(client.ServerClosed());
+}
+
+namespace {
+
+JsonValue ApiHello(double api = kApiVersionMax, const char* app = "Test App") {
+    JsonValue r = Request("hello", 1);
+    r.Set("api", JsonValue::MakeNum(api));
+    if (app) r.Set("app", JsonValue::MakeStr(app));
+    return r;
+}
+
+// Internal requests echo like EchoServer; API requests answer with the caller's app name.
+class TwoSurfaceServer {
+public:
+    explicit TwoSurfaceServer(PipeServer::InternalGate gate = nullptr)
+        : server_(
+              [this](const JsonValue&) {
+                  internal.fetch_add(1);
+                  return JsonValue::MakeObject();
+              },
+              [this](const JsonValue&, const PipeCaller& caller) {
+                  api.fetch_add(1);
+                  JsonValue resp = JsonValue::MakeObject();
+                  resp.Set("app", JsonValue::MakeStr(caller.app));
+                  resp.Set("self", JsonValue::MakeBool(caller.pid == GetCurrentProcessId()));
+                  return resp;
+              },
+              std::move(gate)) {}
+
+    std::atomic<int> internal{0};
+    std::atomic<int> api{0};
+    PipeServer       server_;
+};
+
+}  // namespace
+
+TEST_CASE("pipe api: hello, then requests reach the API handler with type and id echoed") {
+    TwoSurfaceServer s;
+    REQUIRE(s.server_.Start());
+    RawPipeClient client;
+    REQUIRE(client.Connected());
+
+    REQUIRE(client.Send(ApiHello()));
+    const JsonValue hello = client.Receive();
+    CHECK(OkIs(hello, true));
+    CHECK(StrOf(hello, "type") == "hello");
+    CHECK(NumOf(hello, "api") == kApiVersionMax);
+    CHECK(!StrOf(hello, "engine").empty());
+
+    JsonValue req = JsonValue::MakeObject();
+    req.Set("type", JsonValue::MakeStr("status"));
+    req.Set("id", JsonValue::MakeStr("a7"));
+    REQUIRE(client.Send(req));
+    const JsonValue resp = client.Receive();
+    CHECK(OkIs(resp, true));
+    CHECK(StrOf(resp, "type") == "status");
+    CHECK(StrOf(resp, "id") == "a7");
+    CHECK(StrOf(resp, "app") == "Test App");
+    const JsonValue* self = resp.Find("self");
+    CHECK((self && self->type == JsonValue::Type::Bool && self->b));
+    CHECK(s.internal.load() == 0);
+}
+
+TEST_CASE("pipe api: a request without an id is refused and the connection stays open") {
+    TwoSurfaceServer s;
+    REQUIRE(s.server_.Start());
+    RawPipeClient client;
+    REQUIRE(client.Connected());
+    REQUIRE(client.Send(ApiHello()));
+    REQUIRE(OkIs(client.Receive(), true));
+
+    REQUIRE(client.WriteRaw("{\"type\":\"status\"}\n"));
+    const JsonValue refused = client.Receive();
+    CHECK(OkIs(refused, false));
+    CHECK(StrOf(refused, "error") == "bad_request");
+    CHECK(StrOf(refused, "type") == "status");
+    CHECK(s.api.load() == 0);
+
+    REQUIRE(client.Send(Request("status", 2)));
+    CHECK(OkIs(client.Receive(), true));
+    CHECK(s.api.load() == 1);
+}
+
+TEST_CASE("pipe api: refused hellos say why and close the connection") {
+    TwoSurfaceServer s;
+    REQUIRE(s.server_.Start());
+    RawPipeClient client;
+    REQUIRE(client.Connected());
+
+    std::string code = "bad_request";
+    SUBCASE("unsupported version") {
+        REQUIRE(client.Send(ApiHello(kApiVersionMax + 1)));
+        code = "unsupported_version";
+    }
+    SUBCASE("fractional version") { REQUIRE(client.Send(ApiHello(kApiVersionMin + 0.5))); code = "unsupported_version"; }
+    SUBCASE("no app") { REQUIRE(client.Send(ApiHello(kApiVersionMax, nullptr))); }
+    SUBCASE("empty app") { REQUIRE(client.Send(ApiHello(kApiVersionMax, ""))); }
+    SUBCASE("app with a newline") { REQUIRE(client.Send(ApiHello(kApiVersionMax, "a\nb"))); }
+    SUBCASE("neither api nor v") { REQUIRE(client.Send(Request("hello", 1))); }
+
+    const JsonValue resp = client.Receive();
+    CHECK(OkIs(resp, false));
+    CHECK(StrOf(resp, "type") == "hello");
+    CHECK(StrOf(resp, "error") == code);
+    CHECK(!StrOf(resp, "message").empty());
+    if (code == "unsupported_version") {
+        CHECK(NumOf(resp, "min") == kApiVersionMin);
+        CHECK(NumOf(resp, "max") == kApiVersionMax);
+    }
+    CHECK(client.ServerClosed());
+    CHECK(s.api.load() == 0);
+}
+
+TEST_CASE("pipe api: a server without an API handler refuses API hellos") {
+    EchoServer echo;
+    REQUIRE(echo.server_.Start());
+    RawPipeClient client;
+    REQUIRE(client.Connected());
+    REQUIRE(client.Send(ApiHello()));
+    const JsonValue resp = client.Receive();
+    CHECK(OkIs(resp, false));
+    CHECK(StrOf(resp, "error") == "not_allowed");
+    CHECK(client.ServerClosed());
+}
+
+TEST_CASE("pipe api: a line past the API limit closes the connection") {
+    TwoSurfaceServer s;
+    REQUIRE(s.server_.Start());
+    RawPipeClient client;
+    REQUIRE(client.Connected());
+    REQUIRE(client.Send(ApiHello()));
+    REQUIRE(OkIs(client.Receive(), true));
+
+    JsonValue big = Request("status", 2);
+    big.Set("pad", JsonValue::MakeStr(std::string(kMaxApiMessageBytes, 'x')));
+    client.Send(big);  // may fail part-way once the server closes
+    CHECK(client.ServerClosed());
+    CHECK(s.api.load() == 0);
+}
+
+TEST_CASE("pipe: the internal surface is refused to a client the gate doesn't pass") {
+    std::atomic<DWORD> seen_pid{0};
+    TwoSurfaceServer s([&](DWORD pid, const std::wstring&) {
+        seen_pid = pid;
+        return false;
+    });
+    REQUIRE(s.server_.Start());
+    RawPipeClient client;
+    REQUIRE(client.Connected());
+    REQUIRE(client.Send(Hello()));
+    const JsonValue resp = client.Receive();
+    CHECK(OkIs(resp, false));
+    CHECK(StrOf(resp, "error") == "not_allowed");
+    CHECK(client.ServerClosed());
+    CHECK(seen_pid.load() == GetCurrentProcessId());
+    CHECK(s.internal.load() == 0);
+}
+
+TEST_CASE("pipe: the internal gate's default passes only ombra-ui.exe beside this image") {
+    wchar_t self[MAX_PATH * 2];
+    const DWORD n = GetModuleFileNameW(nullptr, self, MAX_PATH * 2);
+    REQUIRE(n > 0);
+    std::wstring dir(self, n);
+    dir.erase(dir.find_last_of(L'\\') + 1);
+    CHECK(IsSiblingOverlay(dir + L"ombra-ui.exe"));
+    CHECK(IsSiblingOverlay(dir + L"OMBRA-UI.EXE"));
+    CHECK_FALSE(IsSiblingOverlay(dir + L"ombra-ui.exe.bak"));
+    CHECK_FALSE(IsSiblingOverlay(dir + L"sub\\ombra-ui.exe"));
+    CHECK_FALSE(IsSiblingOverlay(L"C:\\Elsewhere\\ombra-ui.exe"));
+    CHECK_FALSE(IsSiblingOverlay(L""));
+    CHECK_FALSE(IsSiblingOverlay(std::wstring(self, n)));  // a real file, but not the overlay
+    // The same file under another spelling still passes: identity, not path text.
+    wchar_t short_path[MAX_PATH * 2];
+    const DWORD s = GetShortPathNameW((dir + L"ombra-ui.exe").c_str(), short_path, MAX_PATH * 2);
+    if (s > 0 && s < MAX_PATH * 2) CHECK(IsSiblingOverlay(std::wstring(short_path, s)));
+    CHECK(IsSiblingOverlay(L"\\\\?\\" + dir + L"ombra-ui.exe"));
+}
+
+TEST_CASE("pipe api: app connections are capped; a closed one frees its place") {
+    TwoSurfaceServer s;
+    REQUIRE(s.server_.Start());
+    std::vector<std::unique_ptr<RawPipeClient>> apps;
+    for (int i = 0; i < kMaxApiClients; ++i) {
+        apps.push_back(std::make_unique<RawPipeClient>());
+        REQUIRE(apps.back()->Connected());
+        REQUIRE(apps.back()->Send(ApiHello()));
+        REQUIRE(OkIs(apps.back()->Receive(), true));
+    }
+    {
+        RawPipeClient extra;
+        REQUIRE(extra.Connected());
+        REQUIRE(extra.Send(ApiHello()));
+        const JsonValue resp = extra.Receive();
+        CHECK(OkIs(resp, false));
+        CHECK(StrOf(resp, "error") == "too_many_connections");
+        CHECK(extra.ServerClosed());
+    }
+    // The internal surface doesn't count against it.
+    {
+        RawPipeClient overlay;
+        REQUIRE(overlay.Connected());
+        REQUIRE(overlay.Send(Hello()));
+        CHECK(OkIs(overlay.Receive(), true));
+    }
+    apps.front().reset();
+    bool admitted = false;
+    for (int attempt = 0; attempt < 50 && !admitted; ++attempt) {  // the server sees the close a moment later
+        RawPipeClient again;
+        REQUIRE(again.Connected());
+        REQUIRE(again.Send(ApiHello()));
+        admitted = OkIs(again.Receive(), true);
+        if (!admitted) Sleep(20);
+    }
+    CHECK(admitted);
+}
+
+TEST_CASE("pipe: a client that never says hello is dropped") {
+    TwoSurfaceServer s;
+    REQUIRE(s.server_.Start());
+    RawPipeClient client;
+    REQUIRE(client.Connected());
+    const ULONGLONG start = GetTickCount64();
+    CHECK(client.ServerClosed(kHelloTimeoutMs + 3000));
+    const ULONGLONG waited = GetTickCount64() - start;
+    CHECK(waited >= kHelloTimeoutMs - 100);
+    CHECK(waited < kHelloTimeoutMs + 3000);
 }
 
 TEST_CASE("pipe: a client dropping mid-message doesn't wedge the server") {

@@ -3,10 +3,13 @@
 
 #include "ombra/log.h"
 #include "ombra/protocol.h"
+#include "ombra/version.h"
 
 #include <sddl.h>
 
 #include <algorithm>
+#include <cstring>
+#include <optional>
 #include <utility>
 
 namespace ombra {
@@ -50,13 +53,13 @@ struct PipeIo {
     }
 };
 
-// Completes the overlapped call that returned `started`, or abandons it once `stop` is set.
-// Returns false on failure or stop; GetLastError() then holds the reason.
-bool FinishIo(HANDLE pipe, PipeIo& io, BOOL started, HANDLE stop, DWORD& n) {
+// Completes the overlapped call that returned `started`, or abandons it once `stop` is set or
+// `timeout_ms` passes. Returns false on failure, stop or timeout.
+bool FinishIo(HANDLE pipe, PipeIo& io, BOOL started, HANDLE stop, DWORD& n, DWORD timeout_ms = INFINITE) {
     n = 0;
     if (!started && GetLastError() != ERROR_IO_PENDING) return false;
     const HANDLE waits[2] = {io.ov.hEvent, stop};
-    if (WaitForMultipleObjects(2, waits, FALSE, INFINITE) != WAIT_OBJECT_0) {
+    if (WaitForMultipleObjects(2, waits, FALSE, timeout_ms) != WAIT_OBJECT_0) {
         CancelIoEx(pipe, &io.ov);
         GetOverlappedResult(pipe, &io.ov, &n, TRUE);  // the kernel owns `ov` until the cancel lands
         return false;
@@ -70,10 +73,17 @@ bool FinishIo(HANDLE pipe, PipeIo& io, BOOL started, HANDLE stop, DWORD& n) {
 // together — so `pending` must live with the connection (ServeClient's loop), not this call, or
 // everything after the first '\n' in a chunk is silently lost. Returns false on disconnect, error,
 // or stop.
-bool ReadLine(HANDLE pipe, PipeIo& io, HANDLE stop, std::string& pending, std::string& out) {
+// `deadline` (GetTickCount64, 0 for none) bounds the whole line.
+bool ReadLine(HANDLE pipe, PipeIo& io, HANDLE stop, std::string& pending, std::string& out,
+              size_t max_bytes, ULONGLONG deadline) {
     size_t searched = 0;  // only new bytes: rescanning all of `pending` per read is quadratic
     for (;;) {
-        const size_t nl = pending.find('\n', searched);
+        const size_t nl  = pending.find('\n', searched);
+        const size_t len = nl == std::string::npos ? pending.size() : nl;
+        if (len > max_bytes) {
+            Log::Warn("pipe: dropping a client whose message passed %zu bytes", max_bytes);
+            return false;
+        }
         if (nl != std::string::npos) {
             out = pending.substr(0, nl);
             pending.erase(0, nl + 1);
@@ -82,14 +92,68 @@ bool ReadLine(HANDLE pipe, PipeIo& io, HANDLE stop, std::string& pending, std::s
         searched = pending.size();
         char  buf[256];
         DWORD n = 0;
-        const BOOL ok = ReadFile(pipe, buf, sizeof(buf), nullptr, io.Next());
-        if (!FinishIo(pipe, io, ok, stop, n) || n == 0) return false;
-        pending.append(buf, n);
-        if (pending.size() > kMaxMessageBytes) {
-            Log::Warn("pipe: dropping a client whose message passed %zu bytes", kMaxMessageBytes);
-            return false;
+        DWORD timeout = INFINITE;
+        if (deadline) {
+            const ULONGLONG now = GetTickCount64();
+            if (now >= deadline) return false;
+            timeout = static_cast<DWORD>(deadline - now);
         }
+        const BOOL ok = ReadFile(pipe, buf, sizeof(buf), nullptr, io.Next());
+        if (!FinishIo(pipe, io, ok, stop, n, timeout) || n == 0) return false;
+        pending.append(buf, n);
     }
+}
+
+// FILE_ID_INFO of the file at `path`: the same file under any spelling (short names, subst
+// drives, \\?\ prefixes) compares equal.
+std::optional<FILE_ID_INFO> FileIdentity(const std::wstring& path) {
+    HANDLE f = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return std::nullopt;
+    FILE_ID_INFO id{};
+    const bool ok = GetFileInformationByHandleEx(f, FileIdInfo, &id, sizeof(id)) != FALSE;
+    CloseHandle(f);
+    if (!ok) return std::nullopt;
+    return id;
+}
+
+// Image paths can reach 32767 characters; MAX_PATH-sized buffers would fail a long install path.
+constexpr DWORD kMaxImagePath = 32768;
+
+// The full image path of the process on the other end of `pipe`, empty when it can't be read.
+std::wstring ClientImagePath(HANDLE pipe, DWORD& pid) {
+    pid = 0;
+    if (!GetNamedPipeClientProcessId(pipe, &pid)) return {};
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return {};
+    std::wstring path(kMaxImagePath, L'\0');
+    DWORD size = kMaxImagePath;
+    const bool ok = QueryFullProcessImageNameW(process, 0, path.data(), &size) != FALSE;
+    CloseHandle(process);
+    path.resize(ok ? size : 0);
+    return path;
+}
+
+JsonValue ErrorReply(const std::string& type, const char* code, const std::string& message) {
+    JsonValue resp = JsonValue::MakeObject();
+    resp.Set("type", JsonValue::MakeStr(type));
+    resp.Set("ok", JsonValue::MakeBool(false));
+    resp.Set("error", JsonValue::MakeStr(code));
+    resp.Set("message", JsonValue::MakeStr(message));
+    return resp;
+}
+
+std::string StringField(const JsonValue& obj, const char* key) {
+    const JsonValue* v = obj.Find(key);
+    return (v && v->type == JsonValue::Type::String) ? v->str : std::string{};
+}
+
+// An "app" name: 1-64 bytes, no control characters (it lands in logs and toasts).
+bool ValidAppName(const std::string& app) {
+    if (app.empty() || app.size() > 64) return false;
+    return std::none_of(app.begin(), app.end(),
+                        [](char c) { return static_cast<unsigned char>(c) < 0x20 || c == 0x7f; });
 }
 
 bool WriteAll(HANDLE pipe, PipeIo& io, HANDLE stop, const std::string& data) {
@@ -129,8 +193,26 @@ HANDLE CreatePipeInstance(bool first) {
 
 }  // namespace
 
-PipeServer::PipeServer(Handler handler)
-    : handler_(std::move(handler)), stop_event_(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {}
+bool IsSiblingOverlay(const std::wstring& exe) {
+    if (exe.empty()) return false;
+    std::wstring self(kMaxImagePath, L'\0');
+    const DWORD n = GetModuleFileNameW(nullptr, self.data(), kMaxImagePath);
+    if (n == 0 || n >= kMaxImagePath) return false;
+    self.resize(n);
+    self.erase(self.find_last_of(L'\\') + 1);
+    const auto want = FileIdentity(self + L"ombra-ui.exe");
+    const auto got  = FileIdentity(exe);
+    return want && got && want->VolumeSerialNumber == got->VolumeSerialNumber &&
+           std::memcmp(&want->FileId, &got->FileId, sizeof(FILE_ID_128)) == 0;
+}
+
+PipeServer::PipeServer(Handler internal, ApiHandler api, InternalGate gate)
+    : handler_(std::move(internal)),
+      api_handler_(std::move(api)),
+      internal_gate_(gate ? std::move(gate) : InternalGate([](DWORD pid, const std::wstring& exe) {
+          return pid == GetCurrentProcessId() || IsSiblingOverlay(exe);
+      })),
+      stop_event_(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {}
 
 PipeServer::~PipeServer() {
     Stop();
@@ -263,10 +345,80 @@ void PipeServer::AcceptLoop(HANDLE first) {
     if (first) CloseHandle(first);  // Stop() before the loop ran once
 }
 
+std::optional<PipeSurface> PipeServer::Hello(const JsonValue& req, HANDLE pipe, PipeCaller& caller,
+                                             JsonValue& resp) {
+    resp = JsonValue::MakeObject();
+    resp.Set("type", JsonValue::MakeStr("hello"));
+    auto refuse = [&](const char* code, const std::string& message) {
+        resp = ErrorReply("hello", code, message);
+        return std::nullopt;
+    };
+    // A whole number, or -1 when the field is missing or anything else.
+    auto version_of = [&](const char* key) {
+        const JsonValue* v = req.Find(key);
+        if (!v || v->type != JsonValue::Type::Number || !(v->num >= 0 && v->num <= 1e6) ||
+            v->num != static_cast<double>(static_cast<int>(v->num)))
+            return -1;
+        return static_cast<int>(v->num);
+    };
+    if (StringField(req, "type") != "hello")
+        return refuse("bad_request", "the first message must be {\"type\":\"hello\",\"api\":" +
+                                         std::to_string(kApiVersionMax) + ",\"app\":\"...\"}");
+
+    caller.exe = ClientImagePath(pipe, caller.pid);
+
+    if (req.Find("api")) {
+        const int api = version_of("api");
+        if (api < kApiVersionMin || api > kApiVersionMax) {
+            refuse("unsupported_version", "this Ombra speaks API versions " +
+                                              std::to_string(kApiVersionMin) + " to " +
+                                              std::to_string(kApiVersionMax));
+            resp.Set("min", JsonValue::MakeNum(kApiVersionMin));
+            resp.Set("max", JsonValue::MakeNum(kApiVersionMax));
+            return std::nullopt;
+        }
+        const JsonValue* id = req.Find("id");
+        if (!id || (id->type != JsonValue::Type::Number && id->type != JsonValue::Type::String))
+            return refuse("bad_request", "every request needs an \"id\" (number or string)");
+        caller.app = StringField(req, "app");
+        if (!ValidAppName(caller.app))
+            return refuse("bad_request", "\"app\" must name the caller: 1-64 characters, no control characters");
+        if (!api_handler_) return refuse("not_allowed", "this engine takes no API connections");
+        if (api_clients_.fetch_add(1) >= kMaxApiClients) {
+            api_clients_.fetch_sub(1);
+            Log::Warn("pipe: refused app \"%s\": %d app connections already open", caller.app.c_str(),
+                      kMaxApiClients);
+            return refuse("too_many_connections", "too many apps are connected to Ombra");
+        }
+        Log::Info("pipe: app \"%s\" connected (pid %lu, %ls)", caller.app.c_str(), caller.pid,
+                  caller.exe.empty() ? L"image unknown" : caller.exe.c_str());
+        resp.Set("ok", JsonValue::MakeBool(true));
+        resp.Set("api", JsonValue::MakeNum(api));
+        resp.Set("engine", JsonValue::MakeStr(AppVersion()));
+        return PipeSurface::kApi;
+    }
+
+    if (req.Find("v")) {
+        if (!internal_gate_(caller.pid, caller.exe)) {
+            Log::Warn("pipe: refused the internal protocol to pid %lu (%ls)", caller.pid,
+                      caller.exe.empty() ? L"image unknown" : caller.exe.c_str());
+            return refuse("not_allowed", "the internal protocol is only for ombra-ui; apps say hello with \"api\"");
+        }
+        if (version_of("v") != kProtocolVersion)
+            return refuse("unsupported_version",
+                          "expected internal protocol version " + std::to_string(kProtocolVersion));
+        resp.Set("ok", JsonValue::MakeBool(true));
+        resp.Set("v", JsonValue::MakeNum(kProtocolVersion));
+        return PipeSurface::kInternal;
+    }
+    return refuse("bad_request", "hello needs \"api\" (the API version the client speaks)");
+}
+
 void PipeServer::ServeClient(HANDLE pipe) {
-    // The version handshake is the transport's job (protocol.h), not the Handler's: the first
-    // message must be {"type":"hello","v":kProtocolVersion,...} before anything else is accepted.
-    bool handshaked = false;
+    // The hello is the transport's job (protocol.h), not the Handler's: it picks the surface, and
+    // nothing reaches a Handler before it.
+    std::optional<PipeSurface> surface;
+    PipeCaller  caller;
     std::string pending;  // bytes read off the pipe past the last message's '\n' — see ReadLine
     PipeIo io;
     auto write = [&](const JsonValue& resp) {
@@ -274,56 +426,61 @@ void PipeServer::ServeClient(HANDLE pipe) {
     };
 
     while (running_.load()) {
+        const size_t max_bytes =
+            surface == PipeSurface::kInternal ? kMaxMessageBytes : kMaxApiMessageBytes;
         std::string line;
-        if (!ReadLine(pipe, io, stop_event_, pending, line)) break;
+        // A client that never says hello would hold this thread and its pipe instance forever.
+        const ULONGLONG deadline = surface ? 0 : GetTickCount64() + kHelloTimeoutMs;
+        if (!ReadLine(pipe, io, stop_event_, pending, line, max_bytes, deadline)) break;
         if (line.empty()) continue;
 
         JsonValue request;
         try {
             request = ParseJson(line);
         } catch (const std::string& err) {
-            JsonValue resp = JsonValue::MakeObject();
-            resp.Set("ok", JsonValue::MakeBool(false));
-            resp.Set("error", JsonValue::MakeStr("malformed JSON: " + err));
-            write(resp);
+            write(ErrorReply("error", "bad_message", "malformed JSON: " + err));
             break;  // framing is now suspect for this connection — close rather than guess
         }
+        if (request.type != JsonValue::Type::Object) {
+            write(ErrorReply("error", "bad_message", "a message must be a JSON object"));
+            break;
+        }
 
-        const JsonValue* id_field = request.Find("id");
-        auto respond_with_id = [&](JsonValue resp) {
+        const std::string type     = StringField(request, "type");
+        const JsonValue*  id_field = request.Find("id");
+        const bool        valid_id = id_field && (id_field->type == JsonValue::Type::Number ||
+                                                  id_field->type == JsonValue::Type::String);
+        auto reply = [&](JsonValue resp) {
+            if (!resp.Find("type")) resp.Set("type", JsonValue::MakeStr(type));
+            if (!resp.Find("ok")) resp.Set("ok", JsonValue::MakeBool(true));
             if (id_field) resp.Set("id", *id_field);
-            return resp;
+            return write(resp);
         };
 
-        if (!handshaked) {
-            const JsonValue* type = request.Find("type");
-            const JsonValue* v    = request.Find("v");
-            if (!type || type->type != JsonValue::Type::String || type->str != "hello" ||
-                !v || v->type != JsonValue::Type::Number ||
-                static_cast<int>(v->num) != kProtocolVersion) {
-                JsonValue resp = JsonValue::MakeObject();
-                resp.Set("type", JsonValue::MakeStr("hello"));
-                resp.Set("ok", JsonValue::MakeBool(false));
-                resp.Set("error", JsonValue::MakeStr(
-                    "expected {\"type\":\"hello\",\"v\":" + std::to_string(kProtocolVersion) +
-                    ",...} as the first message"));
-                write(respond_with_id(resp));
-                break;
-            }
-            handshaked = true;
-            JsonValue resp = JsonValue::MakeObject();
-            resp.Set("type", JsonValue::MakeStr("hello"));
-            resp.Set("ok", JsonValue::MakeBool(true));
-            resp.Set("v", JsonValue::MakeNum(kProtocolVersion));
-            if (!write(respond_with_id(resp))) break;
+        if (!surface) {
+            JsonValue resp;
+            surface = Hello(request, pipe, caller, resp);
+            if (!reply(std::move(resp)) || !surface) break;
             continue;
         }
 
-        JsonValue resp = handler_(request);
-        if (!resp.Find("ok")) resp.Set("ok", JsonValue::MakeBool(true));
-        resp = respond_with_id(resp);
-        if (!write(resp)) break;
+        if (*surface == PipeSurface::kInternal) {
+            if (!reply(handler_(request))) break;
+            continue;
+        }
+        if (!valid_id) {
+            if (!reply(ErrorReply(type, "bad_request", "every request needs an \"id\" (number or string)")))
+                break;
+            continue;
+        }
+        if (type.empty() || type == "hello") {
+            if (!reply(ErrorReply(type, "bad_request", type.empty() ? "missing \"type\"" : "already said hello")))
+                break;
+            continue;
+        }
+        if (!reply(api_handler_(request, caller))) break;
     }
+    if (surface == PipeSurface::kApi) api_clients_.fetch_sub(1);
 
     // Each client has its own instance, so closing it is the disconnect, and what's written stays
     // readable until the client closes its end. DisconnectNamedPipe would discard that, and the

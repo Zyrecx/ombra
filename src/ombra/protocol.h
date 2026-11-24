@@ -1,22 +1,43 @@
-// The ombra.exe <-> ombra-ui.exe pipe protocol.
+// The engine's pipe protocol: two surfaces on one pipe, chosen by the hello.
 //
-// This header names the wire contract; it implements nothing. pipe.h/.cpp carries the bytes,
-// engine_pipe.cpp implements the handlers (kPipeCommands), ombra-ui is the client.
-// Versioned from message one: this pipe is the extension boundary too.
+// This header names the wire contract; it implements nothing. pipe.h/.cpp carries the bytes and
+// owns the hello, engine_pipe.cpp implements the handlers (kPipeCommands, kApiCommands).
 //
 // Transport: newline-delimited compact JSON (json.h's WriteJsonCompact — never the pretty
 // printer, whose embedded real newlines would be mistaken for message boundaries). Every message
-// is a JSON object. A request carries "type" and an "id" the response echoes back, so a client
-// with multiple requests in flight can match responses without serializing them one at a time.
-// A response additionally carries "ok": bool, and either the type-specific payload fields or an
-// "error" string.
+// is a JSON object. A request carries "type" and an "id" (number or string, chosen by the client)
+// that the response echoes unchanged, along with the request's "type", "ok": bool, and either the
+// type-specific fields or "error" (a stable code) plus "message" (human text). A line the engine
+// can't parse gets {"type":"error","ok":false,"error":"bad_message",...} and the connection closes.
 //
-// The first message on every connection must be a "hello" carrying "v": kProtocolVersion.
+// The first message picks the surface; anything else first is refused and the connection closed.
+//
+// Public API (other apps, the CLI). Versioned: adding fields, types or events keeps the version;
+// clients ignore what they don't know. Only a breaking change raises kApiVersionMax.
+//
+//   -> {"type":"hello","id":1,"api":1,"app":"LeagueTool"}
+//   <- {"type":"hello","id":1,"ok":true,"api":1,"engine":"0.1.3"}
+//   <- {"type":"hello","id":1,"ok":false,"error":"unsupported_version","message":"...",
+//       "min":1,"max":1}
+//
+//   "app" (required, 1-64 characters, no control characters) names the caller. Every request
+//   after the hello needs an "id"; a line over kMaxApiMessageBytes closes the connection, as does
+//   no hello within kHelloTimeoutMs. At most kMaxApiClients apps connect at once.
+//   Error codes: bad_message, bad_request, unsupported_version, not_allowed, too_many_connections,
+//   unknown_type, plus each command's own.
+//
+//   status          -> {}
+//                   <- {"replay":bool (the Instant Replay switch), "buffering":bool (footage is
+//                       being kept right now), "game":string|null, "buffer_seconds":number}
+//
+// Internal (ombra-ui only): {"type":"hello","id":1,"v":kProtocolVersion}, accepted only from
+// ombra-ui.exe beside the engine (PipeServer's internal gate), so apps can't reach set_config,
+// shutdown or update_install around the public API. Exact version match: both ship together.
 //
 //   -> {"type":"hello","id":1,"v":2}
-//   <- {"type":"hello","id":1,"ok":true,"v":2,"engine_version":"..."}
+//   <- {"type":"hello","id":1,"ok":true,"v":2}
 //
-// Message types:
+// Internal message types:
 //
 //   get_schema      -> {}
 //                   <- {"settings":[{"key":..., "kind":"bool"|"int"|"double"|"string"|"enum"|"raw",
@@ -98,9 +119,18 @@
 //                      connection then closes, and the caller waits on the process to know it's gone.
 #pragma once
 
+#include <cstddef>
+
 namespace ombra {
 
-inline constexpr int kProtocolVersion = 2;
+inline constexpr int kProtocolVersion = 2;  // the internal surface
+inline constexpr int kApiVersionMin   = 1;  // the public API versions this engine speaks
+inline constexpr int kApiVersionMax   = 1;
+inline constexpr size_t kMaxApiMessageBytes = 64 * 1024;
+inline constexpr int    kMaxApiClients      = 16;    // app connections at once; the overlay doesn't count
+inline constexpr unsigned kHelloTimeoutMs   = 5000;  // a connection silent this long before its hello closes
+
+enum class PipeSurface { kInternal, kApi };
 
 // The pipe's name is per instance: paths.h's Instance().pipe_name.
 
