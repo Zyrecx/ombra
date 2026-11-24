@@ -1348,11 +1348,12 @@ TEST_CASE("gpu: each live-apply tier on a running pipeline leaves saves working"
     longer.Set("buffer.seconds", JsonValue::MakeNum(5.0));
     {
         std::this_thread::sleep_for(2500ms);
-        REQUIRE_FALSE(rig.ring.Pin(0, QpcNow()).empty());
+        RingPin pin = rig.ring.Pin(0, QpcNow());
+        REQUIRE_FALSE(pin.empty());
         const LiveApplyResult res = apply(longer);
         CHECK_FALSE(res.ok);
         CHECK_FALSE(res.error.empty());
-        rig.ring.Unpin();
+        pin.Unpin();
     }
     {
         const size_t          capacity = rig.ring.Capacity();

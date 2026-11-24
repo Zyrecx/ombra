@@ -415,11 +415,8 @@ std::vector<MuxAudioTrack> AudioTrackHub::Collect(int64_t floor_qpc, int64_t t_e
 
     std::vector<uint8_t> bytes;
     for (auto& t : tracks_) {
-        const auto descriptors = t->ring.Pin(QpcAt(first_slot * kFrameSamples), QpcAt(end_slot * kFrameSamples));
-        if (descriptors.empty()) {
-            t->ring.Unpin();
-            continue;  // no audio for this track in the window
-        }
+        RingPin descriptors = t->ring.Pin(QpcAt(first_slot * kFrameSamples), QpcAt(end_slot * kFrameSamples));
+        if (descriptors.empty()) continue;  // no audio for this track in the window
         MuxAudioTrack m;
         m.name         = t->name;
         m.sample_rate  = kSampleRate;
@@ -431,11 +428,11 @@ std::vector<MuxAudioTrack> AudioTrackHub::Collect(int64_t floor_qpc, int64_t t_e
         for (const auto& d : descriptors) {
             // A paused encoder left a hole on the grid: silence keeps every later frame in place.
             for (; slot < static_cast<int64_t>(d.index); ++slot) m.frames.push_back({silent_frame_});
-            if (!(read_ok = t->ring.ReadInto(d, bytes))) break;
+            if (!(read_ok = descriptors.ReadInto(d, bytes))) break;
             m.frames.push_back({bytes});
             ++slot;
         }
-        t->ring.Unpin();
+        descriptors.Unpin();
         if (read_ok) result.push_back(std::move(m));
     }
     return result;

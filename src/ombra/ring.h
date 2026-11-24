@@ -1,9 +1,9 @@
 // The encoded-AU ring holds bitstream, not raw frames — at 1440p60/40Mbps
 // that's ~5 MB/s versus ~316 MB/s for raw NV12.
 //
-// Single writer (the pacer thread, via Append), and at most one reader at a time (a save, via
-// Pin/ReadInto/Unpin). Eviction always removes whole GOPs from the
-// front, never a partial one: dropping a frame a surviving frame references corrupts the buffer.
+// Single writer (the pacer thread, via Append), any number of readers (saves, each holding a
+// RingPin). Eviction always removes whole GOPs from the front, never a partial one: dropping a
+// frame a surviving frame references corrupts the buffer, and it stops at the oldest reader.
 // A pin protects its range from eviction by qpc, not by deque index, since Append can pop_front
 // (evict) and push_back (append) concurrently with a pin being held — indices shift, qpc doesn't.
 //
@@ -161,6 +161,54 @@ struct SegmentParams {
     uint32_t              fps    = 0;
 };
 
+class Ring;
+
+// One reader's hold on a window of the ring (Ring::Pin). Eviction never takes what a live pin
+// still covers; the pin moves forward as the reader calls ReleaseThrough, and lets go when it is
+// destroyed or Unpin()ned. An empty window holds nothing. Must not outlive its Ring; one thread
+// uses it at a time.
+class RingPin {
+public:
+    RingPin() = default;
+    RingPin(RingPin&& other) noexcept;
+    RingPin& operator=(RingPin&& other) noexcept;
+    RingPin(const RingPin&) = delete;
+    RingPin& operator=(const RingPin&) = delete;
+    ~RingPin() { Unpin(); }
+
+    // The pinned access units, in order.
+    const std::vector<AuDescriptor>& Aus() const { return aus_; }
+    bool   empty() const { return aus_.empty(); }
+    size_t size() const { return aus_.size(); }
+    const AuDescriptor& operator[](size_t i) const { return aus_[i]; }
+    const AuDescriptor& front() const { return aus_.front(); }
+    const AuDescriptor& back() const { return aus_.back(); }
+    std::vector<AuDescriptor>::const_iterator begin() const { return aus_.begin(); }
+    std::vector<AuDescriptor>::const_iterator end() const { return aus_.end(); }
+
+    // The parameters of the segment the window lies in, taken at Pin() time: Pin() never crosses a
+    // barrier, so the newest barrier's params (or the base segment's) are the complete answer. Null
+    // if none were ever supplied (synthetic tests, the audio rings).
+    const std::shared_ptr<const SegmentParams>& Params() const { return params_; }
+
+    // Copies a pinned AU's bytes into `out` (handles the arena-wrap case). Valid for descriptors this
+    // pin holds that ReleaseThrough() hasn't passed (false for one it has). False once this pin
+    // broke (see Ring::Append) or the storage failed: the bytes may have been overwritten.
+    bool ReadInto(const AuDescriptor& d, std::vector<uint8_t>& out) const;
+    // The reader is done with `d` and everything before it: eviction may take them. A save calls it
+    // per AU as it writes, so a slow disk holds back only what it hasn't written yet.
+    void ReleaseThrough(const AuDescriptor& d);
+    // Lets go of the window; the descriptors stay readable as data, not as ring bytes.
+    void Unpin();
+
+private:
+    friend class Ring;
+    Ring*                                ring_ = nullptr;  // null: holds nothing
+    uint64_t                             id_   = 0;
+    std::vector<AuDescriptor>            aus_;
+    std::shared_ptr<const SegmentParams> params_;
+};
+
 class Ring {
 public:
     // `capacity_bytes` is the soft budget eviction targets. `overshoot_bytes` is *physical*
@@ -169,7 +217,7 @@ public:
     // arena to exactly capacity_bytes and calling that "overshoot room" just wraps the write around
     // and silently corrupts the pinned data being saved. A save releases its pin behind it as it
     // writes (ReleaseThrough), so the headroom covers how far the writer lags the encoder, not the
-    // whole save. Both Inits wait for a held pin to be released before rebuilding the ring.
+    // whole save. Both Inits wait for every held pin to be released before rebuilding the ring.
     void Init(size_t capacity_bytes, size_t overshoot_bytes);
 
     // File-backed variant (buffer.storage=file) — same soft budget/overshoot semantics, backed by
@@ -193,9 +241,10 @@ public:
     // Appends one access unit, copying its bytes into the arena. May evict whole GOPs from the
     // front to make room; never evicts a descriptor a live pin still covers — the ring overshoots
     // its soft byte budget instead, into the physical headroom above. When the headroom runs out
-    // (a save's writer stalled on a hung disk), the pin breaks: eviction resumes, footage keeps
-    // coming and that save's ReadInto() fails from then on. Dies only if a single access unit is
-    // larger than the whole arena.
+    // (a save's writer stalled on a hung disk), the oldest pin breaks, then the next oldest if that
+    // isn't enough: eviction resumes, footage keeps coming and a broken pin's ReadInto() fails from
+    // then on. Readers behind it are untouched, so the headroom bounds memory however many there
+    // are. Dies only if a single access unit is larger than the whole arena.
     //
     // Memory is committed as the write position reaches it (RamArena). If the system refuses a
     // commit, the ring evicts its oldest GOPs until a whole chunk is free and reuses that chunk's
@@ -234,20 +283,15 @@ public:
     // and "newest" were close enough with one producer). An explicit bound is
     // required once a second, independently-clocked ring (PcmRing, pcmring.h) is pinned against
     // the same T_end — pinning each to its own "newest" would silently give tracks of different
-    // lengths. The pin must be released with Unpin() before the next Pin() — one save in flight at
-    // a time.
-    std::vector<AuDescriptor> Pin(int64_t min_qpc, int64_t max_qpc = (std::numeric_limits<int64_t>::max)());
+    // lengths. Pins are independent: several readers may hold overlapping windows at once.
+    RingPin Pin(int64_t min_qpc, int64_t max_qpc = (std::numeric_limits<int64_t>::max)());
     // Pin() that starts at the newest keyframe at or before `min_qpc` when the ring still holds one
     // (never past the newest barrier), so the window covers all of [min_qpc, max_qpc) instead of
     // losing up to a GOP at the front. Otherwise the same as Pin(). The video save uses it: a 120 s
     // buffer saves at least 120 s, not 118-120.
-    std::vector<AuDescriptor> PinCovering(int64_t min_qpc,
-                                          int64_t max_qpc = (std::numeric_limits<int64_t>::max)());
-    void Unpin();
-    // The pinned reader is done with `d` and everything before it: eviction may take them. A save
-    // calls it per AU as it writes, so a slow disk holds back only what it hasn't written yet.
-    void ReleaseThrough(const AuDescriptor& d);
+    RingPin PinCovering(int64_t min_qpc, int64_t max_qpc = (std::numeric_limits<int64_t>::max)());
 
+    // Any reader holds a pin.
     bool IsPinned() const;
     size_t Capacity() const;
     size_t LiveBytes() const { std::lock_guard<std::mutex> lock(mutex_); return live_bytes_; }
@@ -267,29 +311,28 @@ public:
     // every surviving descriptor belongs to the segment that barrier started.
     void SetBaseSegmentParams(std::shared_ptr<const SegmentParams> params);
 
-    // The parameters belonging to the window the current pin covers. Valid only between Pin() and
-    // Unpin(); null if no params were ever supplied (the synthetic tests, which don't mux).
-    //
-    // Deliberately not a general "params at qpc T" lookup, and a future reader shouldn't go
-    // looking for one: Pin() clamps its floor up to barriers_.back(), so a pinned window can only
-    // ever lie inside the newest barrier's segment — the newest barrier's params, or
-    // base_segment_params_ when no barrier survives, is the complete answer.
-    std::shared_ptr<const SegmentParams> PinnedSegmentParams() const;
-
     // A verify clause needs "the expected barrier count in the ring" to be
     // observable from outside — barriers_ itself stays private.
     size_t BarrierCount() const;
 
-    // Valid only between a Pin() and the matching Unpin(), for descriptors that Pin() returned and
-    // ReleaseThrough() hasn't passed. Copies the AU's bytes into `out` (handles the arena-wrap
-    // case; a straight pointer isn't always contiguous). False once the pin broke (see Append):
-    // the bytes may have been overwritten.
-    bool ReadInto(const AuDescriptor& d, std::vector<uint8_t>& out) const;
-
 private:
+    friend class RingPin;
+    struct Reader {
+        uint64_t id;
+        int64_t  start_qpc;  // descriptors with qpc >= this are protected unless broken
+        bool     broken;     // the headroom ran out under it: protects nothing until Unpin
+    };
+    Reader* FindReaderLocked(uint64_t id);
+    // Oldest qpc an unbroken reader protects; INT64_MAX when none.
+    int64_t ProtectedFromLocked() const;
+    void BreakOldestReaderLocked();
+    bool ReadPinned(uint64_t id, const AuDescriptor& d, std::vector<uint8_t>& out);
+    void ReleasePinnedThrough(uint64_t id, int64_t qpc);
+    void Unpin(uint64_t id);
+
     void EvictLocked();
     void EvictAgedLocked(int64_t newest_qpc);
-    std::vector<AuDescriptor> PinImpl(int64_t min_qpc, int64_t max_qpc, bool covering);
+    RingPin PinImpl(int64_t min_qpc, int64_t max_qpc, bool covering);
     void InitLocked(std::unique_ptr<IRingArena> arena, size_t capacity_bytes);
     void ReleaseLocked();
     bool ReclaimCommitLocked(size_t size);
@@ -322,12 +365,12 @@ private:
     std::deque<BarrierRec> barriers_;
 
     std::shared_ptr<const SegmentParams> base_segment_params_;
-    std::shared_ptr<const SegmentParams> pinned_segment_params_;
 
-    bool    pinned_         = false;
-    bool    pin_broken_     = false;  // the headroom ran out: the pin protects nothing until Unpin
-    int64_t pin_start_qpc_  = 0;  // descriptors with qpc >= this are protected while pinned_
-    std::condition_variable pin_released_;  // Init waits on it
+    // A handful at most (one per save in flight); scanned per eviction on the pacer path. Only
+    // Pin and Unpin resize it, off the pacer thread.
+    std::vector<Reader>     readers_;
+    uint64_t                next_reader_id_ = 1;
+    std::condition_variable pin_released_;  // Init waits on it for readers_ to empty
 };
 
 }  // namespace ombra

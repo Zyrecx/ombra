@@ -62,33 +62,31 @@ struct SaveTiming {
     double  clip_seconds         = 0;  // ticks / fps of the pinned window
 };
 
-// Releases the ring pin on every path out of a save. The outer DoSave retains save_in_flight
-// through telemetry and result collection, so shutdown/reconfiguration cannot retire ctx early.
+// The save's ring pin, timed: released on every path out of a save (RingPin's destructor). The
+// outer DoSave retains save_in_flight through telemetry and result collection, so
+// shutdown/reconfiguration cannot retire ctx early.
 class SavePin {
 public:
-    explicit SavePin(SaveContext* ctx) : ctx_(ctx), pinned_at_(std::chrono::steady_clock::now()) {}
-    ~SavePin() {
-        Release();
-    }
-    SavePin(const SavePin&) = delete;
-    SavePin& operator=(const SavePin&) = delete;
+    explicit SavePin(RingPin pin) : pin_(std::move(pin)), pinned_at_(std::chrono::steady_clock::now()) {}
+
+    RingPin& Pin() { return pin_; }
 
     // Milliseconds the pin was held.
     int64_t Release() {
-        if (pinned_) {
-            ctx_->ring->Unpin();
-            pinned_  = false;
-            held_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(
+        if (!released_) {
+            pin_.Unpin();
+            released_ = true;
+            held_ms_  = std::chrono::duration_cast<std::chrono::milliseconds>(
                            std::chrono::steady_clock::now() - pinned_at_).count();
         }
         return held_ms_;
     }
 
 private:
-    SaveContext*                          ctx_;
+    RingPin                               pin_;
     std::chrono::steady_clock::time_point pinned_at_;
-    bool                                  pinned_  = true;
-    int64_t                               held_ms_ = 0;
+    bool                                  released_ = false;
+    int64_t                               held_ms_  = 0;
 };
 
 // `group_folder_name`, when non-null, names a subfolder (already fully formatted -- game/date/time,
@@ -101,8 +99,8 @@ SaveOutcome DoSaveImpl(SaveContext* ctx, int64_t t_end, const std::wstring* grou
     const int64_t qpc_freq    = QpcFrequency();
     const int64_t t_start_min = t_end - static_cast<int64_t>(ctx->buffer_seconds * qpc_freq);
 
-    auto descriptors = ctx->ring->PinCovering(t_start_min, t_end);
-    SavePin pin(ctx);
+    SavePin pin(ctx->ring->PinCovering(t_start_min, t_end));
+    const std::vector<AuDescriptor>& descriptors = pin.Pin().Aus();  // kept after the pin is released
     std::printf("\n  save            %zu access units pinned\n", descriptors.size());
 
     // Checked before the truncate barrier below: a skipped save must not cut the next one short.
@@ -113,7 +111,7 @@ SaveOutcome DoSaveImpl(SaveContext* ctx, int64_t t_end, const std::wstring* grou
     };
     if (descriptors.empty()) return too_short();
 
-    std::shared_ptr<const SegmentParams> segment = ctx->ring->PinnedSegmentParams();
+    std::shared_ptr<const SegmentParams> segment = pin.Pin().Params();
     if (!segment) {
         auto live = ctx->supervisor->CurrentParams();
         auto fallback = std::make_shared<SegmentParams>();
@@ -199,7 +197,7 @@ SaveOutcome DoSaveImpl(SaveContext* ctx, int64_t t_end, const std::wstring* grou
     std::wstring path = templated ? templated_path(root) : WithContainerExtension(ctx->out_path, ext);
 
     // Each AU is read out of the pinned ring and written before the next one is read, and the pin
-    // is released behind the writer (Ring::ReleaseThrough), so a save holds one AU in memory and
+    // is released behind the writer (RingPin::ReleaseThrough), so a save holds one AU in memory and
     // holds back eviction only by as much as the disk lags the encoder. A disk that stalls past
     // the ring's headroom breaks the pin and fails this save, never the engine (Ring::Append).
     size_t   save_bytes     = 0;
@@ -237,11 +235,13 @@ SaveOutcome DoSaveImpl(SaveContext* ctx, int64_t t_end, const std::wstring* grou
     GetProcessRssMb(ws_mb_unused, private_mb_before_mux);
     bool pin_broken = false;
     auto read = [&](size_t i, std::vector<uint8_t>& out) {
-        if (i > 0) ctx->ring->ReleaseThrough(descriptors[i - 1]);
-        if (!ctx->ring->ReadInto(descriptors[i], out)) {
+        if (i > 0) pin.Pin().ReleaseThrough(descriptors[i - 1]);
+        if (!pin.Pin().ReadInto(descriptors[i], out)) {
             pin_broken = true;
             return false;
         }
+        // The last AU is copied out: the mux's finalize must not hold back eviction.
+        if (i + 1 == descriptors.size()) pin.Pin().ReleaseThrough(descriptors[i]);
         if (i == descriptors.size() / 2) GetProcessRssMb(ws_mb_unused, private_mb_mid_mux);
         return true;
     };

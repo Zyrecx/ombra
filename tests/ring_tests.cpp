@@ -50,9 +50,9 @@ TEST_CASE("ring: a file it can't create falls back to RAM and keeps recording") 
     auto pinned = ring.Pin(0);
     REQUIRE(pinned.size() == 1);
     std::vector<uint8_t> out;
-    CHECK(ring.ReadInto(pinned[0], out));
+    CHECK(pinned.ReadInto(pinned[0], out));
     CHECK(out == frame);
-    ring.Unpin();
+    pinned.Unpin();
 
     // A good path after a bad one really moves it back to a file.
     CHECK(ring.Init(4000, 1000, TestOutputPath(L"fallback.ringtest.dat")));
@@ -84,7 +84,7 @@ TEST_CASE("ring: a barrier arriving late still sorts by time") {
     auto pinned = ring.Pin(0);
     REQUIRE_FALSE(pinned.empty());
     CHECK(pinned.front().qpc == 800);  // the rebuild's still bounds the next save
-    ring.Unpin();
+    pinned.Unpin();
 }
 
 // use_file is the RamArena-vs-FileArena axis; every case below runs once per backend.
@@ -114,7 +114,7 @@ TEST_CASE("ring: eviction, pin protection, and raw-dump fidelity") {
     auto all = ring.Pin(0);  // min_qpc=0: everything still live
     REQUIRE(!all.empty());
     CHECK(all.front().is_keyframe);
-    ring.Unpin();
+    all.Unpin();
 
     // Pin an old range, then append past capacity: the pin must protect its data (ring overshoots
     // its byte budget) rather than evicting into a range a save is reading.
@@ -125,7 +125,7 @@ TEST_CASE("ring: eviction, pin protection, and raw-dump fidelity") {
     bool pinned_still_readable = true;
     std::vector<uint8_t> readback;
     for (const auto& d : old_range) {
-        ring.ReadInto(d, readback);
+        old_range.ReadInto(d, readback);
         if (readback != PayloadFor(d.qpc, kFrameBytes)) { pinned_still_readable = false; break; }
     }
     CHECK(pinned_still_readable);
@@ -159,13 +159,13 @@ TEST_CASE("ring: eviction, pin protection, and raw-dump fidelity") {
         }
         CHECK(raw_matches);
     }
-    ring.Unpin();
+    old_range.Unpin();
 
     // After unpin, the same old range must eventually be evictable again (no permanent leak).
     for (int gop = 0; gop < 8; ++gop) append_gop(3);
     auto post = ring.Pin(0);
     const bool old_still_present = !post.empty() && post.front().qpc <= pinned_qpc;
-    ring.Unpin();
+    post.Unpin();
     CHECK(!old_still_present);
 }
 
@@ -199,14 +199,14 @@ TEST_CASE("ring: barrier clamps T_start to the newest barrier on record") {
     auto clamped = bring.Pin(0);
     REQUIRE(!clamped.empty());
     CHECK(clamped.front().qpc == 6);
-    bring.Unpin();
+    clamped.Unpin();
 
     // A barrier newer than every surviving descriptor must yield an empty window, not a
     // clamp-to-nearest-available or a crash.
     bring.Barrier(1000);
     auto past_everything = bring.Pin(0);
     CHECK(past_everything.empty());
-    bring.Unpin();
+    past_everything.Unpin();
 }
 
 TEST_CASE("ring: two barriers on record clamp to the newest, not the oldest") {
@@ -230,7 +230,7 @@ TEST_CASE("ring: two barriers on record clamp to the newest, not the oldest") {
     auto newest_clamp = bring2.Pin(0);
     REQUIRE(!newest_clamp.empty());
     CHECK(newest_clamp.front().qpc == 9);
-    bring2.Unpin();
+    newest_clamp.Unpin();
 }
 
 // Per-segment SPS/PPS storage. The bug this exists to
@@ -251,9 +251,7 @@ TEST_CASE("ring: per-segment SPS/PPS survives two resolution changes") {
         return p;
     };
     auto pinned_marker = [&](Ring& r, int64_t min_qpc) {
-        r.Pin(min_qpc);
-        auto params = r.PinnedSegmentParams();
-        r.Unpin();
+        auto params = r.Pin(min_qpc).Params();
         return params ? std::pair<int, uint32_t>{params->codec_header.empty() ? -1 : params->codec_header[0], params->width}
                       : std::pair<int, uint32_t>{-1, 0};
     };
@@ -343,7 +341,7 @@ TEST_CASE("ring: max age evicts whole GOPs no save can reach, and keeps the save
     REQUIRE_FALSE(aus.empty());
     CHECK(aus.front().qpc == t_end - kMaxAge);
     CHECK(aus.front().is_keyframe);
-    ring.Unpin();
+    aus.Unpin();
 }
 
 // A 120 s buffer saved 118-120 s: Pin() starts at the first keyframe inside the window. The save
@@ -364,26 +362,26 @@ TEST_CASE("ring: PinCovering starts at the keyframe at or before the floor, neve
     auto plain = ring.Pin(floor, q);
     REQUIRE_FALSE(plain.empty());
     CHECK(plain.front().qpc == 630);  // loses 23 frames
-    ring.Unpin();
+    plain.Unpin();
 
     auto covering = ring.PinCovering(floor, q);
     REQUIRE_FALSE(covering.empty());
     CHECK(covering.front().qpc == 600);
     CHECK(covering.front().is_keyframe);
-    ring.Unpin();
+    covering.Unpin();
 
     // A keyframe exactly on the floor is the start, not the one before it.
     auto exact = ring.PinCovering(600, q);
     REQUIRE_FALSE(exact.empty());
     CHECK(exact.front().qpc == 600);
-    ring.Unpin();
+    exact.Unpin();
 
     // A barrier after the covering keyframe wins: the save never spans a segment change.
     ring.Barrier(615, nullptr);
     auto barred = ring.PinCovering(floor, q);
     REQUIRE_FALSE(barred.empty());
     CHECK(barred.front().qpc == 630);
-    ring.Unpin();
+    barred.Unpin();
 }
 
 TEST_CASE("ring: max age never evicts under a pin") {
@@ -399,14 +397,14 @@ TEST_CASE("ring: max age never evicts under a pin") {
     const int64_t pinned_from = aus.front().qpc;
     for (; q < 300; ++q) ring.Append(payload.data(), payload.size(), q, static_cast<uint64_t>(q), q % kGop == 0);
     std::vector<uint8_t> out;
-    ring.ReadInto(aus.front(), out);  // still readable: the pin held eviction back
+    aus.ReadInto(aus.front(), out);  // still readable: the pin held eviction back
     CHECK(out.size() == payload.size());
-    ring.Unpin();
+    aus.Unpin();
     ring.Append(payload.data(), payload.size(), q, static_cast<uint64_t>(q), true);
     auto after = ring.Pin(0, q + 1);
     REQUIRE_FALSE(after.empty());
     CHECK(after.front().qpc > pinned_from);  // released: the aged GOPs went on the next keyframe
-    ring.Unpin();
+    after.Unpin();
 }
 
 namespace {
@@ -480,10 +478,10 @@ LONG CALLBACK FaultAsInPageError(EXCEPTION_POINTERS* info) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
-void CheckPinnedTagged(Ring& ring, const std::vector<AuDescriptor>& pinned, size_t bytes) {
+void CheckPinnedTagged(const RingPin& pinned, size_t bytes) {
     std::vector<uint8_t> out;
     for (const auto& d : pinned) {
-        REQUIRE(ring.ReadInto(d, out));
+        REQUIRE(pinned.ReadInto(d, out));
         REQUIRE(out.size() == bytes);
         const auto tag = static_cast<uint8_t>(d.qpc - 1000);
         CHECK(std::all_of(out.begin(), out.end(), [tag](uint8_t b) { return b == tag; }));
@@ -519,7 +517,7 @@ TEST_CASE("ring: released once idle for its max age; the next append starts it o
     auto pinned = ring.Pin(0);
     REQUIRE(!pinned.empty());
     CHECK_FALSE(ring.ReleaseIfIdle(last + 5000));  // never under a save's pin
-    ring.Unpin();
+    pinned.Unpin();
 
     CHECK(ring.ReleaseIfIdle(last + 1000));
     CHECK(ring.Released());
@@ -527,7 +525,6 @@ TEST_CASE("ring: released once idle for its max age; the next append starts it o
     CHECK(ring.LiveBytes() == 0);
     CHECK(ring.BarrierCount() == 0);
     CHECK(ring.Pin(0).empty());
-    ring.Unpin();
     CHECK_FALSE(ring.ReleaseIfIdle(last + 9000));  // once
 
     // Re-arm: the supervisor drops the barrier its disarm latched, with the new segment's params.
@@ -539,15 +536,15 @@ TEST_CASE("ring: released once idle for its max age; the next append starts it o
         ring.Append(au.data(), au.size(), last + 9100 + i * 10, static_cast<uint64_t>(i), i % 10 == 0);
     CHECK_FALSE(ring.Released());
     CHECK(ring.CommittedBytes() > 0);
-    const auto after = ring.Pin(0);
+    auto after = ring.Pin(0);
     REQUIRE(after.size() == 20);
     CHECK(after.front().qpc == last + 9100);
-    REQUIRE(static_cast<bool>(ring.PinnedSegmentParams()));
-    CHECK(ring.PinnedSegmentParams()->width == 1280);
+    REQUIRE(static_cast<bool>(after.Params()));
+    CHECK(after.Params()->width == 1280);
     std::vector<uint8_t> out;
-    ring.ReadInto(after.back(), out);
+    after.ReadInto(after.back(), out);
     CHECK(out == au);
-    ring.Unpin();
+    after.Unpin();
 }
 
 TEST_CASE("ring: a refused commit reuses the oldest footage's memory instead of killing the engine") {
@@ -560,12 +557,12 @@ TEST_CASE("ring: a refused commit reuses the oldest footage's memory instead of 
     CHECK(ring.CommittedBytes() <= 8 * kMB);
     CHECK(ring.LiveBytes() <= 8 * kMB);
     // What's held is the newest footage, whole and readable.
-    const auto pinned = ring.Pin(0);
+    auto pinned = ring.Pin(0);
     REQUIRE(pinned.size() >= 10);
     CHECK(pinned.front().is_keyframe);
     CHECK(pinned.back().qpc == 1000 + 399);
-    CheckPinnedTagged(ring, pinned, kAu);
-    ring.Unpin();
+    CheckPinnedTagged(pinned, kAu);
+    pinned.Unpin();
 
     // A release returns the memory and lifts the cap; the next pass commits afresh.
     ring.SetMaxAge(1);
@@ -581,7 +578,6 @@ TEST_CASE("ring: a capped arena too small for an access unit drops that GOP, nev
     for (int i = 0; i < 10; ++i) ring.Append(au.data(), au.size(), i, static_cast<uint64_t>(i), i % 5 == 0);
     CHECK(ring.LiveBytes() == 0);
     CHECK(ring.Pin(0).empty());
-    ring.Unpin();
 }
 
 // The arena is sized for buffer.seconds at max bitrate; age eviction keeps far less live, and the
@@ -602,11 +598,11 @@ TEST_CASE("ring: trimming keeps commit near live footage across wraps, and every
     // Live, plus the chunks it partly covers, the one kept ahead, and trimming's one-per-call lag.
     CHECK(worst <= 4 * RamArena::kCommitChunk);
     CHECK(ring.CommittedBytes() < 32 * kMB);
-    const auto pinned = ring.Pin(0);
+    auto pinned = ring.Pin(0);
     REQUIRE(!pinned.empty());
     CHECK(pinned.back().qpc == 1000 + 2999);
-    CheckPinnedTagged(ring, pinned, kAu);
-    ring.Unpin();
+    CheckPinnedTagged(pinned, kAu);
+    pinned.Unpin();
 }
 
 TEST_CASE("ring: a write that wraps onto a trimmed chunk 0 commits it again") {
@@ -622,11 +618,11 @@ TEST_CASE("ring: a write that wraps onto a trimmed chunk 0 commits it again") {
     for (int i = 34; i < 60; ++i) {  // across the end of the arena and over chunk 0 again
         AppendTagged(ring, kAu, i, 2);
         while (ring.TrimCommitted() > 0) {}
-        const auto pinned = ring.Pin(0);
+        auto pinned = ring.Pin(0);
         REQUIRE(!pinned.empty());
         CHECK(pinned.back().qpc == 1000 + i);
-        CheckPinnedTagged(ring, pinned, kAu);
-        ring.Unpin();
+        CheckPinnedTagged(pinned, kAu);
+        pinned.Unpin();
     }
     CHECK(ring.CommittedBytes() <= 16 * kMB);
 }
@@ -638,14 +634,14 @@ TEST_CASE("ring: trimming never touches what a pin holds") {
     ring.SetMaxAge(60);
     int i = 0;
     for (; i < 200; ++i) AppendTagged(ring, kAu, i, 10);
-    const auto pinned = ring.Pin(1000 + i - 60);
+    auto pinned = ring.Pin(1000 + i - 60);
     REQUIRE(!pinned.empty());
     for (; i < 700; ++i) {  // ~31 MB more: past the 44 MB arena's end while the pin holds its range
         AppendTagged(ring, kAu, i, 10);
         ring.TrimCommitted();
     }
-    CheckPinnedTagged(ring, pinned, kAu);
-    ring.Unpin();
+    CheckPinnedTagged(pinned, kAu);
+    pinned.Unpin();
 }
 
 TEST_CASE("ring: a trim's hold on the ring mutex") {
@@ -717,17 +713,17 @@ TEST_CASE("ring: a reader releasing behind itself lets eviction follow it") {
     ring.Init(kAu * 10, kAu * 5);
     int i = 0;
     for (; i < 10; ++i) AppendTagged(ring, kAu, i, kGop);
-    const auto pinned = ring.Pin(0);
+    auto pinned = ring.Pin(0);
     REQUIRE(pinned.size() == 10);
     std::vector<uint8_t> out;
     for (size_t k = 0; k < pinned.size(); ++k) {
-        REQUIRE(ring.ReadInto(pinned[k], out));
+        REQUIRE(pinned.ReadInto(pinned[k], out));
         CHECK(out.front() == static_cast<uint8_t>(k));
-        ring.ReleaseThrough(pinned[k]);
+        pinned.ReleaseThrough(pinned[k]);
         AppendTagged(ring, kAu, i++, kGop);  // the encoder keeps going while the save writes
     }
     CHECK(ring.LiveBytes() <= kAu * 15);
-    ring.Unpin();
+    pinned.Unpin();
 }
 
 TEST_CASE("ring: a pin held past the headroom fails the read, not the process") {
@@ -736,26 +732,118 @@ TEST_CASE("ring: a pin held past the headroom fails the read, not the process") 
     ring.Init(kAu * 10, kAu * 5);
     int i = 0;
     for (; i < 10; ++i) AppendTagged(ring, kAu, i, 5);
-    const auto pinned = ring.Pin(0);
+    auto pinned = ring.Pin(0);
     REQUIRE_FALSE(pinned.empty());
     std::vector<uint8_t> out;
-    CHECK(ring.ReadInto(pinned.front(), out));
+    CHECK(pinned.ReadInto(pinned.front(), out));
     for (; i < 40; ++i) AppendTagged(ring, kAu, i, 5);  // a stalled writer: the pin can't hold
     CHECK(ring.LiveBytes() <= kAu * 15);
-    CHECK_FALSE(ring.ReadInto(pinned.back(), out));
-    ring.Unpin();
-    const auto next = ring.Pin(0);  // the next save works normally
+    CHECK_FALSE(pinned.ReadInto(pinned.back(), out));
+    pinned.Unpin();
+    auto next = ring.Pin(0);  // the next save works normally
     REQUIRE_FALSE(next.empty());
     CHECK(next.front().is_keyframe);
-    CheckPinnedTagged(ring, next, kAu);
-    ring.Unpin();
+    CheckPinnedTagged(next, kAu);
+    next.Unpin();
+}
+
+TEST_CASE("ring: eviction stops at the oldest reader and follows it when it lets go") {
+    constexpr size_t kAu = 1000;
+    Ring ring;
+    ring.Init(kAu * 10, kAu * 20);
+    int i = 0;
+    for (; i < 10; ++i) AppendTagged(ring, kAu, i, 2);
+    auto older = ring.Pin(0);
+    REQUIRE(older.size() == 10);
+    for (; i < 12; ++i) AppendTagged(ring, kAu, i, 2);
+    auto newer = ring.Pin(1006);
+    REQUIRE(newer.front().qpc == 1006);
+    for (; i < 17; ++i) AppendTagged(ring, kAu, i, 2);
+    CHECK(ring.LiveBytes() == kAu * 17);  // nothing evicted: the older reader holds it all
+    CheckPinnedTagged(older, kAu);
+
+    older.Unpin();
+    CHECK(ring.IsPinned());
+    AppendTagged(ring, kAu, i++, 2);
+    {
+        auto all = ring.Pin(0);
+        REQUIRE_FALSE(all.empty());
+        CHECK(all.front().qpc == 1006);  // evicted up to the newer reader, not past it
+    }
+    CheckPinnedTagged(newer, kAu);
+    newer.Unpin();
+    CHECK_FALSE(ring.IsPinned());
+}
+
+TEST_CASE("ring: past the headroom only the oldest reader breaks") {
+    constexpr size_t kAu = 1000;
+    Ring ring;
+    ring.Init(kAu * 10, kAu * 5);
+    int i = 0;
+    for (; i < 10; ++i) AppendTagged(ring, kAu, i, 2);
+    auto older = ring.Pin(0);
+    for (; i < 12; ++i) AppendTagged(ring, kAu, i, 2);
+    auto newer = ring.Pin(1010);
+    REQUIRE(newer.front().qpc == 1010);
+    for (; i < 22; ++i) {
+        AppendTagged(ring, kAu, i, 2);
+        CHECK(ring.LiveBytes() <= kAu * 15);
+    }
+    std::vector<uint8_t> out;
+    CHECK_FALSE(older.ReadInto(older.back(), out));
+    CheckPinnedTagged(newer, kAu);  // still whole: breaking the older reader made the room
+}
+
+TEST_CASE("ring: an empty or moved-from pin releases no one else's") {
+    constexpr size_t kAu = 1000;
+    Ring ring;
+    ring.Init(kAu * 10, kAu * 10);
+    int i = 0;
+    for (; i < 10; ++i) AppendTagged(ring, kAu, i, 2);
+    RingPin held = ring.Pin(0);
+    {
+        RingPin none = ring.Pin(5000);
+        CHECK(none.empty());
+        none.Unpin();
+    }
+    RingPin moved = std::move(held);
+    held.Unpin();  // moved-from: holds nothing
+    CHECK(ring.IsPinned());
+    for (; i < 18; ++i) AppendTagged(ring, kAu, i, 2);
+    CHECK(moved.size() == 10);
+    CheckPinnedTagged(moved, kAu);
+}
+
+TEST_CASE("ring: Init waits for every reader") {
+    Ring ring;
+    ring.Init(1u << 20, 1u << 20);
+    for (int i = 0; i < 10; ++i) AppendTagged(ring, 100, i, 5);
+    auto first  = ring.Pin(0);
+    auto second = ring.Pin(1005);
+    REQUIRE_FALSE(second.empty());
+    std::atomic<bool> reinit_started{false}, reinit_done{false};
+    std::thread realloc([&] {
+        reinit_started = true;
+        ring.Init(2u << 20, 1u << 20);
+        reinit_done = true;
+    });
+    while (!reinit_started) Sleep(1);
+    Sleep(50);  // into Init's wait
+    first.Unpin();
+    Sleep(100);
+    CHECK_FALSE(reinit_done.load());  // the second reader still reads
+    std::vector<uint8_t> out;
+    CHECK(second.ReadInto(second.back(), out));
+    second.Unpin();
+    realloc.join();
+    CHECK(reinit_done.load());
 }
 
 TEST_CASE("ring: Init waits for a pinned save to finish") {
     Ring ring;
     ring.Init(1u << 20, 1u << 20);
     for (int i = 0; i < 10; ++i) AppendTagged(ring, 100, i, 5);
-    const auto pinned = ring.Pin(0);
+    auto pinned = ring.Pin(0);
     REQUIRE_FALSE(pinned.empty());
     std::atomic<bool> reinit_done{false};
     std::thread realloc([&] {
@@ -765,9 +853,9 @@ TEST_CASE("ring: Init waits for a pinned save to finish") {
     Sleep(100);
     CHECK_FALSE(reinit_done.load());  // the save's bytes are still there to read
     std::vector<uint8_t> out;
-    CHECK(ring.ReadInto(pinned.back(), out));
+    CHECK(pinned.ReadInto(pinned.back(), out));
     CHECK(out.front() == 9);
-    ring.Unpin();
+    pinned.Unpin();
     realloc.join();
     CHECK(reinit_done.load());
     CHECK(ring.Capacity() == (2u << 20));
@@ -794,14 +882,14 @@ TEST_CASE("ring: losing its storage moves to RAM, restarts at a keyframe and rep
     CHECK(ring.LiveBytes() == 0);
     for (int i = 30; i < 36; ++i) AppendTagged(ring, 1000, i, 10);
 
-    const auto pinned = ring.Pin(0);
+    auto pinned = ring.Pin(0);
     REQUIRE(pinned.size() == 6);
     CHECK(pinned.front().is_keyframe);
     CHECK(pinned.front().index == 30);
-    REQUIRE(ring.PinnedSegmentParams().get() != nullptr);
-    CHECK(ring.PinnedSegmentParams()->width == 1234);  // the segment goes on; its params stay
-    CheckPinnedTagged(ring, pinned, 1000);
-    ring.Unpin();
+    REQUIRE(pinned.Params().get() != nullptr);
+    CHECK(pinned.Params()->width == 1234);  // the segment goes on; its params stay
+    CheckPinnedTagged(pinned, 1000);
+    pinned.Unpin();
 }
 
 TEST_CASE("ring: a keyframe arriving as the storage goes starts the RAM arena") {
@@ -812,10 +900,10 @@ TEST_CASE("ring: a keyframe arriving as the storage goes starts the RAM arena") 
     gone = true;
     AppendTagged(ring, 1000, 10, 10);
     CHECK(ring.TakeStorageLost());
-    const auto pinned = ring.Pin(0);
+    auto pinned = ring.Pin(0);
     REQUIRE(pinned.size() == 1);
-    CheckPinnedTagged(ring, pinned, 1000);
-    ring.Unpin();
+    CheckPinnedTagged(pinned, 1000);
+    pinned.Unpin();
 }
 
 TEST_CASE("ring: a save in progress when the storage goes fails instead of reading the new arena") {
@@ -823,32 +911,32 @@ TEST_CASE("ring: a save in progress when the storage goes fails instead of readi
     Ring ring;
     ring.InitWithArena(std::make_unique<VanishingArena>(1u << 20, &gone), 1u << 19);
     for (int i = 0; i < 5; ++i) AppendTagged(ring, 1000, i, 10);
-    const auto pinned = ring.Pin(0);
+    auto pinned = ring.Pin(0);
     REQUIRE(pinned.size() == 5);
     std::vector<uint8_t> out;
-    CHECK(ring.ReadInto(pinned[0], out));
+    CHECK(pinned.ReadInto(pinned[0], out));
 
     gone = true;
     SUBCASE("the writer finds out first") {
         AppendTagged(ring, 1000, 10, 10);  // into the new arena, at the offset pinned[0] names
         gone = false;                       // the old arena is out of the picture either way
-        CHECK_FALSE(ring.ReadInto(pinned[0], out));
+        CHECK_FALSE(pinned.ReadInto(pinned[0], out));
     }
     SUBCASE("the save finds out first") {
-        CHECK_FALSE(ring.ReadInto(pinned[1], out));
+        CHECK_FALSE(pinned.ReadInto(pinned[1], out));
         AppendTagged(ring, 1000, 5, 10);  // moves to RAM; mid-GOP, so dropped
         CHECK(ring.LiveBytes() == 0);
-        CHECK_FALSE(ring.ReadInto(pinned[1], out));
+        CHECK_FALSE(pinned.ReadInto(pinned[1], out));
     }
-    ring.Unpin();
+    pinned.Unpin();
     CHECK(ring.TakeStorageLost());
 
     AppendTagged(ring, 1000, 20, 10);
-    const auto next = ring.Pin(0);
+    auto next = ring.Pin(0);
     REQUIRE_FALSE(next.empty());
     CHECK(next.back().index == 20);
-    CHECK(ring.ReadInto(next.back(), out));
-    ring.Unpin();
+    CHECK(next.ReadInto(next.back(), out));
+    next.Unpin();
 }
 
 TEST_CASE("ring: a failed page-in on a real mapped file doesn't kill the process") {
@@ -872,10 +960,10 @@ TEST_CASE("ring: a failed page-in on a real mapped file doesn't kill the process
     CHECK(ring.TakeStorageLost());
     CHECK(ring.LiveBytes() == 0);
     AppendTagged(ring, 1000, 10, 10);
-    const auto pinned = ring.Pin(0);
+    auto pinned = ring.Pin(0);
     REQUIRE(pinned.size() == 1);
-    CheckPinnedTagged(ring, pinned, 1000);
-    ring.Unpin();
+    CheckPinnedTagged(pinned, 1000);
+    pinned.Unpin();
     ring.Init(1u << 19, 1u << 18);  // lets go of nothing on disk: TakeStorageLost closed the file
     DeleteFileW(path.c_str());
 }

@@ -185,14 +185,14 @@ bool FileArena::ReadInto(size_t offset, size_t length, std::vector<uint8_t>& out
 
 void Ring::Init(size_t capacity_bytes, size_t overshoot_bytes) {
     std::unique_lock<std::mutex> lock(mutex_);
-    pin_released_.wait(lock, [this] { return !pinned_; });
+    pin_released_.wait(lock, [this] { return readers_.empty(); });
     arena_.reset();  // release any prior (e.g. file) arena before building the new one
     InitLocked(std::make_unique<RamArena>(capacity_bytes + overshoot_bytes), capacity_bytes);  // physical size; capacity_ is the soft budget
 }
 
 bool Ring::Init(size_t capacity_bytes, size_t overshoot_bytes, const std::wstring& file_path) {
     std::unique_lock<std::mutex> lock(mutex_);
-    pin_released_.wait(lock, [this] { return !pinned_; });
+    pin_released_.wait(lock, [this] { return readers_.empty(); });
     arena_.reset();  // close/unmap any prior arena (same file_path) before CREATE_ALWAYS truncates it
     std::string error;
     std::unique_ptr<IRingArena> arena = FileArena::Create(file_path, capacity_bytes + overshoot_bytes, &error);
@@ -226,8 +226,7 @@ void Ring::InitLocked(std::unique_ptr<IRingArena> arena, size_t capacity_bytes) 
     write_pos_           = 0;
     descriptors_.clear();
     barriers_.clear();
-    pinned_     = false;
-    pin_broken_ = false;
+    for (Reader& r : readers_) r.broken = true;  // InitWithArena doesn't wait: its offsets are gone
 }
 
 void Ring::ReleaseLocked() {
@@ -245,7 +244,7 @@ void Ring::ReleaseLocked() {
 
 bool Ring::ReleaseIfIdle(int64_t now_qpc) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (released_ || pinned_ || max_age_qpc_ <= 0 || !arena_) return false;
+    if (released_ || !readers_.empty() || max_age_qpc_ <= 0 || !arena_) return false;
     if (now_qpc - last_append_qpc_ < max_age_qpc_) return false;
     ReleaseLocked();
     return true;
@@ -253,7 +252,7 @@ bool Ring::ReleaseIfIdle(int64_t now_qpc) {
 
 bool Ring::Release() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (pinned_ || !arena_) return false;
+    if (!readers_.empty() || !arena_) return false;
     if (!released_) ReleaseLocked();
     return true;
 }
@@ -300,11 +299,32 @@ void Ring::MoveToRamLocked() {
     write_pos_  = 0;
     capped_     = false;
     read_failed_ = false;
-    if (pinned_) pin_broken_ = true;
+    for (Reader& r : readers_) r.broken = true;
     const size_t physical = arena_->Size();
     lost_arena_ = std::move(arena_);
     arena_ = std::make_unique<RamArena>(physical);
     storage_lost_ = true;
+}
+
+Ring::Reader* Ring::FindReaderLocked(uint64_t id) {
+    for (Reader& r : readers_)
+        if (r.id == id) return &r;
+    return nullptr;
+}
+
+int64_t Ring::ProtectedFromLocked() const {
+    int64_t from = (std::numeric_limits<int64_t>::max)();
+    for (const Reader& r : readers_)
+        if (!r.broken) from = (std::min)(from, r.start_qpc);
+    return from;
+}
+
+// The one holding eviction back goes first: a reader behind it is closer to live and still fits.
+// Ties break together, as one reader would have.
+void Ring::BreakOldestReaderLocked() {
+    const int64_t oldest = ProtectedFromLocked();
+    for (Reader& r : readers_)
+        if (!r.broken && r.start_qpc == oldest) r.broken = true;
 }
 
 // Frees one whole GOP from the front — the leading keyframe and everything up to, not including,
@@ -313,15 +333,15 @@ void Ring::MoveToRamLocked() {
 // Append() calls this in a loop until enough room is freed or eviction stalls.
 void Ring::EvictLocked() {
     if (descriptors_.empty()) return;
-    const bool protecting = pinned_ && !pin_broken_;
-    if (protecting && descriptors_.front().qpc >= pin_start_qpc_) return;  // would strand pinned data
+    const int64_t protected_from = ProtectedFromLocked();
+    if (descriptors_.front().qpc >= protected_from) return;  // would strand pinned data
 
     do {
         const auto& d = descriptors_.front();
         live_bytes_ -= d.length;
         descriptors_.pop_front();
     } while (!descriptors_.empty() && !descriptors_.front().is_keyframe &&
-             !(protecting && descriptors_.front().qpc >= pin_start_qpc_));
+             descriptors_.front().qpc < protected_from);
 
     // A barrier with no surviving descriptor before it can no longer clamp anything a future Pin()
     // would otherwise reach — see Barrier()'s comment. If the ring emptied out entirely, every
@@ -374,11 +394,6 @@ void Ring::SetBaseSegmentParams(std::shared_ptr<const SegmentParams> params) {
     base_segment_params_ = std::move(params);
 }
 
-std::shared_ptr<const SegmentParams> Ring::PinnedSegmentParams() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return pinned_segment_params_;
-}
-
 size_t Ring::BarrierCount() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return barriers_.size();
@@ -403,12 +418,13 @@ void Ring::Append(const uint8_t* data, size_t size, int64_t qpc, uint64_t index,
         if (descriptors_.size() == before) break;  // pin (or an empty ring) blocked further eviction
     }
     // Past the soft budget and still not enough room (pin blocked eviction): overshoot into the
-    // physical headroom rather than drop a frame. A physical-capacity overflow (the pinned reader
-    // fell further behind than the headroom allows) breaks the pin: that save fails, the engine
-    // keeps recording.
-    if (arena_->Size() - live_bytes_ < size) {
-        pin_broken_ = true;
-        while (arena_->Size() - live_bytes_ < size && !descriptors_.empty()) EvictLocked();
+    // physical headroom rather than drop a frame. A physical-capacity overflow (a reader fell
+    // further behind than the headroom allows) breaks the oldest pin, one at a time until the AU
+    // fits: those saves fail, newer readers and the engine keep going.
+    while (arena_->Size() - live_bytes_ < size && !descriptors_.empty()) {
+        const size_t before = descriptors_.size();
+        EvictLocked();
+        if (descriptors_.size() == before) BreakOldestReaderLocked();
     }
 
     if (!arena_->EnsureCommitted(write_pos_, size) && !ReclaimCommitLocked(size)) {
@@ -458,17 +474,17 @@ size_t Ring::TrimCommitted() {
                                 free_bytes - RamArena::kCommitChunk, 1);
 }
 
-std::vector<AuDescriptor> Ring::Pin(int64_t min_qpc, int64_t max_qpc) {
+RingPin Ring::Pin(int64_t min_qpc, int64_t max_qpc) {
     return PinImpl(min_qpc, max_qpc, /*covering=*/false);
 }
 
-std::vector<AuDescriptor> Ring::PinCovering(int64_t min_qpc, int64_t max_qpc) {
+RingPin Ring::PinCovering(int64_t min_qpc, int64_t max_qpc) {
     return PinImpl(min_qpc, max_qpc, /*covering=*/true);
 }
 
-std::vector<AuDescriptor> Ring::PinImpl(int64_t min_qpc, int64_t max_qpc, bool covering) {
+RingPin Ring::PinImpl(int64_t min_qpc, int64_t max_qpc, bool covering) {
+    RingPin pin;
     std::lock_guard<std::mutex> lock(mutex_);
-    if (pinned_) die("Ring::Pin: a pin is already held (one save in flight at a time)");
 
     // A save window may never reach past the newest barrier — clamp the
     // requested floor up to it before searching. If nothing survives at or after the barrier, the
@@ -481,9 +497,9 @@ std::vector<AuDescriptor> Ring::PinImpl(int64_t min_qpc, int64_t max_qpc, bool c
     // guarantees), so its params are the newest barrier's — walking back past a null only matters
     // for callers that drop bare barriers with no params at all (the synthetic ring tests, and
     // PipelineSupervisor's audio ring, which has no SPS/PPS concept).
-    pinned_segment_params_ = base_segment_params_;
+    pin.params_ = base_segment_params_;
     for (auto it = barriers_.rbegin(); it != barriers_.rend(); ++it) {
-        if (it->params) { pinned_segment_params_ = it->params; break; }
+        if (it->params) { pin.params_ = it->params; break; }
     }
 
     // T_start = oldest keyframe with qpc >= min_qpc; covering: the newest keyframe at or before it,
@@ -497,34 +513,50 @@ std::vector<AuDescriptor> Ring::PinImpl(int64_t min_qpc, int64_t max_qpc, bool c
     }
     if (covering && covering_start != descriptors_.end() && (start == descriptors_.end() || start->qpc > min_qpc))
         start = covering_start;
-    if (start == descriptors_.end()) return {};  // nothing in range — buffer shorter than requested
+    if (start == descriptors_.end()) return pin;  // nothing in range — buffer shorter than requested
 
     auto end = start;
     while (end != descriptors_.end() && end->qpc < max_qpc) ++end;
+    if (end == start) return pin;  // max_qpc at or before the first keyframe: nothing to hold
 
-    pinned_        = true;
-    pin_broken_    = false;
-    pin_start_qpc_ = start->qpc;
-    return std::vector<AuDescriptor>(start, end);
+    pin.ring_ = this;
+    pin.id_   = next_reader_id_++;
+    pin.aus_.assign(start, end);
+    readers_.push_back(Reader{pin.id_, start->qpc, false});
+    return pin;
 }
 
-void Ring::Unpin() {
+void Ring::Unpin(uint64_t id) {
+    bool last = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        pinned_     = false;
-        pin_broken_ = false;
+        for (auto it = readers_.begin(); it != readers_.end(); ++it) {
+            if (it->id == id) { readers_.erase(it); break; }
+        }
+        last = readers_.empty();
     }
-    pin_released_.notify_all();
+    if (last) pin_released_.notify_all();
 }
 
-void Ring::ReleaseThrough(const AuDescriptor& d) {
+void Ring::ReleasePinnedThrough(uint64_t id, int64_t qpc) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (pinned_) pin_start_qpc_ = (std::max)(pin_start_qpc_, d.qpc + 1);
+    if (Reader* r = FindReaderLocked(id)) r->start_qpc = (std::max)(r->start_qpc, qpc + 1);
+}
+
+bool Ring::ReadPinned(uint64_t id, const AuDescriptor& d, std::vector<uint8_t>& out) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const Reader* r = FindReaderLocked(id);
+    if (!r || r->broken || d.qpc < r->start_qpc) return false;  // released: may be overwritten
+    if (!arena_->ReadInto(d.offset, d.length, out)) {
+        read_failed_ = true;
+        return false;
+    }
+    return true;
 }
 
 bool Ring::IsPinned() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return pinned_;
+    return !readers_.empty();
 }
 
 size_t Ring::Capacity() const {
@@ -532,14 +564,34 @@ size_t Ring::Capacity() const {
     return capacity_;
 }
 
-bool Ring::ReadInto(const AuDescriptor& d, std::vector<uint8_t>& out) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (pin_broken_) return false;
-    if (!arena_->ReadInto(d.offset, d.length, out)) {
-        read_failed_ = true;
-        return false;
+RingPin::RingPin(RingPin&& other) noexcept { *this = std::move(other); }
+
+RingPin& RingPin::operator=(RingPin&& other) noexcept {
+    if (this != &other) {
+        Unpin();
+        ring_   = other.ring_;
+        id_     = other.id_;
+        aus_    = std::move(other.aus_);
+        params_ = std::move(other.params_);
+        other.ring_ = nullptr;
+        other.id_   = 0;
+        other.aus_.clear();
     }
-    return true;
+    return *this;
+}
+
+bool RingPin::ReadInto(const AuDescriptor& d, std::vector<uint8_t>& out) const {
+    return ring_ && ring_->ReadPinned(id_, d, out);
+}
+
+void RingPin::ReleaseThrough(const AuDescriptor& d) {
+    if (ring_) ring_->ReleasePinnedThrough(id_, d.qpc);
+}
+
+void RingPin::Unpin() {
+    if (!ring_) return;
+    ring_->Unpin(id_);
+    ring_ = nullptr;
 }
 
 }  // namespace ombra

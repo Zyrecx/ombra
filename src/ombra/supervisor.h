@@ -24,7 +24,7 @@
 // wrong trade). Both paths converge on StartSegment(), the single place a barrier is dropped —
 // carrying the new segment's SPS/PPS and dimensions (Ring::SegmentParams), which is what makes a
 // save that follows a resolution change mux the right avcC. CurrentParams() below is no longer how
-// a save picks its parameters (Ring::PinnedSegmentParams() is); it stays for diagnostics and for
+// a save picks its parameters (RingPin::Params() is); it stays for diagnostics and for
 // callers with no ring of their own.
 #pragma once
 
@@ -163,7 +163,7 @@ public:
     // Mutex-protected and safe to call from any thread at any time, including mid-rebuild — this
     // replaces the pre-step-8 pattern of a raw pointer/reference into a live Encoder, which a
     // rebuild would dangle or silently repoint at the wrong segment's SPS/PPS (advisor review).
-    // The save path moved off this: Ring::PinnedSegmentParams() gives a save the parameters
+    // The save path moved off this: RingPin::Params() gives a save the parameters
     // of the segment it actually pinned, which is the right answer when a rebuild or a resolution
     // change happened between the buffer filling and the hotkey. This remains the answer to "what
     // is the pipeline doing right now," which is a different question.
