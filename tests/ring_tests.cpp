@@ -79,12 +79,48 @@ TEST_CASE("ring: a barrier arriving late still sorts by time") {
     const std::vector<uint8_t> frame(100, 1);
     for (int64_t q = 0; q < 10; ++q) ring.Append(frame.data(), frame.size(), q * 100, q, true);
 
-    ring.Barrier(800);  // a rebuild's barrier during a save...
-    ring.Barrier(300);  // ...then that save's cut at its older press
+    ring.Barrier(800);
+    ring.Barrier(300);
     auto pinned = ring.Pin(0);
     REQUIRE_FALSE(pinned.empty());
-    CHECK(pinned.front().qpc == 800);  // the rebuild's still bounds the next save
+    CHECK(pinned.front().qpc == 800);  // the newer one still bounds the next save
     pinned.Unpin();
+}
+
+TEST_CASE("ring: the truncate cut binds only pins that ask, and never moves back") {
+    Ring ring;
+    ring.Init(100000, 1000);
+    const std::vector<uint8_t> frame(100, 1);
+    for (int64_t q = 0; q < 10; ++q) ring.Append(frame.data(), frame.size(), q * 100, q, q % 3 == 0);
+    ring.Barrier(300);
+    ring.Truncate(700);
+    ring.Truncate(500);  // an older press's save finishing late
+    CHECK(ring.TruncateQpc() == 700);
+    CHECK(ring.BarrierCount() == 1);
+
+    // A hotkey save starts at the cut; PinCovering doesn't step back across it to the keyframe at 600.
+    auto hotkey = ring.PinCovering(650, (std::numeric_limits<int64_t>::max)(), TruncateFloor::kRespect);
+    REQUIRE_FALSE(hotkey.empty());
+    CHECK(hotkey.front().qpc == 900);
+    // A tool's clip reaches past the cut to the keyframe before its floor, but not past the barrier.
+    auto tool = ring.PinCovering(650);
+    REQUIRE_FALSE(tool.empty());
+    CHECK(tool.front().qpc == 600);
+    auto tool_far = ring.Pin(0);
+    REQUIRE_FALSE(tool_far.empty());
+    CHECK(tool_far.front().qpc == 300);
+    std::vector<uint8_t> out;
+    CHECK(tool_far.ReadInto(tool_far.front(), out));  // three readers at once, each whole
+    CHECK(hotkey.ReadInto(hotkey.back(), out));
+    hotkey.Unpin();
+    tool.Unpin();
+    tool_far.Unpin();
+
+    REQUIRE(ring.Release());  // the cut goes with the footage it cut
+    CHECK(ring.TruncateQpc() == (std::numeric_limits<int64_t>::min)());
+    ring.Truncate(700);
+    ring.Init(100000, 1000);
+    CHECK(ring.TruncateQpc() == (std::numeric_limits<int64_t>::min)());
 }
 
 // use_file is the RamArena-vs-FileArena axis; every case below runs once per backend.

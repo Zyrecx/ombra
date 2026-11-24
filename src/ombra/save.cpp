@@ -99,11 +99,11 @@ SaveOutcome DoSaveImpl(SaveContext* ctx, int64_t t_end, const std::wstring* grou
     const int64_t qpc_freq    = QpcFrequency();
     const int64_t t_start_min = t_end - static_cast<int64_t>(ctx->buffer_seconds * qpc_freq);
 
-    SavePin pin(ctx->ring->PinCovering(t_start_min, t_end));
+    SavePin pin(ctx->ring->PinCovering(t_start_min, t_end, TruncateFloor::kRespect));
     const std::vector<AuDescriptor>& descriptors = pin.Pin().Aus();  // kept after the pin is released
     std::printf("\n  save            %zu access units pinned\n", descriptors.size());
 
-    // Checked before the truncate barrier below: a skipped save must not cut the next one short.
+    // Checked before the truncate cut below: a skipped save must not cut the next one short.
     const auto too_short = [&] {
         std::printf("  save            skipped — %zu access units is under %.1f s of footage\n",
                     descriptors.size(), kMinClipSeconds);
@@ -257,8 +257,8 @@ SaveOutcome DoSaveImpl(SaveContext* ctx, int64_t t_end, const std::wstring* grou
     // Only a written clip cuts the next one short: after a failure (a full disk) the footage is still
     // in the ring for a retry.
     if (ok && overlap_policy == "truncate") {
-        ctx->ring->Barrier(t_end);  // audio follows the video floor, so it needs no barrier
-        Log::Info("save.overlap_policy=truncate: dropped barrier at t_end=%lld", static_cast<long long>(t_end));
+        ctx->ring->Truncate(t_end);  // audio follows the video floor, so it needs no cut
+        Log::Info("save.overlap_policy=truncate: cut at t_end=%lld", static_cast<long long>(t_end));
     }
     const int64_t pin_ms = pin.Release();
     if (pin_broken)

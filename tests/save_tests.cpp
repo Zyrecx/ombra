@@ -649,13 +649,14 @@ TEST_CASE("save: under a second of new footage writes nothing and doesn't cut th
 // control character, tried first in the old faulttest, is accepted and creates the folder).
 TEST_CASE("save: an output folder that can't be created fails the save and leaves the buffer intact") {
     SaveRig rig(L"bad-folder");
-    rig.ctx.save_overlap_policy = "truncate";  // a failed save must not drop its barrier either
+    rig.ctx.save_overlap_policy = "truncate";  // a failed save must not cut the next one either
     rig.FeedVideo(0, 240);
-    const size_t barriers = rig.ring.BarrierCount();
+    rig.ring.Truncate(1);  // an earlier save's cut, which the failed one must leave alone
+    const int64_t cut = rig.ring.TruncateQpc();
 
     rig.ctx.out_path = TestOutputPath(L"save\\bad?folder\\clip.mp4");
     CHECK(rig.SaveAt(4.0) == SaveOutcome::kFailed);
-    CHECK(rig.ring.BarrierCount() == barriers);
+    CHECK(rig.ring.TruncateQpc() == cut);
 
     rig.ctx.out_path = TestOutputPath(L"save\\bad-folder-retry.mp4");
     REQUIRE(rig.Save(4.0));
@@ -737,7 +738,8 @@ TEST_CASE("save: a clip that fails to write leaves its footage for a retry under
     SaveRig rig(L"failed-write");
     rig.ctx.save_overlap_policy = "truncate";
     rig.FeedVideo(0, 240);
-    const size_t barriers = rig.ring.BarrierCount();
+    const size_t  barriers = rig.ring.BarrierCount();
+    const int64_t cut      = rig.ring.TruncateQpc();
 
     // A folder at the clip's own path: the folder check passes and the file can't be opened, the
     // same path through the mux as a disk that fills up.
@@ -745,12 +747,13 @@ TEST_CASE("save: a clip that fails to write leaves its footage for a retry under
     CreateDirectoryW(blocked.c_str(), nullptr);
     rig.ctx.out_path = blocked;
     CHECK(rig.SaveAt(4.0) == SaveOutcome::kFailed);
-    CHECK(rig.ring.BarrierCount() == barriers);
+    CHECK(rig.ring.TruncateQpc() == cut);
 
     rig.ctx.out_path = TestOutputPath(L"save\\failed-write-retry.mp4");
     REQUIRE(rig.Save(4.0));
     CHECK(ProbeVideoFrames(rig.SavedPath()).count == 180);
-    CHECK(rig.ring.BarrierCount() == barriers + 1);  // a written clip still cuts the next one
+    CHECK(rig.ring.TruncateQpc() > cut);  // a written clip still cuts the next one
+    CHECK(rig.ring.BarrierCount() == barriers);  // and starts no segment
     CHECK(rig.SaveAt(4.0) == SaveOutcome::kNothingNew);
 }
 

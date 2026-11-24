@@ -226,6 +226,7 @@ void Ring::InitLocked(std::unique_ptr<IRingArena> arena, size_t capacity_bytes) 
     write_pos_           = 0;
     descriptors_.clear();
     barriers_.clear();
+    truncate_qpc_ = (std::numeric_limits<int64_t>::min)();
     for (Reader& r : readers_) r.broken = true;  // InitWithArena doesn't wait: its offsets are gone
 }
 
@@ -234,6 +235,7 @@ void Ring::ReleaseLocked() {
     // Every barrier cut something now gone. The params that matter next arrive with the barrier
     // the supervisor drops when it re-arms (its disarm latched one).
     barriers_.clear();
+    truncate_qpc_ = (std::numeric_limits<int64_t>::min)();
     live_bytes_   = 0;
     write_pos_    = 0;
     dropping_gop_ = false;
@@ -294,6 +296,7 @@ void Ring::MoveToRamLocked() {
         if (it->params) { base_segment_params_ = it->params; break; }
     }
     barriers_.clear();
+    truncate_qpc_ = (std::numeric_limits<int64_t>::min)();
     descriptors_.clear();
     live_bytes_ = 0;
     write_pos_  = 0;
@@ -389,6 +392,16 @@ void Ring::Barrier(int64_t qpc, std::shared_ptr<const SegmentParams> params) {
     barriers_.insert(at, BarrierRec{qpc, std::move(params)});
 }
 
+void Ring::Truncate(int64_t qpc) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    truncate_qpc_ = (std::max)(truncate_qpc_, qpc);
+}
+
+int64_t Ring::TruncateQpc() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return truncate_qpc_;
+}
+
 void Ring::SetBaseSegmentParams(std::shared_ptr<const SegmentParams> params) {
     std::lock_guard<std::mutex> lock(mutex_);
     base_segment_params_ = std::move(params);
@@ -474,24 +487,25 @@ size_t Ring::TrimCommitted() {
                                 free_bytes - RamArena::kCommitChunk, 1);
 }
 
-RingPin Ring::Pin(int64_t min_qpc, int64_t max_qpc) {
-    return PinImpl(min_qpc, max_qpc, /*covering=*/false);
+RingPin Ring::Pin(int64_t min_qpc, int64_t max_qpc, TruncateFloor truncate) {
+    return PinImpl(min_qpc, max_qpc, /*covering=*/false, truncate);
 }
 
-RingPin Ring::PinCovering(int64_t min_qpc, int64_t max_qpc) {
-    return PinImpl(min_qpc, max_qpc, /*covering=*/true);
+RingPin Ring::PinCovering(int64_t min_qpc, int64_t max_qpc, TruncateFloor truncate) {
+    return PinImpl(min_qpc, max_qpc, /*covering=*/true, truncate);
 }
 
-RingPin Ring::PinImpl(int64_t min_qpc, int64_t max_qpc, bool covering) {
+RingPin Ring::PinImpl(int64_t min_qpc, int64_t max_qpc, bool covering, TruncateFloor truncate) {
     RingPin pin;
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // A save window may never reach past the newest barrier — clamp the
-    // requested floor up to it before searching. If nothing survives at or after the barrier, the
+    // A save window may never reach past the newest barrier (nor the truncate cut, when asked) —
+    // clamp the requested floor up to it before searching. If nothing survives at or after it, the
     // loop below finds no keyframe and Pin() returns an empty window, same as any other
     // out-of-range request; that's correct, not a bug to special-case.
-    const int64_t barrier_qpc = barriers_.empty() ? (std::numeric_limits<int64_t>::min)() : barriers_.back().qpc;
-    min_qpc = (std::max)(min_qpc, barrier_qpc);
+    int64_t floor_qpc = barriers_.empty() ? (std::numeric_limits<int64_t>::min)() : barriers_.back().qpc;
+    if (truncate == TruncateFloor::kRespect) floor_qpc = (std::max)(floor_qpc, truncate_qpc_);
+    min_qpc = (std::max)(min_qpc, floor_qpc);
 
     // The window can only lie inside the newest barrier's segment (that is what the clamp above
     // guarantees), so its params are the newest barrier's — walking back past a null only matters
@@ -509,7 +523,7 @@ RingPin Ring::PinImpl(int64_t min_qpc, int64_t max_qpc, bool covering) {
     for (auto it = descriptors_.begin(); it != descriptors_.end(); ++it) {
         if (!it->is_keyframe) continue;
         if (it->qpc >= min_qpc) { start = it; break; }
-        if (it->qpc >= barrier_qpc) covering_start = it;
+        if (it->qpc >= floor_qpc) covering_start = it;
     }
     if (covering && covering_start != descriptors_.end() && (start == descriptors_.end() || start->qpc > min_qpc))
         start = covering_start;

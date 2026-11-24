@@ -163,6 +163,10 @@ struct SegmentParams {
 
 class Ring;
 
+// Whether a pin stops at the save.overlap_policy=truncate cut (Ring::Truncate). Only the user's
+// hotkey saves do; a tool's clip or a recording reaches past it. Hard barriers bind every pin.
+enum class TruncateFloor { kIgnore, kRespect };
+
 // One reader's hold on a window of the ring (Ring::Pin). Eviction never takes what a live pin
 // still covers; the pin moves forward as the reader calls ReleaseThrough, and lets go when it is
 // destroyed or Unpin()ned. An empty window holds nothing. Must not outlive its Ring; one thread
@@ -284,26 +288,34 @@ public:
     // required once a second, independently-clocked ring (PcmRing, pcmring.h) is pinned against
     // the same T_end — pinning each to its own "newest" would silently give tracks of different
     // lengths. Pins are independent: several readers may hold overlapping windows at once.
-    RingPin Pin(int64_t min_qpc, int64_t max_qpc = (std::numeric_limits<int64_t>::max)());
+    RingPin Pin(int64_t min_qpc, int64_t max_qpc = (std::numeric_limits<int64_t>::max)(),
+                TruncateFloor truncate = TruncateFloor::kIgnore);
     // Pin() that starts at the newest keyframe at or before `min_qpc` when the ring still holds one
-    // (never past the newest barrier), so the window covers all of [min_qpc, max_qpc) instead of
+    // (never past the newest barrier, nor the truncate cut under kRespect), so the window covers all of [min_qpc, max_qpc) instead of
     // losing up to a GOP at the front. Otherwise the same as Pin(). The video save uses it: a 120 s
     // buffer saves at least 120 s, not 118-120.
-    RingPin PinCovering(int64_t min_qpc, int64_t max_qpc = (std::numeric_limits<int64_t>::max)());
+    RingPin PinCovering(int64_t min_qpc, int64_t max_qpc = (std::numeric_limits<int64_t>::max)(),
+                        TruncateFloor truncate = TruncateFloor::kIgnore);
 
     // Any reader holds a pin.
     bool IsPinned() const;
     size_t Capacity() const;
     size_t LiveBytes() const { std::lock_guard<std::mutex> lock(mutex_); return live_bytes_; }
 
-    // Marks `qpc` as a point no future Pin() may reach past — the one mechanism for
-    // a resolution change, a fault-rebuild, and the `save.overlap_policy=truncate` cut, so a save
-    // window can never straddle two different SPS/PPS segments or repeat footage across a fresh
-    // segment boundary. Pin()'s T_start is clamped to at least the newest barrier on record — an
-    // older barrier can't matter once a newer one exists, since the newer one is already at least
-    // as restrictive. Kept in qpc order whatever order they arrive in: a save drops its truncate cut
-    // at the press's time once its file is written, and a rebuild's barrier can land in between.
+    // Marks `qpc` as a point no future Pin() may reach past: a resolution change or a
+    // fault-rebuild, so a save window can never straddle two different SPS/PPS segments. Pin()'s
+    // T_start is clamped to at least the newest barrier on record — an older barrier can't matter
+    // once a newer one exists, since the newer one is already at least as restrictive. Kept in qpc
+    // order whatever order they arrive in.
     void Barrier(int64_t qpc, std::shared_ptr<const SegmentParams> params = nullptr);
+
+    // The save.overlap_policy=truncate cut: a pin with TruncateFloor::kRespect starts at or after
+    // `qpc`, so the user's next hotkey save doesn't repeat footage. Erases nothing and starts no
+    // segment; other pins reach past it. Only ever moves forward: a save drops its cut at the press's
+    // time once its file is written, after a later press may already have dropped its own.
+    void Truncate(int64_t qpc);
+    // The current cut; INT64_MIN when none. Cleared with the footage (Init, a release, a lost file).
+    int64_t TruncateQpc() const;
 
     // The parameters of the segment that predates every surviving barrier. Set once at startup for
     // the first generation (PipelineSupervisor); after that it is maintained automatically, by
@@ -332,7 +344,7 @@ private:
 
     void EvictLocked();
     void EvictAgedLocked(int64_t newest_qpc);
-    RingPin PinImpl(int64_t min_qpc, int64_t max_qpc, bool covering);
+    RingPin PinImpl(int64_t min_qpc, int64_t max_qpc, bool covering, TruncateFloor truncate);
     void InitLocked(std::unique_ptr<IRingArena> arena, size_t capacity_bytes);
     void ReleaseLocked();
     bool ReclaimCommitLocked(size_t size);
@@ -365,6 +377,7 @@ private:
     std::deque<BarrierRec> barriers_;
 
     std::shared_ptr<const SegmentParams> base_segment_params_;
+    int64_t truncate_qpc_ = (std::numeric_limits<int64_t>::min)();  // Truncate
 
     // A handful at most (one per save in flight); scanned per eviction on the pacer path. Only
     // Pin and Unpin resize it, off the pacer thread.

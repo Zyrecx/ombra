@@ -189,8 +189,7 @@ public:
     // otherwise.
     std::string CpuFallbackCode() const;
 
-    // A barrier caller, with resolution change, fault-rebuild and save.overlap_policy=truncate
-    // (ring.h). Disarming tears the current generation down and leaves it down — the watchdog
+    // A barrier caller, with resolution change and fault-rebuild (ring.h). Disarming tears the current generation down and leaves it down — the watchdog
     // thread stops touching it entirely until this flips back to true — rather than the watchdog
     // immediately rebuilding what was just torn down, which is what happens if a caller reaches
     // into Stop()/Start() instead of this. Arming when nothing is built (first arm, or after a
