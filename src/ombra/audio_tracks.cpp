@@ -65,6 +65,8 @@ AudioTrackHub::AudioTrackHub(int64_t origin_qpc, int64_t qpc_freq, uint32_t bitr
 // parameters every track shares at this bitrate.
 void AudioTrackHub::ProbeEncoderLocked() {
     silent_frame_.clear();
+    asc_.clear();  // no encoder, no format: SetBitrate then starts the tracks over
+    negotiated_bps_ = 0;
     AacEncoder probe;
     if (probe.Open(bitrate_kbps_)) {
         std::vector<int16_t>           zeros(static_cast<size_t>(kFrameSamples) * 2 * 2, 0);
@@ -163,6 +165,7 @@ void AudioTrackHub::SetBitrate(uint32_t bitrate_kbps) {
         return;
     }
     // HE-AAC <-> AAC-LC: one track can't hold both, so every track starts over.
+    ++format_gen_;
     tracks_.clear();
     RebuildTracksLocked();
 }
@@ -403,38 +406,89 @@ void AudioTrackHub::EncodeTrackLocked(Track& t, int64_t target, bool hold_idle_c
 }
 
 std::vector<MuxAudioTrack> AudioTrackHub::Collect(int64_t floor_qpc, int64_t t_end_qpc) {
+    ClipAudio clip = BeginClip(floor_qpc);
+    return FinishClip(clip, t_end_qpc);
+}
+
+AudioTrackHub::ClipAudio AudioTrackHub::BeginClip(int64_t floor_qpc) {
+    std::lock_guard<std::mutex> lock(encode_mutex_);
+    ClipAudio clip;
+    clip.floor_frame = FrameAt(floor_qpc);
+    clip.first_slot  = FloorDiv(clip.floor_frame, kFrameSamples);
+    clip.asc         = asc_;
+    clip.silent      = silent_frame_;
+    clip.format_gen  = format_gen_;
+    for (const auto& t : tracks_) {
+        ClipAudio::Part p;
+        p.key                = t->key;
+        p.next_slot          = clip.first_slot;
+        p.track.name         = t->name;
+        p.track.sample_rate  = kSampleRate;
+        p.track.bitrate_bps  = negotiated_bps_;
+        p.track.asc          = asc_;
+        p.track.skip_samples = static_cast<uint32_t>(clip.floor_frame - clip.first_slot * kFrameSamples);
+        clip.parts.push_back(std::move(p));
+    }
+    return clip;
+}
+
+void AudioTrackHub::DrainClip(ClipAudio& clip, int64_t through_qpc) {
+    std::lock_guard<std::mutex> lock(encode_mutex_);
+    DrainClipLocked(clip, FloorDiv(FrameAt(through_qpc), kFrameSamples));
+}
+
+// Frames come out of a track's encoder in slot order, so a slot not encoded yet has nothing after
+// it either: a gap is filled with silence only once a later frame shows it is a real hole (a paused
+// encoder, a track that was gone for a while), never while its frame may still come.
+void AudioTrackHub::DrainClipLocked(ClipAudio& clip, int64_t end_slot) {
+    if (clip.format_changed || clip.silent.empty()) return;
+    if (format_gen_ != clip.format_gen) {
+        clip.format_changed = true;  // the tracks were rebuilt in another format: keep what was taken
+        return;
+    }
+    std::vector<uint8_t> bytes;
+    for (auto& p : clip.parts) {
+        if (p.next_slot >= end_slot) continue;
+        const auto t = std::find_if(tracks_.begin(), tracks_.end(), [&](const auto& x) { return x->key == p.key; });
+        if (t == tracks_.end()) continue;  // removed for now
+        // A same-format bitrate change keeps the clip: the header carries the highest rate in it.
+        p.track.bitrate_bps = (std::max)(p.track.bitrate_bps, negotiated_bps_);
+        RingPin pin = (*t)->ring.Pin(QpcAt(p.next_slot * kFrameSamples), QpcAt(end_slot * kFrameSamples));
+        for (const auto& d : pin) {
+            const int64_t slot = static_cast<int64_t>(d.index);
+            if (slot < p.next_slot) continue;
+            if (!pin.ReadInto(d, bytes)) {
+                // Evicted under the reader: a later frame fills these slots as a hole; at the end, the track is short.
+                Log::Warn("audio: a clip lost track \"%s\" from slot %lld", p.track.name.c_str(),
+                          static_cast<long long>(slot));
+                break;
+            }
+            for (; p.next_slot < slot; ++p.next_slot) p.track.frames.push_back({clip.silent});
+            p.track.frames.push_back({bytes});
+            p.next_slot  = slot + 1;
+            p.first_real = (std::min)(p.first_real, slot);
+        }
+    }
+}
+
+std::vector<MuxAudioTrack> AudioTrackHub::FinishClip(ClipAudio& clip, int64_t t_end_qpc) {
     EncodeThrough(t_end_qpc, /*hold_idle_cursors=*/true);
 
     std::lock_guard<std::mutex> lock(encode_mutex_);
     std::vector<MuxAudioTrack>  result;
-    const int64_t floor_frame = FrameAt(floor_qpc);
-    const int64_t end_frame   = FrameAt(t_end_qpc);
-    if (end_frame <= floor_frame || silent_frame_.empty()) return result;
-    const int64_t first_slot = FloorDiv(floor_frame, kFrameSamples);
-    const int64_t end_slot   = FloorDiv(end_frame + kFrameSamples - 1, kFrameSamples);
-
-    std::vector<uint8_t> bytes;
-    for (auto& t : tracks_) {
-        RingPin descriptors = t->ring.Pin(QpcAt(first_slot * kFrameSamples), QpcAt(end_slot * kFrameSamples));
-        if (descriptors.empty()) continue;  // no audio for this track in the window
-        MuxAudioTrack m;
-        m.name         = t->name;
-        m.sample_rate  = kSampleRate;
-        m.bitrate_bps  = negotiated_bps_;
-        m.asc          = asc_;
-        m.skip_samples = static_cast<uint32_t>(floor_frame - first_slot * kFrameSamples);
-        int64_t slot = first_slot;
-        bool    read_ok = true;
-        for (const auto& d : descriptors) {
-            // A paused encoder left a hole on the grid: silence keeps every later frame in place.
-            for (; slot < static_cast<int64_t>(d.index); ++slot) m.frames.push_back({silent_frame_});
-            if (!(read_ok = descriptors.ReadInto(d, bytes))) break;
-            m.frames.push_back({bytes});
-            ++slot;
+    const int64_t end_frame = FrameAt(t_end_qpc);
+    if (end_frame > clip.floor_frame) {
+        const int64_t end_slot = FloorDiv(end_frame + kFrameSamples - 1, kFrameSamples);
+        DrainClipLocked(clip, end_slot);
+        // Earlier drains may have run past an end that came early (the video's segment ended).
+        const size_t keep = static_cast<size_t>(end_slot - clip.first_slot);
+        for (auto& p : clip.parts) {
+            if (p.first_real >= end_slot) continue;  // no audio for this track in the window
+            if (p.track.frames.size() > keep) p.track.frames.resize(keep);
+            result.push_back(std::move(p.track));
         }
-        descriptors.Unpin();
-        if (read_ok) result.push_back(std::move(m));
     }
+    clip.parts.clear();
     return result;
 }
 

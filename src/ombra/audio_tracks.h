@@ -134,6 +134,38 @@ public:
     // encoding up to t_end first. Each track's skip_samples trims its first frame to floor_qpc.
     std::vector<MuxAudioTrack> Collect(int64_t floor_qpc, int64_t t_end_qpc);
 
+    // A clip's audio taken in pieces while the clip records (DrainClip), so a clip running longer
+    // than the rings' reach (about buffer.seconds) keeps its opening. Collect is Begin + Finish at
+    // once. The track set is the one at BeginClip, matched by Track::key: a track removed later
+    // stops (silence fills any gap before it comes back), one added later isn't in the clip. A
+    // change of stream format (audio.bitrate_kbps across 128) ends the clip's audio there. Pins are
+    // taken and released inside each call, so a clip never holds a track ring between calls. What
+    // was taken stays on the heap until FinishClip (about 1.5 MB a track-minute at 192 kbps), so a
+    // clip's length must be capped. Resize drops what wasn't drained yet: don't Resize under a clip.
+    struct ClipAudio {
+        struct Part {
+            std::string   key;            // Track::key, matched on every drain
+            MuxAudioTrack track;
+            int64_t       next_slot = 0;  // first grid slot not yet taken
+            int64_t       first_real = INT64_MAX;  // slot of the first encoded frame, not silence
+        };
+        int64_t              floor_frame = 0;
+        int64_t              first_slot  = 0;
+        std::vector<uint8_t> asc;
+        std::vector<uint8_t> silent;  // the clip's format: the hub's own changes with the bitrate
+        uint64_t             format_gen = 0;
+        bool                 format_changed = false;
+        std::vector<Part>    parts;
+    };
+    // Starts a clip whose video begins at `floor_qpc`.
+    ClipAudio BeginClip(int64_t floor_qpc);
+    // Takes every frame already encoded in whole slots before `through_qpc`. Call it well within
+    // the rings' reach (every second or so); it doesn't encode anything itself.
+    void DrainClip(ClipAudio& clip, int64_t through_qpc);
+    // Encodes up to `t_end_qpc`, takes the rest and returns the tracks, cut to end there. A track
+    // that never took a real frame is left out.
+    std::vector<MuxAudioTrack> FinishClip(ClipAudio& clip, int64_t t_end_qpc);
+
     // Live buffer.seconds change: every track's ring is re-created (encoded audio is dropped, the
     // same as the video ring).
     void Resize(Sizing sizing);
@@ -175,6 +207,7 @@ private:
     void    EncodeTrackLocked(Track& t, int64_t target_frame, bool hold_idle_cursor);
     void    RebuildTracksLocked();
     void    ProbeEncoderLocked();
+    void    DrainClipLocked(ClipAudio& clip, int64_t end_slot);
 
     const int64_t origin_qpc_;
     const int64_t qpc_freq_;
@@ -193,6 +226,7 @@ private:
     std::vector<uint8_t>                silent_frame_;   // one AAC frame of digital silence
     std::vector<uint8_t>                asc_;
     uint32_t                            negotiated_bps_ = 0;
+    uint64_t                            format_gen_     = 0;  // bumped when the tracks start over in a new format
 
     std::atomic<bool>     suspended_{false};
     std::atomic<uint64_t> overrun_frames_{0};

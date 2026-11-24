@@ -436,4 +436,129 @@ TEST_CASE("audio hub: an input source's noise floor doesn't read as audible") {
     CHECK(hub.LastAudibleQpc(0) == 2 * kFreq);
 }
 
+// An open clip's audio (BeginClip / DrainClip / FinishClip), on a synthetic timeline: the hub is
+// never Start()ed, so every encode happens where the test says.
+namespace {
+
+struct ClipHub {
+    static constexpr int64_t kFreq   = 10'000'000;
+    static constexpr int64_t kOrigin = 1'000'000;
+    static constexpr int64_t kPacket = 480;
+    AudioTrackHub            hub;
+    std::vector<int16_t>     packet = std::vector<int16_t>(kPacket * 2, 1000);
+
+    explicit ClipHub(AudioTrackHub::Sizing sizing) : hub(kOrigin, kFreq, 192, sizing) {}
+    static int64_t Qpc(int64_t frame) { return kOrigin + frame * kFreq / kRate; }
+    // Feeds `slots` from `from` to `to` (frames), encoding as it goes, and drains `clip` every
+    // `drain_every` frames.
+    void Run(int64_t from, int64_t to, const std::vector<size_t>& slots,
+             AudioTrackHub::ClipAudio* clip = nullptr, int64_t drain_every = kRate) {
+        for (int64_t f = from; f < to; f += kPacket) {
+            for (size_t slot : slots) hub.Append(slot, packet.data(), packet.size(), Qpc(f));
+            hub.EncodeThrough(Qpc(f + kPacket));
+            if (clip && (f + kPacket) % drain_every == 0) hub.DrainClip(*clip, Qpc(f + kPacket));
+        }
+    }
+};
+
+}  // namespace
+
+TEST_CASE("audio hub: a clip drained in pieces holds the same frames as one collected at once") {
+    ClipHub h(AudioTrackHub::SizeFor(10.0, 192, 0));
+    h.hub.SetSources({{"A", "a"}}, false);
+    const int64_t floor = 1000;  // off the 1024 grid
+    h.Run(0, kRate / 2, {0});
+    auto clip = h.hub.BeginClip(ClipHub::Qpc(floor));
+    h.Run(kRate / 2, 6 * kRate, {0}, &clip, kRate / 2);
+    const auto pieces = h.hub.FinishClip(clip, ClipHub::Qpc(6 * kRate));
+    const auto whole  = h.hub.Collect(ClipHub::Qpc(floor), ClipHub::Qpc(6 * kRate));
+    REQUIRE(pieces.size() == 1);
+    REQUIRE(whole.size() == 1);
+    CHECK(pieces[0].name == "A");
+    CHECK(pieces[0].skip_samples == whole[0].skip_samples);
+    CHECK(pieces[0].skip_samples == floor);
+    CHECK(pieces[0].asc == whole[0].asc);
+    REQUIRE(pieces[0].frames.size() == whole[0].frames.size());
+    for (size_t i = 0; i < whole[0].frames.size(); ++i) {
+        CAPTURE(i);
+        CHECK(pieces[0].frames[i].data == whole[0].frames[i].data);
+    }
+}
+
+TEST_CASE("audio hub: a clip longer than the rings' reach keeps its opening") {
+    // Rings that age audio out after 2 s: a save collected at the end has lost the start.
+    ClipHub h(AudioTrackHub::SizeFor(2.0, 192, 2 * ClipHub::kFreq));
+    h.hub.SetSources({{"A", "a"}}, false);
+    auto clip = h.hub.BeginClip(ClipHub::Qpc(0));
+    h.Run(0, 8 * kRate, {0}, &clip, kRate / 2);
+    const auto silent = clip.silent;
+    const auto tracks = h.hub.FinishClip(clip, ClipHub::Qpc(8 * kRate));
+    REQUIRE(tracks.size() == 1);
+    // The encoder still holds its last frames or so: a clip's end is short by those, as a save's is.
+    CHECK(tracks[0].frames.size() <= static_cast<size_t>((8 * kRate + 1023) / 1024));
+    CHECK(tracks[0].frames.size() >= static_cast<size_t>((8 * kRate + 1023) / 1024 - 4));
+    for (size_t i : {size_t{2}, size_t{40}, size_t{200}}) {
+        CAPTURE(i);
+        CHECK(tracks[0].frames[i].data != silent);  // real audio, not a filled hole
+    }
+    const auto late = h.hub.Collect(ClipHub::Qpc(0), ClipHub::Qpc(8 * kRate));
+    REQUIRE(late.size() == 1);
+    CHECK(late[0].frames.front().data == silent);  // what the clip kept, a save no longer has
+}
+
+TEST_CASE("audio hub: a clip keeps its tracks from the start, silent while one is gone") {
+    ClipHub h(AudioTrackHub::SizeFor(10.0, 192, 0));
+    const auto s0 = h.hub.SetSources({{"A", "a", 0.0, AudioTrackSource::kAudibleLoopback, "a"},
+                                      {"B", "b", 0.0, AudioTrackSource::kAudibleLoopback, "b"},
+                                      {"C", "c", 0.0, AudioTrackSource::kAudibleLoopback, "c"}},
+                                     false);
+    auto clip = h.hub.BeginClip(ClipHub::Qpc(0));
+    h.Run(0, 2 * kRate, {s0[0], s0[1]}, &clip);  // C never delivers anything
+    h.hub.SetSources({{"A", "a", 0.0, AudioTrackSource::kAudibleLoopback, "a"},
+                      {"C", "c", 0.0, AudioTrackSource::kAudibleLoopback, "c"}});
+    h.Run(2 * kRate, 4 * kRate, {s0[0]}, &clip);
+    // B comes back (same track, a new source id) and D appears after the clip began.
+    const auto s1 = h.hub.SetSources({{"A", "a", 0.0, AudioTrackSource::kAudibleLoopback, "a"},
+                                      {"C", "c", 0.0, AudioTrackSource::kAudibleLoopback, "c"},
+                                      {"B", "b", 0.0, AudioTrackSource::kAudibleLoopback, "b2"},
+                                      {"D", "d", 0.0, AudioTrackSource::kAudibleLoopback, "d"}});
+    h.Run(4 * kRate, 6 * kRate, {s1[0], s1[2], s1[3]}, &clip);
+    const auto silent = clip.silent;
+    const auto tracks = h.hub.FinishClip(clip, ClipHub::Qpc(6 * kRate));
+
+    REQUIRE(tracks.size() == 2);  // C took nothing real; D isn't in the clip
+    CHECK(tracks[0].name == "A");
+    CHECK(tracks[1].name == "B");
+    CHECK(tracks[1].frames.size() == tracks[0].frames.size());  // nothing after the gap moved
+    const size_t gone = 3 * kRate / 1024;
+    CHECK(tracks[1].frames[gone].data == silent);
+    CHECK(tracks[0].frames[gone].data != silent);
+    CHECK(tracks[1].frames[kRate / 1024].data != silent);
+    CHECK(tracks[1].frames[5 * kRate / 1024].data != silent);
+    CHECK(clip.parts.empty());
+}
+
+TEST_CASE("audio hub: a clip's audio ends where the stream format changes, and at the clip's end") {
+    ClipHub h(AudioTrackHub::SizeFor(10.0, 192, 0));
+    h.hub.SetSources({{"A", "a"}}, false);
+    auto clip = h.hub.BeginClip(ClipHub::Qpc(0));
+    h.Run(0, 2 * kRate, {0}, &clip);
+
+    SUBCASE("HE-AAC from here on: the clip keeps the AAC-LC it took") {
+        h.hub.SetBitrate(64);
+        h.Run(2 * kRate, 4 * kRate, {0}, &clip);
+        CHECK(clip.format_changed);
+        const auto tracks = h.hub.FinishClip(clip, ClipHub::Qpc(4 * kRate));
+        REQUIRE(tracks.size() == 1);
+        CHECK(tracks[0].frames.size() <= static_cast<size_t>(2 * kRate / 1024));
+        CHECK(tracks[0].frames.size() >= static_cast<size_t>(2 * kRate / 1024 - 4));
+    }
+    SUBCASE("an end before what was drained cuts the audio there") {
+        h.Run(2 * kRate, 4 * kRate, {0}, &clip);
+        const auto tracks = h.hub.FinishClip(clip, ClipHub::Qpc(3 * kRate));
+        REQUIRE(tracks.size() == 1);
+        CHECK(tracks[0].frames.size() == static_cast<size_t>((3 * kRate + 1023) / 1024));
+    }
+}
+
 }  // namespace ombra::test
