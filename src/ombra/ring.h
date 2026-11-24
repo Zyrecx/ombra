@@ -167,10 +167,24 @@ class Ring;
 // hotkey saves do; a tool's clip or a recording reaches past it. Hard barriers bind every pin.
 enum class TruncateFloor { kIgnore, kRespect };
 
+// Where a tailing pin stands after RingPin::Follow.
+enum class TailState {
+    kOpen,           // more footage before `until` may still arrive
+    kReached,        // the ring holds footage at or past `until`: everything before it is taken
+    kSegmentEnded,   // a barrier was cut after the pin was taken: the window ends at it
+    kClosing,        // Ring::Init is waiting for this pin: finish with what was taken
+    kBroken,         // the pin broke (headroom ran out, storage lost) or holds nothing
+};
+
 // One reader's hold on a window of the ring (Ring::Pin). Eviction never takes what a live pin
 // still covers; the pin moves forward as the reader calls ReleaseThrough, and lets go when it is
 // destroyed or Unpin()ned. An empty window holds nothing. Must not outlive its Ring; one thread
 // uses it at a time.
+//
+// A pin also protects everything appended after it, so a reader can tail live footage (an open
+// clip): Follow() adds what arrived since, the reader writes and releases behind itself, and the
+// headroom bounds how far it may lag, as for a save. Nothing on the append path wakes a tail; the
+// reader polls.
 class RingPin {
 public:
     RingPin() = default;
@@ -205,12 +219,23 @@ public:
     // Lets go of the window; the descriptors stay readable as data, not as ring bytes.
     void Unpin();
 
+    // Replaces `fresh` with the access units appended since the newest one this pin has handed
+    // out (Aus() at first, then earlier Follows), up to (not including) `until` and never past a
+    // barrier cut after the pin was taken, which ends the window (kSegmentEnded) because the next
+    // segment needs other codec parameters. Empty once the pin broke. Aus() itself never grows, so
+    // a long tail costs only what it hasn't written; pin it with max_qpc = `until` so Aus() doesn't
+    // reach past the end. Relies on the ring's qpc rising with every Append, as Pin does.
+    TailState Follow(int64_t until, std::vector<AuDescriptor>& fresh);
+
 private:
     friend class Ring;
     Ring*                                ring_ = nullptr;  // null: holds nothing
     uint64_t                             id_   = 0;
     std::vector<AuDescriptor>            aus_;
     std::shared_ptr<const SegmentParams> params_;
+    // The newest barrier when the pin was taken; a newer one ends a tail. INT64_MIN: none.
+    int64_t                              segment_floor_ = (std::numeric_limits<int64_t>::min)();
+    int64_t                              tail_qpc_ = 0;  // newest AU handed out (Aus().back() at first)
 };
 
 class Ring {
@@ -221,7 +246,8 @@ public:
     // arena to exactly capacity_bytes and calling that "overshoot room" just wraps the write around
     // and silently corrupts the pinned data being saved. A save releases its pin behind it as it
     // writes (ReleaseThrough), so the headroom covers how far the writer lags the encoder, not the
-    // whole save. Both Inits wait for every held pin to be released before rebuilding the ring.
+    // whole save. Both Inits wait for every held pin to be released before rebuilding the ring; a
+    // tailing reader learns it should finish from Follow (kClosing).
     void Init(size_t capacity_bytes, size_t overshoot_bytes);
 
     // File-backed variant (buffer.storage=file) — same soft budget/overshoot semantics, backed by
@@ -339,6 +365,8 @@ private:
     int64_t ProtectedFromLocked() const;
     void BreakOldestReaderLocked();
     bool ReadPinned(uint64_t id, const AuDescriptor& d, std::vector<uint8_t>& out);
+    TailState FollowPinned(RingPin& pin, int64_t until, std::vector<AuDescriptor>& fresh);
+    void WaitForReadersLocked(std::unique_lock<std::mutex>& lock);
     void ReleasePinnedThrough(uint64_t id, int64_t qpc);
     void Unpin(uint64_t id);
 
@@ -384,6 +412,7 @@ private:
     std::vector<Reader>     readers_;
     uint64_t                next_reader_id_ = 1;
     std::condition_variable pin_released_;  // Init waits on it for readers_ to empty
+    int                     closing_ = 0;  // Inits waiting: tails finish (Follow: kClosing)
 };
 
 }  // namespace ombra

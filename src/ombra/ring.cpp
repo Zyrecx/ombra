@@ -185,14 +185,14 @@ bool FileArena::ReadInto(size_t offset, size_t length, std::vector<uint8_t>& out
 
 void Ring::Init(size_t capacity_bytes, size_t overshoot_bytes) {
     std::unique_lock<std::mutex> lock(mutex_);
-    pin_released_.wait(lock, [this] { return readers_.empty(); });
+    WaitForReadersLocked(lock);
     arena_.reset();  // release any prior (e.g. file) arena before building the new one
     InitLocked(std::make_unique<RamArena>(capacity_bytes + overshoot_bytes), capacity_bytes);  // physical size; capacity_ is the soft budget
 }
 
 bool Ring::Init(size_t capacity_bytes, size_t overshoot_bytes, const std::wstring& file_path) {
     std::unique_lock<std::mutex> lock(mutex_);
-    pin_released_.wait(lock, [this] { return readers_.empty(); });
+    WaitForReadersLocked(lock);
     arena_.reset();  // close/unmap any prior arena (same file_path) before CREATE_ALWAYS truncates it
     std::string error;
     std::unique_ptr<IRingArena> arena = FileArena::Create(file_path, capacity_bytes + overshoot_bytes, &error);
@@ -204,6 +204,14 @@ bool Ring::Init(size_t capacity_bytes, size_t overshoot_bytes, const std::wstrin
     InitLocked(std::move(arena), capacity_bytes);
     storage_lost_ = !on_file;
     return on_file;
+}
+
+// A tailing reader would otherwise hold Init until its clip's end: it sees kClosing at its next
+// Follow and finishes with what it has.
+void Ring::WaitForReadersLocked(std::unique_lock<std::mutex>& lock) {
+    ++closing_;
+    pin_released_.wait(lock, [this] { return readers_.empty(); });
+    --closing_;
 }
 
 void Ring::InitWithArena(std::unique_ptr<IRingArena> arena, size_t capacity_bytes) {
@@ -351,7 +359,11 @@ void Ring::EvictLocked() {
     // barrier is dead the same way.
     const int64_t oldest_surviving_qpc =
         descriptors_.empty() ? (std::numeric_limits<int64_t>::max)() : descriptors_.front().qpc;
-    while (!barriers_.empty() && barriers_.front().qpc < oldest_surviving_qpc) {
+    // A barrier a reader hasn't reached yet stays, even with everything before it gone: a tailing
+    // pin caught up to the cut must still see it (RingPin::Follow), or it would run on into the
+    // next segment with this one's parameters.
+    while (!barriers_.empty() && barriers_.front().qpc < oldest_surviving_qpc &&
+           barriers_.front().qpc < protected_from) {
         // Everything before this barrier is gone, so every surviving descriptor now belongs to the
         // segment it started — promote its params before dropping it, or a save after a long
         // enough wrap would mux the *previous* segment's SPS/PPS.
@@ -535,7 +547,9 @@ RingPin Ring::PinImpl(int64_t min_qpc, int64_t max_qpc, bool covering, TruncateF
 
     pin.ring_ = this;
     pin.id_   = next_reader_id_++;
+    if (!barriers_.empty()) pin.segment_floor_ = barriers_.back().qpc;
     pin.aus_.assign(start, end);
+    pin.tail_qpc_ = pin.aus_.back().qpc;
     readers_.push_back(Reader{pin.id_, start->qpc, false});
     return pin;
 }
@@ -568,6 +582,28 @@ bool Ring::ReadPinned(uint64_t id, const AuDescriptor& d, std::vector<uint8_t>& 
     return true;
 }
 
+TailState Ring::FollowPinned(RingPin& pin, int64_t until, std::vector<AuDescriptor>& fresh) {
+    fresh.clear();
+    std::lock_guard<std::mutex> lock(mutex_);
+    const Reader* r = FindReaderLocked(pin.id_);
+    if (!r || r->broken) return TailState::kBroken;
+
+    // The first barrier after the pin's segment began; descriptors and barriers are in qpc order,
+    // and a barrier is dropped after its segment's last AU and before the next one's first.
+    const auto cut = std::upper_bound(barriers_.begin(), barriers_.end(), pin.segment_floor_,
+                                      [](int64_t q, const BarrierRec& b) { return q < b.qpc; });
+    const int64_t limit = cut == barriers_.end() ? until : (std::min)(until, cut->qpc);
+    auto it = std::upper_bound(descriptors_.begin(), descriptors_.end(), pin.tail_qpc_,
+                               [](int64_t q, const AuDescriptor& d) { return q < d.qpc; });
+    for (; it != descriptors_.end() && it->qpc < limit; ++it) fresh.push_back(*it);
+    if (!fresh.empty()) pin.tail_qpc_ = fresh.back().qpc;
+
+    if (cut != barriers_.end() && cut->qpc < until) return TailState::kSegmentEnded;
+    if (!descriptors_.empty() && descriptors_.back().qpc >= until) return TailState::kReached;
+    if (closing_ > 0) return TailState::kClosing;
+    return TailState::kOpen;
+}
+
 bool Ring::IsPinned() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return !readers_.empty();
@@ -587,6 +623,8 @@ RingPin& RingPin::operator=(RingPin&& other) noexcept {
         id_     = other.id_;
         aus_    = std::move(other.aus_);
         params_ = std::move(other.params_);
+        segment_floor_ = other.segment_floor_;
+        tail_qpc_      = other.tail_qpc_;
         other.ring_ = nullptr;
         other.id_   = 0;
         other.aus_.clear();
@@ -600,6 +638,14 @@ bool RingPin::ReadInto(const AuDescriptor& d, std::vector<uint8_t>& out) const {
 
 void RingPin::ReleaseThrough(const AuDescriptor& d) {
     if (ring_) ring_->ReleasePinnedThrough(id_, d.qpc);
+}
+
+TailState RingPin::Follow(int64_t until, std::vector<AuDescriptor>& fresh) {
+    if (!ring_) {
+        fresh.clear();
+        return TailState::kBroken;
+    }
+    return ring_->FollowPinned(*this, until, fresh);
 }
 
 void RingPin::Unpin() {

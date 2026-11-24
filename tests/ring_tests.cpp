@@ -850,6 +850,129 @@ TEST_CASE("ring: an empty or moved-from pin releases no one else's") {
     CheckPinnedTagged(moved, kAu);
 }
 
+TEST_CASE("ring: a tailing pin follows live footage up to its end, releasing behind itself") {
+    // 10 AUs of budget, 5 of headroom: a 40-AU tail fits only because it releases as it writes.
+    constexpr size_t kAu = 1000;
+    Ring ring;
+    ring.Init(kAu * 10, kAu * 5);
+    int i = 0;
+    for (; i < 6; ++i) AppendTagged(ring, kAu, i, 2);
+    auto tail = ring.PinCovering(1002, 1040);
+    REQUIRE(tail.size() == 4);
+    std::vector<AuDescriptor> fresh{AuDescriptor{}};
+    CHECK(tail.Follow(1040, fresh) == TailState::kOpen);
+    CHECK(fresh.empty());  // nothing new yet; replaced, not appended to
+    std::vector<AuDescriptor> written(tail.begin(), tail.end());
+    std::vector<uint8_t> out;
+    for (const auto& d : written) tail.ReleaseThrough(d);
+    TailState state = TailState::kOpen;
+    while (state == TailState::kOpen) {
+        AppendTagged(ring, kAu, i++, 2);
+        state = tail.Follow(1040, fresh);
+        for (const auto& d : fresh) {
+            REQUIRE(tail.ReadInto(d, out));
+            CHECK(out.front() == static_cast<uint8_t>(d.qpc - 1000));
+            tail.ReleaseThrough(d);
+            written.push_back(d);
+        }
+        CHECK(ring.LiveBytes() <= kAu * 15);
+    }
+    CHECK(state == TailState::kReached);
+    CHECK(tail.size() == 4);  // Aus() is the initial window only
+    REQUIRE(written.size() == 38);
+    for (size_t k = 0; k < written.size(); ++k) CHECK(written[k].qpc == 1002 + static_cast<int64_t>(k));
+    CHECK(tail.Follow(1040, fresh) == TailState::kReached);  // idempotent once there
+    CHECK(fresh.empty());
+}
+
+TEST_CASE("ring: a tail pinned up to its end starts after what it already holds") {
+    constexpr size_t kAu = 1000;
+    Ring ring;
+    ring.Init(kAu * 20, kAu * 5);
+    for (int i = 0; i < 10; ++i) AppendTagged(ring, kAu, i, 2);
+    auto tail = ring.PinCovering(1002, 1006);  // the clip ends before live
+    REQUIRE(tail.size() == 4);
+    CHECK(tail.back().qpc == 1005);
+    std::vector<AuDescriptor> fresh;
+    CHECK(tail.Follow(1006, fresh) == TailState::kReached);
+    CHECK(fresh.empty());
+    CHECK(tail.Follow(1008, fresh) == TailState::kReached);  // the end moved out: an extended clip
+    REQUIRE(fresh.size() == 2);
+    CHECK(fresh.front().qpc == 1006);
+}
+
+TEST_CASE("ring: a tail ends at a barrier cut after it was taken, even once the cut's front is evicted") {
+    constexpr size_t kAu = 1000;
+    Ring ring;
+    ring.Init(kAu * 4, kAu * 4);
+    int i = 0;
+    for (; i < 4; ++i) AppendTagged(ring, kAu, i, 2);
+    ring.Barrier(1003);  // an older cut: the pin's own segment starts here, so it doesn't end the tail
+    for (; i < 6; ++i) AppendTagged(ring, kAu, i, 2);
+    auto tail = ring.PinCovering(1004);
+    REQUIRE(tail.size() == 2);
+    for (; i < 8; ++i) AppendTagged(ring, kAu, i, 2);
+    std::vector<AuDescriptor> fresh;
+    CHECK(tail.Follow(2000, fresh) == TailState::kOpen);
+    REQUIRE(fresh.size() == 2);
+    tail.ReleaseThrough(fresh.back());  // caught up: holds nothing before the cut
+    ring.Barrier(1007 + 1);  // a resolution change: the next segment starts at 1008
+    for (; i < 16; ++i) AppendTagged(ring, kAu, i, 2);  // evicts all of the old segment
+    CHECK(tail.Follow(2000, fresh) == TailState::kSegmentEnded);
+    CHECK(fresh.empty());  // nothing from the next segment
+}
+
+TEST_CASE("ring: Init tells a tailing reader to finish instead of waiting for its end") {
+    Ring ring;
+    ring.Init(1u << 20, 1u << 20);
+    for (int i = 0; i < 10; ++i) AppendTagged(ring, 100, i, 5);
+    auto tail = ring.PinCovering(1005);
+    REQUIRE_FALSE(tail.empty());
+    std::vector<AuDescriptor> fresh;
+    CHECK(tail.Follow(1u << 30, fresh) == TailState::kOpen);
+    std::atomic<bool> reinit_done{false};
+    std::thread realloc([&] {
+        ring.Init(2u << 20, 1u << 20);
+        reinit_done = true;
+    });
+    TailState state = TailState::kOpen;
+    for (int k = 0; k < 200 && state == TailState::kOpen; ++k) {
+        Sleep(5);
+        state = tail.Follow(1u << 30, fresh);
+    }
+    CHECK(state == TailState::kClosing);
+    CHECK_FALSE(reinit_done.load());  // still waits for the reader to let go
+    std::vector<uint8_t> out;
+    CHECK(tail.ReadInto(tail.back(), out));
+    tail.Unpin();
+    realloc.join();
+    CHECK(reinit_done.load());
+    CHECK(ring.Capacity() == (2u << 20));
+    auto next = ring.PinCovering(0);  // a later tail isn't told to close
+    CHECK(next.empty());
+    for (int i = 0; i < 4; ++i) AppendTagged(ring, 100, i, 2);
+    next = ring.PinCovering(1000);
+    REQUIRE_FALSE(next.empty());
+    CHECK(next.Follow(1u << 30, fresh) == TailState::kOpen);
+}
+
+TEST_CASE("ring: a tail that stalls past the headroom breaks, and Follow says so") {
+    constexpr size_t kAu = 1000;
+    Ring ring;
+    ring.Init(kAu * 10, kAu * 5);
+    int i = 0;
+    for (; i < 10; ++i) AppendTagged(ring, kAu, i, 5);
+    auto tail = ring.PinCovering(1005);
+    REQUIRE_FALSE(tail.empty());
+    for (; i < 40; ++i) AppendTagged(ring, kAu, i, 5);  // the writer never releases
+    CHECK(ring.LiveBytes() <= kAu * 15);
+    std::vector<AuDescriptor> fresh;
+    CHECK(tail.Follow(1u << 30, fresh) == TailState::kBroken);
+    CHECK(fresh.empty());
+    RingPin none;
+    CHECK(none.Follow(1u << 30, fresh) == TailState::kBroken);
+}
+
 TEST_CASE("ring: Init waits for every reader") {
     Ring ring;
     ring.Init(1u << 20, 1u << 20);
