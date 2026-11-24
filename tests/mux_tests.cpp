@@ -1,13 +1,17 @@
 // BuildAvcC (mux.cpp), headless, no GPU: real SPS/PPS bytes from the x264 fixture, not synthetic
 // data, so the avcC fields assert against what an actual encoder emits. save_tests.cpp only
 // exercises this transitively (ffprobe on a finished file); these check the AVCDecoderConfiguration
-// Record's bytes directly.
+// Record's bytes directly. Also MuxWriteMp4Stream, the pull interface an open clip writes through.
 
 #include <doctest/doctest.h>
 
 #include "support/h264_fixture.h"
+#include "support/test_env.h"
 
+#include "ombra/clip_file.h"
 #include "ombra/mux.h"
+
+#include <windows.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -178,6 +182,118 @@ TEST_CASE("mux: ConvertAnnexBSample splits exactly like the byte-at-a-time scan"
         INFO("iteration ", iter);
         REQUIRE(got == ReferenceConvert(d));
     }
+}
+
+TEST_CASE("mux: a streamed write matches the list write and takes audio after the last video sample") {
+    const H264Fixture& fx = StandardFixture();
+    std::vector<MuxAu> aus;
+    // A skipped tick at 60 (a duplicate the pacer dropped) must survive as a longer duration.
+    for (uint64_t i = 0; i < 90; ++i) aus.push_back({fx.aus[i].annexb, fx.aus[i].idr, i < 60 ? i : i + 1});
+    MuxAudioTrack track;
+    track.name = "Game";
+    track.asc  = {0x11, 0x90};  // AAC-LC, 48 kHz, stereo
+    for (int k = 0; k < 10; ++k) track.frames.push_back({std::vector<uint8_t>(32, static_cast<uint8_t>(k))});
+
+    const std::wstring listed = TestOutputPath(L"mux_listed.mp4");
+    REQUIRE(MuxWriteMp4(listed, fx.sps_pps, fx.width, fx.height, fx.fps, aus, {track}));
+
+    const std::wstring streamed = TestOutputPath(L"mux_streamed.mp4");
+    size_t pulled = 0, pulled_at_audio = 0;
+    REQUIRE(MuxWriteMp4Stream(
+        streamed, fx.sps_pps, fx.width, fx.height, fx.fps,
+        [&](MuxVideoSample& sample, std::vector<uint8_t>& bytes) {
+            if (pulled == aus.size()) return MuxPull::kEnd;
+            sample = {aus[pulled].is_keyframe, aus[pulled].tick_index};
+            bytes  = aus[pulled++].annexb;
+            return MuxPull::kSample;
+        },
+        [&, tracks = std::vector<MuxAudioTrack>{track}] {
+            pulled_at_audio = pulled;
+            return &tracks;
+        },
+        VideoCodec::H264));
+    CHECK(pulled_at_audio == aus.size());
+
+    ClipInfo a, b;
+    REQUIRE(ReadClipInfo(listed, a));
+    REQUIRE(ReadClipInfo(streamed, b));
+    CHECK(b.duration_s == doctest::Approx(91.0 / fx.fps));
+    CHECK(b.duration_s == a.duration_s);
+    CHECK(b.video_bytes == a.video_bytes);
+    CHECK(b.keyframes_s == a.keyframes_s);
+    CHECK(b.audio_track_names == std::vector<std::string>{"Game"});
+}
+
+TEST_CASE("mux: a streamed write that fails, or holds nothing, leaves no file") {
+    const H264Fixture& fx = StandardFixture();
+    auto exists = [](const std::wstring& path) { return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES; };
+
+    const std::wstring failed = TestOutputPath(L"mux_stream_failed.mp4");
+    size_t i = 0;
+    CHECK_FALSE(MuxWriteMp4Stream(
+        failed, fx.sps_pps, fx.width, fx.height, fx.fps,
+        [&](MuxVideoSample& sample, std::vector<uint8_t>& bytes) {
+            if (i == 10) return MuxPull::kFail;  // the clip's pin broke midway
+            sample = {fx.aus[i].idr, i};
+            bytes  = fx.aus[i++].annexb;
+            return MuxPull::kSample;
+        },
+        nullptr, VideoCodec::H264));
+    CHECK_FALSE(exists(failed));
+
+    const std::wstring empty = TestOutputPath(L"mux_stream_empty.mp4");
+    CHECK_FALSE(MuxWriteMp4Stream(
+        empty, fx.sps_pps, fx.width, fx.height, fx.fps,
+        [](MuxVideoSample&, std::vector<uint8_t>&) { return MuxPull::kEnd; }, nullptr, VideoCodec::H264));
+    CHECK_FALSE(exists(empty));
+
+    const std::wstring backwards = TestOutputPath(L"mux_stream_backwards.mp4");
+    i = 0;
+    CHECK_FALSE(MuxWriteMp4Stream(
+        backwards, fx.sps_pps, fx.width, fx.height, fx.fps,
+        [&](MuxVideoSample& sample, std::vector<uint8_t>& bytes) {
+            if (i == 3) return MuxPull::kEnd;
+            sample = {fx.aus[i].idr, i == 2 ? 0u : i + 1};  // a tick going back
+            bytes  = fx.aus[i++].annexb;
+            return MuxPull::kSample;
+        },
+        nullptr, VideoCodec::H264));
+    CHECK_FALSE(exists(backwards));
+
+    const std::wstring no_audio = TestOutputPath(L"mux_stream_audio_failed.mp4");
+    i = 0;
+    CHECK_FALSE(MuxWriteMp4Stream(
+        no_audio, fx.sps_pps, fx.width, fx.height, fx.fps,
+        [&](MuxVideoSample& sample, std::vector<uint8_t>& bytes) {
+            if (i == 5) return MuxPull::kEnd;
+            sample = {fx.aus[i].idr, i};
+            bytes  = fx.aus[i++].annexb;
+            return MuxPull::kSample;
+        },
+        []() -> const std::vector<MuxAudioTrack>* { return nullptr; }, VideoCodec::H264));
+    CHECK_FALSE(exists(no_audio));
+
+    const std::wstring no_key = TestOutputPath(L"mux_stream_no_keyframe.mp4");
+    CHECK_FALSE(MuxWriteMp4Stream(
+        no_key, fx.sps_pps, fx.width, fx.height, fx.fps,
+        [&](MuxVideoSample& sample, std::vector<uint8_t>& bytes) {
+            sample = {false, 0};  // a stream that starts mid-GOP fails the file, not the engine
+            bytes  = fx.aus[1].annexb;
+            return MuxPull::kSample;
+        },
+        nullptr, VideoCodec::H264));
+    CHECK_FALSE(exists(no_key));
+}
+
+TEST_CASE("mux: equal ticks are a zero-duration sample, as before") {
+    const H264Fixture& fx = StandardFixture();
+    std::vector<MuxAu> aus;
+    for (uint64_t i = 0; i < 30; ++i) aus.push_back({fx.aus[i].annexb, fx.aus[i].idr, i == 10 ? 9 : i});
+    const std::wstring path = TestOutputPath(L"mux_equal_ticks.mp4");
+    REQUIRE(MuxWriteMp4(path, fx.sps_pps, fx.width, fx.height, fx.fps, aus));
+    ClipInfo info;
+    REQUIRE(ReadClipInfo(path, info));
+    CHECK(info.duration_s == doctest::Approx(30.0 / fx.fps));
 }
 
 }  // namespace ombra::test

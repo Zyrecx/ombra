@@ -807,16 +807,23 @@ private:
     uint64_t             flushed_ = 0;  // bytes already handed to WriteFile
 };
 
+// WriteDescLen's single-byte lengths: esds wraps the ASC in ~23 bytes of fixed descriptors.
+bool AudioTracksFit(const std::vector<MuxAudioTrack>& tracks) {
+    for (const auto& track : tracks) {
+        if (track.asc.size() > 100) {
+            Log::Error("mux: AudioSpecificConfig of %zu bytes doesn't fit esds' 1-byte lengths", track.asc.size());
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
-bool MuxWriteMp4(const std::wstring& path, const std::vector<uint8_t>& codec_header,
-                  uint32_t width, uint32_t height, uint32_t fps,
-                  const std::vector<MuxVideoSample>& aus, const MuxReadSample& read,
-                  const std::vector<MuxAudioTrack>& audio_tracks, VideoCodec codec,
-                  uint32_t last_sample_ticks, MuxPicture picture) {
-    if (aus.empty() || !aus.front().is_keyframe)
-        die("mux: MuxWriteMp4 called with no AUs, or a range not starting on a keyframe");
-
+bool MuxWriteMp4Stream(const std::wstring& path, const std::vector<uint8_t>& codec_header,
+                        uint32_t width, uint32_t height, uint32_t fps, const MuxPullSample& next,
+                        const MuxTakeAudio& take_audio, VideoCodec codec, uint32_t last_sample_ticks,
+                        MuxPicture picture) {
     const bool av1 = codec == VideoCodec::AV1;
     VideoEntry entry = av1 ? VideoEntry{"av01", "av1C", BuildAv1C(codec_header.data(), codec_header.size())}
                            : VideoEntry{"avc1", "avcC", BuildAvcC(codec_header)};
@@ -826,14 +833,6 @@ bool MuxWriteMp4(const std::wstring& path, const std::vector<uint8_t>& codec_hea
         Log::Error("mux: %s codec header did not parse (%zu bytes)", av1 ? "AV1" : "H.264", codec_header.size());
         return false;
     }
-    // WriteDescLen's single-byte lengths: esds wraps the ASC in ~23 bytes of fixed descriptors.
-    for (const auto& track : audio_tracks) {
-        if (track.asc.size() > 100) {
-            Log::Error("mux: AudioSpecificConfig of %zu bytes doesn't fit esds' 1-byte lengths", track.asc.size());
-            return false;
-        }
-    }
-
     Mp4FileSink sink(path);
     {
         ByteWriter ftyp;
@@ -858,17 +857,48 @@ bool MuxWriteMp4(const std::wstring& path, const std::vector<uint8_t>& codec_hea
     TrackTiming t;
     t.timescale         = fps;
     t.mdat_data_offset  = mdat_data_start;
-    t.sample_sizes.reserve(aus.size());
-    t.sync_samples.reserve(aus.size() / 8 + 1);
+
+    // stts: per-sample duration in timescale units, run-length compressed as samples arrive.
+    // timescale == fps, so one CFR tick's worth of duration is exactly one timescale unit: a
+    // tick_index delta of 1 (the normal case) is a duration of 1, with no float rounding anywhere.
+    uint64_t total_ticks = 0;
+    auto add_delta = [&](uint32_t delta) {
+        total_ticks += delta;
+        if (!t.deltas.empty() && t.deltas.back().delta == delta) t.deltas.back().count++;
+        else t.deltas.push_back({1, delta});
+    };
 
     // H.264: ConvertAnnexBSample's conversion, written straight to the sink with no per-sample copy.
     // AV1: the temporal unit minus the OBUs MP4 keeps out of samples, through one reused buffer.
+    // Only the sample tables grow (MuxWriteMp4Stream); the bytes go straight to disk.
     std::vector<uint8_t> annexb, obus;
-    for (size_t i = 0; i < aus.size(); ++i) {
-        if (!read(i, annexb)) {
+    MuxVideoSample sample;
+    uint64_t prev_tick = 0;
+    for (size_t i = 0;; ++i) {
+        const MuxPull got = next(sample, annexb);
+        if (got == MuxPull::kEnd) break;
+        if (got == MuxPull::kFail) {
             sink.Discard();
             return false;
         }
+        if (i == 0 && !sample.is_keyframe) {
+            Log::Error("mux: the first video sample isn't a keyframe");
+            sink.Discard();
+            return false;
+        }
+        if (i > 0) {
+            // Equal ticks are a zero-duration sample (some imported files have them); a tick going
+            // back, or a gap stts can't hold, is a broken source.
+            if (sample.tick_index < prev_tick || sample.tick_index - prev_tick > UINT32_MAX) {
+                Log::Error("mux: sample %zu's tick %llu can't follow %llu", i,
+                           static_cast<unsigned long long>(sample.tick_index),
+                           static_cast<unsigned long long>(prev_tick));
+                sink.Discard();
+                return false;
+            }
+            add_delta(static_cast<uint32_t>(sample.tick_index - prev_tick));
+        }
+        prev_tick = sample.tick_index;
         uint32_t sample_size = 0;
         if (av1) {
             obus.clear();
@@ -891,32 +921,27 @@ bool MuxWriteMp4(const std::wstring& path, const std::vector<uint8_t>& codec_hea
             }
         }
         t.sample_sizes.push_back(sample_size);
-        if (aus[i].is_keyframe) t.sync_samples.push_back(static_cast<uint32_t>(i + 1));  // 1-indexed
+        if (sample.is_keyframe) t.sync_samples.push_back(static_cast<uint32_t>(i + 1));  // 1-indexed
     }
-
-    // stts: per-sample duration in timescale units, run-length compressed. timescale == fps, so
-    // one CFR tick's worth of duration is exactly one timescale unit — a tick_index delta of 1
-    // (the normal case) is a duration of 1, with no float rounding anywhere in this computation.
-    uint64_t total_ticks = 0;
-    for (size_t i = 0; i + 1 < aus.size(); ++i) {
-        const uint64_t delta = aus[i + 1].tick_index - aus[i].tick_index;
-        total_ticks += delta;
-        if (!t.deltas.empty() && t.deltas.back().delta == delta) {
-            t.deltas.back().count++;
-        } else {
-            t.deltas.push_back({1, static_cast<uint32_t>(delta)});
-        }
+    if (t.sample_sizes.empty()) {
+        Log::Error("mux: no video samples");
+        sink.Discard();
+        return false;
     }
     // Last sample has no following AU to diff against; the caller says how long it held (one tick
     // unless a trim cut before a gap), so stts entry counts equal the sample count (ISO/IEC 14496-12
     // §8.6.1.2 requires this).
-    {
-        const uint32_t last_delta = last_sample_ticks ? last_sample_ticks : 1;
-        total_ticks += last_delta;
-        if (!t.deltas.empty() && t.deltas.back().delta == last_delta) t.deltas.back().count++;
-        else t.deltas.push_back({1, last_delta});
-    }
+    add_delta(last_sample_ticks ? last_sample_ticks : 1);
     t.duration = total_ticks;
+
+    // Audio is taken only now, so a source still recording hands over everything it collected.
+    static const std::vector<MuxAudioTrack> kNoAudio;
+    const std::vector<MuxAudioTrack>* taken = take_audio ? take_audio() : &kNoAudio;
+    if (!taken || !AudioTracksFit(*taken)) {
+        sink.Discard();
+        return false;
+    }
+    const std::vector<MuxAudioTrack>& audio_tracks = *taken;
 
     // N audio tracks, each written back to back
     // into the same mdat the video samples just filled. Every AAC frame is a fixed
@@ -974,6 +999,26 @@ bool MuxWriteMp4(const std::wstring& path, const std::vector<uint8_t>& codec_hea
     WriteMoov(moov, creation_time, width, height, entry, t, audio_moov_params);
     sink.Write(moov.Data());
     return sink.Finish();
+}
+
+bool MuxWriteMp4(const std::wstring& path, const std::vector<uint8_t>& codec_header,
+                  uint32_t width, uint32_t height, uint32_t fps,
+                  const std::vector<MuxVideoSample>& samples, const MuxReadSample& read,
+                  const std::vector<MuxAudioTrack>& audio_tracks, VideoCodec codec,
+                  uint32_t last_sample_ticks, MuxPicture picture) {
+    if (samples.empty() || !samples.front().is_keyframe)
+        die("mux: MuxWriteMp4 called with no AUs, or a range not starting on a keyframe");
+    if (!AudioTracksFit(audio_tracks)) return false;  // before any video is written
+    size_t i = 0;
+    return MuxWriteMp4Stream(
+        path, codec_header, width, height, fps,
+        [&](MuxVideoSample& sample, std::vector<uint8_t>& bytes) {
+            if (i == samples.size()) return MuxPull::kEnd;
+            sample = samples[i];
+            return read(i++, bytes) ? MuxPull::kSample : MuxPull::kFail;
+        },
+        [&] { return &audio_tracks; },
+        codec, last_sample_ticks, picture);
 }
 
 bool MuxWriteMp4(const std::wstring& path, const std::vector<uint8_t>& codec_header,

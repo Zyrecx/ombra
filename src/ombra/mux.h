@@ -91,6 +91,32 @@ bool MuxWriteMp4(const std::wstring& path, const std::vector<uint8_t>& codec_hea
                   const std::vector<MuxAudioTrack>& audio_tracks, VideoCodec codec,
                   uint32_t last_sample_ticks = 1, MuxPicture picture = {});
 
+// What a streaming video source hands MuxWriteMp4Stream next.
+enum class MuxPull {
+    kSample,  // `sample` and `bytes` hold the next video sample
+    kEnd,     // no more samples: write the rest of the file
+    kFail,    // abort: the partial file is deleted and the mux returns false
+};
+
+// Fills the next video sample's metadata and bytes (Annex-B for H.264, a temporal unit for AV1).
+// Samples come in rising tick_index order, the first a keyframe. May block while the source waits
+// for footage that hasn't been encoded yet (an open clip).
+using MuxPullSample = std::function<MuxPull(MuxVideoSample& sample, std::vector<uint8_t>& bytes)>;
+
+// Called once, after the last video sample: the audio tracks to write behind the video, which must
+// stay alive until the mux returns. A source still collecting audio hands over all of it here.
+// Null aborts like kFail. Audio is held whole until then, which is fine for a clip (minutes of AAC
+// is a few MB); an hour-long recording would need interleaved chunks instead.
+using MuxTakeAudio = std::function<const std::vector<MuxAudioTrack>*()>;
+
+// MuxWriteMp4 over a source that doesn't know its samples up front. Holds only the sample tables
+// (4 bytes a frame, plus one per keyframe and per duration change); an empty stream, or one not
+// starting on a keyframe, fails. Null `take_audio`: video only.
+bool MuxWriteMp4Stream(const std::wstring& path, const std::vector<uint8_t>& codec_header,
+                        uint32_t width, uint32_t height, uint32_t fps, const MuxPullSample& next,
+                        const MuxTakeAudio& take_audio, VideoCodec codec,
+                        uint32_t last_sample_ticks = 1, MuxPicture picture = {});
+
 // The same over AUs already in memory (tests).
 bool MuxWriteMp4(const std::wstring& path, const std::vector<uint8_t>& codec_header,
                   uint32_t width, uint32_t height, uint32_t fps, const std::vector<MuxAu>& aus,
