@@ -392,6 +392,74 @@ TEST_CASE("clip: on engine exit every monitor's clip ends, is written and report
     CHECK(results.monitors[0].path != results.monitors[1].path);
 }
 
+TEST_CASE("clip: an app's request during its own open clip extends it; another app's opens its own") {
+    ClipRig rig(L"apps");
+    rig.ctx.out_path    = L"out\\ombra.mp4";  // templated, so two clips get two names
+    rig.ctx.output_root = NarrowUtf8(TestOutputPath(L"clip\\apps"));
+    rig.EndNow(3.0);
+    rig.FeedTo(180);
+    ClipRequest req;
+    req.event_qpc      = QpcNow();
+    req.before_seconds = 2.0;
+    req.after_seconds  = 30.0;
+    AppClips clips;
+    int feedbacks = 0;
+    const StartSaveFeedback feedback = [&]() -> SaveFeedback { ++feedbacks; return {}; };
+    const auto first = clips.Request("tool", {&rig.ctx}, req, feedback);
+    REQUIRE(first);
+    CHECK_FALSE(first->extended);
+    req.event_qpc += QpcFrequency();
+    const auto again = clips.Request("tool", {&rig.ctx}, req, feedback);
+    REQUIRE(again);
+    CHECK(again->extended);
+    CHECK(again->id == first->id);
+    const auto other = clips.Request("other", {&rig.ctx}, req, feedback);
+    REQUIRE(other);
+    CHECK_FALSE(other->extended);
+    CHECK(other->id != first->id);
+    CHECK(feedbacks == 2);  // made per new clip, not per extension
+
+    clips.Close();
+    CHECK_FALSE(clips.Request("tool", {&rig.ctx}, req, feedback));
+    StopClipsAndWait(&rig.ctx);
+    const ReplaySaveResults a = first->done.get();
+    const ReplaySaveResults b = other->done.get();
+    CHECK(again->done.get().monitors.at(0).path == a.monitors.at(0).path);  // one file per combo
+    REQUIRE(a.outcome == SaveOutcome::kSaved);
+    REQUIRE(b.outcome == SaveOutcome::kSaved);
+    CHECK(a.monitors.at(0).path != b.monitors.at(0).path);
+    CHECK(ProbeVideoFrames(a.monitors.at(0).path).count >= 120);
+}
+
+TEST_CASE("clip: an app's request after its clip was refused or ended opens a new one") {
+    ClipRig rig(L"apps-ended");
+    rig.ctx.out_path    = L"out\\ombra.mp4";
+    rig.ctx.output_root = NarrowUtf8(TestOutputPath(L"clip\\apps-ended"));
+    AppClips clips;
+    ClipRequest req;
+    req.event_qpc      = QpcNow();
+    req.before_seconds = 2.0;
+    const auto refused = clips.Request("tool", {&rig.ctx}, req);  // no footage: refused at once
+    REQUIRE(refused);
+    CHECK(refused->done.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+    CHECK(refused->done.get().outcome == SaveOutcome::kNothingNew);
+
+    rig.EndNow(3.0);
+    rig.FeedTo(180);
+    req.event_qpc = QpcNow();
+    const auto ended = clips.Request("tool", {&rig.ctx}, req);  // after 0: ends at the event
+    REQUIRE(ended);
+    CHECK(ended->id != refused->id);
+    REQUIRE(ended->done.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    CHECK(ended->done.get().outcome == SaveOutcome::kSaved);
+    const auto next = clips.Request("tool", {&rig.ctx}, req);  // the finished clip isn't extended
+    REQUIRE(next);
+    CHECK_FALSE(next->extended);
+    CHECK(next->id != ended->id);
+    REQUIRE(next->done.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    CHECK(next->done.get().monitors.at(0).path != ended->done.get().monitors.at(0).path);
+}
+
 TEST_CASE("clip: with no footage in reach a clip doesn't open") {
     ClipRig rig(L"empty");
     SaveOutcome why = SaveOutcome::kSaved;

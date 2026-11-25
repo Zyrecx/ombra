@@ -10,10 +10,12 @@
 
 #include "ombra/config.h"
 #include "ombra/capturebench.h"
+#include "ombra/clip.h"
 #include "ombra/controller.h"
 #include "ombra/engine_pipe.h"
 #include "ombra/games.h"
 #include "ombra/json.h"
+#include "ombra/pipe.h"
 #include "ombra/ring.h"
 #include "ombra/save.h"
 #include "ombra/supervisor.h"
@@ -21,6 +23,7 @@
 
 #include <string>
 #include <fstream>
+#include <limits>
 #include <vector>
 
 namespace ombra::test {
@@ -43,12 +46,12 @@ public:
                                  nullptr, nullptr, nullptr, nullptr, &raw_store);
     }
 
-    JsonValue ApiRequest(const std::string& type) {
-        JsonValue fields = JsonValue::MakeObject();
+    JsonValue ApiRequest(const std::string& type, JsonValue fields = JsonValue::MakeObject(),
+                         const PipeCaller* caller = nullptr) {
         fields.Set("type", JsonValue::MakeStr(type));
         return HandlePipeRequest(fields, cfg, supervisor, controller, save_ctx, StartupGpuSummary{},
                                  nullptr, nullptr, nullptr, nullptr, &raw_store, nullptr, nullptr, {},
-                                 PipeSurface::kApi);
+                                 PipeSurface::kApi, &app_clips, caller);
     }
 
     JsonValue SetConfig(JsonValue patch) {
@@ -63,6 +66,7 @@ public:
     PipelineSupervisor supervisor;
     BufferController   controller;
     SaveContext        save_ctx;
+    AppClips           app_clips;
 };
 
 bool IsBool(const JsonValue* v, bool want) {
@@ -227,6 +231,63 @@ TEST_CASE("engine pipe api: status answers, internal commands don't exist there"
     }
     // ...and the API's names don't exist on the internal surface.
     CHECK(IsBool(rig.Request("status").Find("ok"), false));
+}
+
+namespace {
+
+std::string ErrorOf(const JsonValue& resp) {
+    const JsonValue* ok = resp.Find("ok");
+    const JsonValue* error = resp.Find("error");
+    if (!ok || ok->type != JsonValue::Type::Bool || ok->b) return "";
+    return error && error->type == JsonValue::Type::String ? error->str : "?";
+}
+
+}  // namespace
+
+TEST_CASE("engine pipe api: clip answers only Ombra's command line until consent exists") {
+    HandlerRig rig;
+    CHECK(ErrorOf(rig.ApiRequest("clip")) == "not_allowed");  // no caller
+    PipeCaller app;
+    app.app = "Command line";  // the name alone grants nothing
+    CHECK(ErrorOf(rig.ApiRequest("clip", JsonValue::MakeObject(), &app)) == "not_allowed");
+    // The verdict comes from the image: this process (the tests) passes, another program doesn't.
+    CHECK(IsCommandLineClient(GetCurrentProcessId(), L""));
+    CHECK_FALSE(IsCommandLineClient(0, L"C:\\Windows\\System32\\notepad.exe"));
+}
+
+TEST_CASE("engine pipe api: clip checks its fields, Instant Replay and the footage") {
+    HandlerRig rig;
+    PipeCaller cli;
+    cli.app          = "Command line";
+    cli.command_line = true;
+    const auto clip = [&](JsonValue fields = JsonValue::MakeObject()) {
+        return rig.ApiRequest("clip", std::move(fields), &cli);
+    };
+    const auto with = [](const char* key, JsonValue value) {
+        JsonValue fields = JsonValue::MakeObject();
+        fields.Set(key, std::move(value));
+        return fields;
+    };
+    CHECK(ErrorOf(clip(with("before", JsonValue::MakeNum(-1)))) == "bad_request");
+    CHECK(ErrorOf(clip(with("after", JsonValue::MakeStr("5")))) == "bad_request");
+    CHECK(ErrorOf(clip(with("after", JsonValue::MakeNum(std::numeric_limits<double>::infinity())))) == "bad_request");
+    CHECK(ErrorOf(clip(with("title", JsonValue::MakeNum(1)))) == "bad_request");
+    CHECK(ErrorOf(clip(with("wait", JsonValue::MakeStr("yes")))) == "bad_request");
+
+    JsonValue on = JsonValue::MakeObject();
+    on.Set("armed", JsonValue::MakeBool(true));
+    REQUIRE(IsBool(rig.Request("set_armed", on).Find("ok"), true));
+    // Switched on with an empty ring: refused at once, with the clip's id, even without "wait".
+    const JsonValue empty = clip();
+    CHECK(ErrorOf(empty) == "nothing_new");
+    CHECK(empty.Find("clip"));
+    const JsonValue* monitors = empty.Find("monitors");
+    CHECK((monitors && monitors->type == JsonValue::Type::Array && monitors->arr.size() == 1));
+
+    JsonValue off = JsonValue::MakeObject();
+    off.Set("armed", JsonValue::MakeBool(false));
+    REQUIRE(IsBool(rig.Request("set_armed", off).Find("ok"), true));
+    CHECK(ErrorOf(clip()) == "replay_off");
 }
 
 TEST_CASE("engine pipe: set_config accepts a valid key and rejects a bad value and an unknown key") {

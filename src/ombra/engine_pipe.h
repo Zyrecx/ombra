@@ -32,6 +32,9 @@
 
 namespace ombra {
 
+class AppClips;
+struct PipeCaller;
+
 // Defined in engine_pipe.cpp, set by RunEngine (engine.cpp); null/zero outside the resident engine.
 extern std::atomic<HotkeyRegistry*> g_hotkeys_for_engine;
 extern std::atomic<GameLibrary*>    g_games_for_engine;
@@ -174,6 +177,10 @@ JsonValue HandlePipeRequest(const JsonValue& req, Config& cfg, PipelineSuperviso
                              AudioSourceControl* audio_sources = nullptr,
                              const StartSaveFeedback& save_feedback = {},
                              // kApi answers only kApiCommands (protocol.h's public API).
-                             PipeSurface surface = PipeSurface::kInternal);
+                             PipeSurface surface = PipeSurface::kInternal,
+                             // The API's clips (clip.h); nullptr refuses `clip`.
+                             AppClips* app_clips = nullptr,
+                             // Who sent an API request; nullptr is an app with no rights.
+                             const PipeCaller* caller = nullptr);
 
 }  // namespace ombra

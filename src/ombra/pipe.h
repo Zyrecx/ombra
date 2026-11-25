@@ -57,10 +57,17 @@ struct PipeCaller {
     std::string  app;
     DWORD        pid = 0;
     std::wstring exe;  // full image path, empty when it couldn't be read
+    // Ombra's own command line (IsCommandLineClient): the one app allowed to act until consent
+    // exists. Decided by the image, never by the "app" name, which any caller can claim.
+    bool command_line = false;
 };
 
+// True when `exe` is the file `name` beside this process's own image (compared by file identity).
+bool IsSiblingImage(const std::wstring& exe, const wchar_t* name);
 // True when `exe` is the ombra-ui.exe beside this process's own image: the internal gate.
-bool IsSiblingOverlay(const std::wstring& exe);
+inline bool IsSiblingOverlay(const std::wstring& exe) { return IsSiblingImage(exe, L"ombra-ui.exe"); }
+// Ombra's command line: ombra.com or ombra.exe beside the engine, or this process (tests).
+bool IsCommandLineClient(DWORD pid, const std::wstring& exe);
 
 class PipeServer {
 public:

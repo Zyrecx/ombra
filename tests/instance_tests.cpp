@@ -449,6 +449,7 @@ public:
                   JsonValue resp = JsonValue::MakeObject();
                   resp.Set("app", JsonValue::MakeStr(caller.app));
                   resp.Set("self", JsonValue::MakeBool(caller.pid == GetCurrentProcessId()));
+                  resp.Set("command_line", JsonValue::MakeBool(caller.command_line));
                   return resp;
               },
               std::move(gate)) {}
@@ -484,6 +485,8 @@ TEST_CASE("pipe api: hello, then requests reach the API handler with type and id
     CHECK(StrOf(resp, "app") == "Test App");
     const JsonValue* self = resp.Find("self");
     CHECK((self && self->type == JsonValue::Type::Bool && self->b));
+    const JsonValue* command_line = resp.Find("command_line");  // this process counts as Ombra's own
+    CHECK((command_line && command_line->type == JsonValue::Type::Bool && command_line->b));
     CHECK(s.internal.load() == 0);
 }
 

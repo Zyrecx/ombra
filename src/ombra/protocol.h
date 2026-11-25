@@ -30,6 +30,21 @@
 //                   <- {"replay":bool (the Instant Replay switch), "buffering":bool (footage is
 //                       being kept right now), "game":string|null, "buffer_seconds":number}
 //
+//   clip            -> {"before"?:number (seconds before now; default buffer_seconds, capped at it),
+//                       "after"?:number (seconds after now; default 0, capped at 120),
+//                       "title"?:string, "wait"?:bool}
+//                   <- {"clip":number (this engine run's id), "extended":bool}
+//                      at once; with "wait" (or when every monitor refused at once) also
+//                      "path":string|null (the first file), "monitors":[{"monitor", "reason",
+//                      "path" (null unless saved), "fell_back", "seconds"}] once the files are
+//                      written. A waiting connection answers nothing else until then.
+//                      Errors: bad_request, not_allowed (only Ombra's command line,
+//                      ombra.com/ombra.exe beside the engine, until consent exists), replay_off,
+//                      nothing_new, busy (the buffer is being resized: retry), failed (also while
+//                      the engine exits). A request while the same app's clip is still taking
+//                      footage extends that clip to now + after ("extended", same id, one file);
+//                      its title and before are ignored.
+//
 // Internal (ombra-ui only): {"type":"hello","id":1,"v":kProtocolVersion}, accepted only from
 // ombra-ui.exe beside the engine (PipeServer's internal gate), so apps can't reach set_config,
 // shutdown or update_install around the public API. Exact version match: both ship together.

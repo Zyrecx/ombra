@@ -140,6 +140,34 @@ private:
 std::shared_ptr<ClipGroup> StartClip(const std::vector<SaveContext*>& contexts, const ClipRequest& request,
                                      SaveFeedback feedback = {});
 
+// The clips apps asked for, one open clip per app: a request from an app whose own clip is still
+// taking footage extends it (one file per combo) instead of opening a second; past the Extend cap,
+// or once the clip ended, it opens a new one. The user's hotkey saves never come through here.
+// Thread-safe: one per engine, shared by every pipe client.
+class AppClips {
+public:
+    struct Started {
+        uint64_t                              id       = 0;  // the clip's id for this engine run
+        bool                                  extended = false;  // joined the app's open clip
+        std::shared_future<ReplaySaveResults> done;
+    };
+    // nullopt once Close() ran. `feedback` is made only for a new clip, not for an extension.
+    std::optional<Started> Request(const std::string& app, const std::vector<SaveContext*>& contexts,
+                                   const ClipRequest& request, const StartSaveFeedback& feedback = {});
+    // Engine exit, before StopClipsAndWait: refuses every request from now on.
+    void Close();
+
+private:
+    struct Open {
+        uint64_t                   id = 0;
+        std::shared_ptr<ClipGroup> group;
+    };
+    std::mutex                       mutex_;  // held across StartClip: one app can't open two at once
+    std::vector<std::pair<std::string, Open>> open_;  // by app; a finished clip is dropped lazily
+    uint64_t                         next_id_ = 1;
+    bool                             closed_  = false;
+};
+
 // Engine exit: ends every clip open on `ctx` with what it took and waits until their files are
 // written.
 void StopClipsAndWait(SaveContext* ctx);

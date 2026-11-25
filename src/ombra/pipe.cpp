@@ -193,17 +193,22 @@ HANDLE CreatePipeInstance(bool first) {
 
 }  // namespace
 
-bool IsSiblingOverlay(const std::wstring& exe) {
+bool IsSiblingImage(const std::wstring& exe, const wchar_t* name) {
     if (exe.empty()) return false;
     std::wstring self(kMaxImagePath, L'\0');
     const DWORD n = GetModuleFileNameW(nullptr, self.data(), kMaxImagePath);
     if (n == 0 || n >= kMaxImagePath) return false;
     self.resize(n);
     self.erase(self.find_last_of(L'\\') + 1);
-    const auto want = FileIdentity(self + L"ombra-ui.exe");
+    const auto want = FileIdentity(self + name);
     const auto got  = FileIdentity(exe);
     return want && got && want->VolumeSerialNumber == got->VolumeSerialNumber &&
            std::memcmp(&want->FileId, &got->FileId, sizeof(FILE_ID_128)) == 0;
+}
+
+bool IsCommandLineClient(DWORD pid, const std::wstring& exe) {
+    return pid == GetCurrentProcessId() || IsSiblingImage(exe, L"ombra.com") ||
+           IsSiblingImage(exe, L"ombra.exe");
 }
 
 PipeServer::PipeServer(Handler internal, ApiHandler api, InternalGate gate)
@@ -390,8 +395,10 @@ std::optional<PipeSurface> PipeServer::Hello(const JsonValue& req, HANDLE pipe, 
                       kMaxApiClients);
             return refuse("too_many_connections", "too many apps are connected to Ombra");
         }
-        Log::Info("pipe: app \"%s\" connected (pid %lu, %ls)", caller.app.c_str(), caller.pid,
-                  caller.exe.empty() ? L"image unknown" : caller.exe.c_str());
+        caller.command_line = IsCommandLineClient(caller.pid, caller.exe);
+        Log::Info("pipe: app \"%s\" connected (pid %lu, %ls%s)", caller.app.c_str(), caller.pid,
+                  caller.exe.empty() ? L"image unknown" : caller.exe.c_str(),
+                  caller.command_line ? L", command line" : L"");
         resp.Set("ok", JsonValue::MakeBool(true));
         resp.Set("api", JsonValue::MakeNum(api));
         resp.Set("engine", JsonValue::MakeStr(AppVersion()));

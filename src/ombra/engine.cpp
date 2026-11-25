@@ -681,6 +681,7 @@ int RunEngine(int argc, wchar_t** argv) {
         PruneThumbs();
     }
     MemoryLayout memory_layout;  // declared before pipe_server so it outlives the handler reading it
+    AppClips     app_clips;      // the API's clips, likewise
     std::unique_ptr<PipeServer> pipe_server;
     LogRssStage("process start");
 
@@ -1357,15 +1358,17 @@ int RunEngine(int argc, wchar_t** argv) {
         memory_layout.video_pipelines = pipelines.size();
         memory_layout.audio_sources   = all_sources.size();
         memory_layout.file_backed     = (cfg.buffer_storage == "file");
-        auto handle = [&](const JsonValue& req, PipeSurface surface) {
+        auto handle = [&](const JsonValue& req, PipeSurface surface, const PipeCaller* caller) {
             return HandlePipeRequest(req, cfg, supervisor, controller, save_ctx, gpu_summary,
                                       tray.get(), &screenshot_ctx, &autotune_ctx, &pipelines,
                                       &raw_config, &memory_layout, &audio_control,
-                                      ReplayFeedback(true), surface);
+                                      ReplayFeedback(true), surface, &app_clips, caller);
         };
         pipe_server = std::make_unique<PipeServer>(
-            [handle](const JsonValue& req) { return handle(req, PipeSurface::kInternal); },
-            [handle](const JsonValue& req, const PipeCaller&) { return handle(req, PipeSurface::kApi); });
+            [handle](const JsonValue& req) { return handle(req, PipeSurface::kInternal, nullptr); },
+            [handle](const JsonValue& req, const PipeCaller& caller) {
+                return handle(req, PipeSurface::kApi, &caller);
+            });
         // A failed Start() here means another ombra.exe instance already owns the pipe's single-
         // instance mutex (pipe.cpp) — i.e. this IS the "Ombra is already running" case, not merely
         // "no pipe available". The message says so explicitly rather than the more generic wording
@@ -1589,6 +1592,11 @@ int RunEngine(int argc, wchar_t** argv) {
     // A clean exit from here on (a hang in teardown is not a crash), and before the pipe server
     // releases the instance lock a self-restarted successor is waiting for.
     if (resident) crash_upload::EndRun();
+    // Apps' open clips end here with what they took, their files written and feedback given,
+    // while the pipe still runs: a client waiting on its clip gets its answer, and the pipe's Stop
+    // below never waits out a clip. No clip opens after this.
+    app_clips.Close();
+    for (auto& mp : pipelines) StopClipsAndWait(&mp->save_ctx);
     // Pipe server first: stops accepting requests and joins every client worker before anything a
     // handler can reach (the tray, the hotkeys, then the supervisor's accessors) starts tearing down.
     if (pipe_server) pipe_server->Stop();
@@ -1616,8 +1624,6 @@ int RunEngine(int argc, wchar_t** argv) {
             }
         }
     }
-    // An app's open clip ends here with what it took; its file is written before teardown.
-    for (auto& mp : pipelines) StopClipsAndWait(&mp->save_ctx);
     for (auto& mp : pipelines) {
         while (mp->save_ctx.save_in_flight.load(std::memory_order_acquire))
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
