@@ -34,6 +34,7 @@
 #include "ombra/ring.h"
 #include "ombra/supervisor.h"
 #include "ombra/reconfig.h"
+#include "ombra/clip.h"
 #include "ombra/save.h"
 #include "ombra/save_toast.h"
 #include "ombra/util.h"
@@ -926,6 +927,7 @@ int RunEngine(int argc, wchar_t** argv) {
         // scheme without a real use case would be speculative.
         mp.save_ctx.out_path         = out_path;
         mp.save_ctx.fps              = fps;
+        mp.save_ctx.bitrate_kbps     = bitrate_kbps;
         mp.save_ctx.supervisor       = mp.supervisor.get();
         mp.save_ctx.per_game_folders   = cfg.output_per_game_folders;
         mp.save_ctx.output_root        = cfg.output_root;
@@ -1495,7 +1497,7 @@ int RunEngine(int argc, wchar_t** argv) {
                     if (!w.image_path.empty() && is_game(w.image_path)) g.game_running = true;
             }
             for (const auto& mp : pipelines)
-                if (mp->save_ctx.save_in_flight.load()) g.save_in_flight = true;
+                if (mp->save_ctx.save_in_flight.load() || ClipsOpen(&mp->save_ctx)) g.save_in_flight = true;
             g.other_ombra_processes = OtherOmbraProcessRunning();
             return g;
         };
@@ -1614,6 +1616,8 @@ int RunEngine(int argc, wchar_t** argv) {
             }
         }
     }
+    // An app's open clip ends here with what it took; its file is written before teardown.
+    for (auto& mp : pipelines) StopClipsAndWait(&mp->save_ctx);
     for (auto& mp : pipelines) {
         while (mp->save_ctx.save_in_flight.load(std::memory_order_acquire))
             std::this_thread::sleep_for(std::chrono::milliseconds(10));

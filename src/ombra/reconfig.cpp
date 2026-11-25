@@ -143,10 +143,17 @@ LiveApplyResult ApplyLiveConfig(Config& live_cfg, const JsonValue& patch_json,
 
     // A reallocation holds every pipeline's save slot, so a save pressed from here on is busy instead
     // of pinning a ring after this check, which would leave one ring reallocated and another refused.
+    // Tools' clips are blocked the same way: one open would hold its ring (and lose the audio the
+    // hub's Resize drops), so the change is refused while any is open.
     struct SaveSlots {
         std::vector<SaveContext*> held;
+        std::vector<SaveContext*> clips_blocked;
         ~SaveSlots() {
             for (SaveContext* ctx : held) ctx->save_in_flight.store(false, std::memory_order_release);
+            for (SaveContext* ctx : clips_blocked) {
+                std::lock_guard<std::mutex> lock(ctx->clip_mutex);
+                ctx->clips_blocked = false;
+            }
         }
     } save_slots;
 
@@ -156,6 +163,21 @@ LiveApplyResult ApplyLiveConfig(Config& live_cfg, const JsonValue& patch_json,
             bool expected = false;
             const bool claimed = p.save_ctx.save_in_flight.compare_exchange_strong(expected, true);
             if (claimed) save_slots.held.push_back(&p.save_ctx);
+            bool clip_open = false;
+            {
+                std::lock_guard<std::mutex> lock(p.save_ctx.clip_mutex);
+                clip_open = !p.save_ctx.open_clips.empty();
+                if (!clip_open && !p.save_ctx.clips_blocked) {
+                    p.save_ctx.clips_blocked = true;
+                    save_slots.clips_blocked.push_back(&p.save_ctx);
+                }
+            }
+            if (clip_open) {
+                result.ok = false;
+                result.buffer_dropped = false;
+                result.error = "cannot reallocate buffer while an app's clip is recording";
+                return result;
+            }
             if (!claimed || p.ring.IsPinned()) {
                 result.ok = false;
                 result.buffer_dropped = false;
@@ -222,7 +244,10 @@ LiveApplyResult ApplyLiveConfig(Config& live_cfg, const JsonValue& patch_json,
             p.save_ctx.buffer_seconds = working.buffer_seconds;
             p.ring.SetMaxAge(RingMaxAgeQpc(working.buffer_seconds));  // or a longer save gets cut short
         }
-        if (preview.apply_tier != ApplyTier::Free) p.save_ctx.fps = fps;
+        if (preview.apply_tier != ApplyTier::Free) {
+            p.save_ctx.fps = fps;
+            p.save_ctx.bitrate_kbps = static_cast<uint32_t>(working.encode_bitrate_kbps);
+        }
         std::lock_guard<std::mutex> lock(LiveConfigMutex());
         p.save_ctx.output_root = working.output_root;
         p.save_ctx.output_filename = working.output_filename;

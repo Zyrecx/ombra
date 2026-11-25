@@ -149,6 +149,7 @@ add_library(ombra_core STATIC
     src/ombra/aac_encoder.cpp
     src/ombra/reconfig.cpp
     src/ombra/save.cpp
+    src/ombra/clip.cpp
     src/ombra/update.cpp
     src/ombra/engine_pipe.cpp)
 target_include_directories(ombra_core PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/generated")
@@ -253,6 +254,7 @@ add_executable(ombra-tests
     tests/memory_soak_gpu_tests.cpp
     tests/clip_player_tests.cpp
     tests/save_tests.cpp
+    tests/clip_tests.cpp
     tests/mux_tests.cpp
     tests/clip_file_tests.cpp
     tests/json_tests.cpp

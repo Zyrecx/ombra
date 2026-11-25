@@ -39,6 +39,8 @@ int64_t RingMaxAgeQpc(double buffer_seconds);
 // encode.keyframe_sec's maximum, so the setting needs no live resize; at most ~10 s of AAC a track.
 int64_t AudioRingMaxAgeQpc(double buffer_seconds);
 
+class ClipSession;
+
 struct SaveContext {
     Ring*                ring = nullptr;
     // Every pipeline shares the one hub (there is one set of audio devices whatever the monitor
@@ -67,8 +69,19 @@ struct SaveContext {
     std::wstring         monitor_label;
     // MonitorSpec::device: whose refresh rate capture.framerate 0 ("match display") resolves to.
     std::string          monitor_device = "primary";
+    // encode.bitrate_kbps: the floor of an open clip's disk estimate (clip.cpp).
+    std::atomic<uint32_t> bitrate_kbps{0};
+    // The user's hotkey save. A tool's clip never takes it (open_clips below), so neither costs the
+    // other footage or a busy refusal.
     std::atomic<bool>    save_in_flight{false};
     std::atomic<int>     save_count{0};
+
+    // Tools' clips open on this pipeline (clip.h), under clip_mutex. A buffer reallocation refuses
+    // while any is open and sets clips_blocked meanwhile, so none opens between its check and the
+    // rebuild (the audio hub's Resize would drop what a clip hasn't drained).
+    std::mutex                clip_mutex;
+    std::vector<ClipSession*> open_clips;
+    bool                      clips_blocked = false;
 
     std::mutex           last_save_mutex;
     std::wstring         last_save_path;

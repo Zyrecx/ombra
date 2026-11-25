@@ -23,11 +23,6 @@
 
 namespace ombra {
 
-namespace {
-
-// Local wall-clock time of `qpc` (the hotkey press), so a clip is named for when it was asked for,
-// not for when the save reached naming it (after the audio encode, seconds later). Outside the
-// last ten minutes (a synthetic test timeline) it falls back to now.
 SYSTEMTIME LocalTimeAtQpc(int64_t qpc) {
     LARGE_INTEGER now_qpc{}, freq{};
     QueryPerformanceCounter(&now_qpc);
@@ -46,6 +41,8 @@ SYSTEMTIME LocalTimeAtQpc(int64_t qpc) {
     SystemTimeToTzSpecificLocalTime(nullptr, &st_utc, &st);
     return st;
 }
+
+namespace {
 
 // Filled in by DoSaveImpl when non-null and folded into DoSave's telemetry event, so a real save
 // leaves numbers behind instead of a guess about where its time and memory go.
@@ -141,60 +138,11 @@ SaveOutcome DoSaveImpl(SaveContext* ctx, int64_t t_end, const std::wstring* grou
                               std::chrono::steady_clock::now() - audio_started).count();
 
     ctx->save_count.fetch_add(1);
-    // Copied once: a settings Save can replace these while this save runs on its own thread.
-    std::string output_root, output_filename, overlap_policy;
-    bool per_game_folders = false;
+    std::string overlap_policy;
     {
         std::lock_guard<std::mutex> lock(LiveConfigMutex());
-        output_root = ctx->output_root;
-        output_filename = ctx->output_filename;
         overlap_policy = ctx->save_overlap_policy;
-        per_game_folders = ctx->per_game_folders;
     }
-    const bool templated = (ctx->out_path == L"out\\ombra.mp4");
-    // Always .mp4, whether or not the filename template already ends in it.
-    const std::wstring ext = L".mp4";
-    // The clip's full path under `root_dir`. A templated name never overwrites an earlier clip: the
-    // check runs on the final name (it used to run before the extension, so a save overwrote its
-    // predecessor) and takes the first free suffix, so suffixes left by an earlier run are skipped.
-    auto templated_path = [&](std::wstring root_dir) {
-        std::wstring game_name = (ctx->controller) ? ctx->controller->CurrentGameFolder() : L"";
-        if (per_game_folders && !game_name.empty()) {
-            root_dir += L"\\" + game_name;
-        }
-
-        std::wstring fn;
-        if (group_folder_name && !group_folder_name->empty()) {
-            // N>1 monitors: one subfolder per save event (named like a normal single-monitor
-            // save filename would be, minus the extension), each monitor's file inside named by
-            // its label ("DISPLAY1.mp4", "Primary.mp4", ...) instead of a flat filename with
-            // {monitor_suffix} appended -- easier to browse "one save, N files" as a unit than N
-            // look-alike filenames sharing one folder.
-            root_dir += L"\\" + *group_folder_name;
-            fn = (ctx->monitor_label.empty() ? L"capture" : ctx->monitor_label) + L".mp4";
-        } else {
-            const SYSTEMTIME pressed = LocalTimeAtQpc(t_end);
-            fn = SanitizeFileName(FormatFilename(
-                output_filename.empty() ? "{game} {date} {time}{monitor_suffix}" : output_filename,
-                game_name, ctx->monitor_suffix, &pressed));
-        }
-        std::wstring full = WithContainerExtension(root_dir + L"\\" + fn, ext);
-        if (GetFileAttributesW(full.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            const std::wstring base = full.substr(0, full.size() - ext.size());
-            for (int i = 1;; ++i) {
-                wchar_t suffix[16];
-                swprintf_s(suffix, L"_%03d", i);
-                const std::wstring candidate = base + suffix + ext;
-                if (GetFileAttributesW(candidate.c_str()) == INVALID_FILE_ATTRIBUTES) {
-                    full = candidate;
-                    break;
-                }
-            }
-        }
-        return full;
-    };
-    const std::wstring root = ResolveOutputRoot(output_root);
-    std::wstring path = templated ? templated_path(root) : WithContainerExtension(ctx->out_path, ext);
 
     // Each AU is read out of the pinned ring and written before the next one is read, and the pin
     // is released behind the writer (RingPin::ReleaseThrough), so a save holds one AU in memory and
@@ -210,27 +158,15 @@ SaveOutcome DoSaveImpl(SaveContext* ctx, int64_t t_end, const std::wstring* grou
     }
 
     // Decided here, before the mux: past this point the pin has let go of what it wrote, so a retry
-    // elsewhere couldn't be whole. The margin covers the audio and the MP4's index.
-    const uint64_t room_needed = save_bytes + save_bytes / 8 + (16u << 20);
-    if (!FolderTakesFile(path, room_needed)) {
-        const bool can_fall_back = templated && !ctx->fallback_root.empty() &&
-                                   _wcsicmp(ctx->fallback_root.c_str(), root.c_str()) != 0;
-        std::wstring elsewhere;
-        if (can_fall_back) {
-            elsewhere = templated_path(ctx->fallback_root);
-            if (!FolderTakesFile(elsewhere, room_needed)) elsewhere.clear();
-        }
-        if (elsewhere.empty()) {
-            Log::Error("save: \"%ls\" can't take this clip (drive missing, disk full or read-only); not saved, the "
-                       "footage stays in the buffer for a retry", path.c_str());
-            crash_upload::ReportError(crash_upload::ErrorKind::Save, "no_room", "", "save folder can't take the clip");
-            return SaveOutcome::kFailed;
-        }
-        Log::Warn("save: \"%ls\" can't take this clip (drive missing, disk full or read-only); writing \"%ls\"",
-                  path.c_str(), elsewhere.c_str());
-        path = std::move(elsewhere);
-        if (timing) timing->fell_back = true;
+    // elsewhere couldn't be whole.
+    const ClipDestination dest = PickClipPath(ctx, t_end, group_folder_name, L"", ClipRoomNeeded(save_bytes), "save");
+    if (dest.path.empty()) {
+        Log::Error("save: not saved, the footage stays in the buffer for a retry");
+        crash_upload::ReportError(crash_upload::ErrorKind::Save, "no_room", "", "save folder can't take the clip");
+        return SaveOutcome::kFailed;
     }
+    const std::wstring& path = dest.path;
+    if (timing) timing->fell_back = dest.fell_back;
     double private_mb_before_mux = 0, private_mb_mid_mux = 0, ws_mb_unused = 0;
     GetProcessRssMb(ws_mb_unused, private_mb_before_mux);
     bool pin_broken = false;
@@ -315,7 +251,136 @@ SaveOutcome DoSaveImpl(SaveContext* ctx, int64_t t_end, const std::wstring* grou
 }
 
 
+// Names a save or clip has picked but may not have created yet: a clip's file only appears when its
+// thread opens it, so a second clip or a hotkey save in the same second would pick the same name.
+std::mutex& ReservedNamesMutex() {
+    static std::mutex m;
+    return m;
+}
+std::vector<std::wstring>& ReservedNames() {
+    static std::vector<std::wstring> names;
+    return names;
+}
+
+bool SamePath(const std::wstring& a, const std::wstring& b) { return _wcsicmp(a.c_str(), b.c_str()) == 0; }
+
+// Moves `full` (ending in `ext`) to the first name neither on disk nor reserved, `_001` on, and
+// reserves it until the returned token is destroyed.
+std::shared_ptr<void> ReserveFreeName(std::wstring& full, const std::wstring& ext) {
+    std::lock_guard<std::mutex> lock(ReservedNamesMutex());
+    auto& names = ReservedNames();
+    const auto taken = [&](const std::wstring& p) {
+        return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES ||
+               std::any_of(names.begin(), names.end(), [&](const std::wstring& n) { return SamePath(n, p); });
+    };
+    if (taken(full)) {
+        const std::wstring base = full.substr(0, full.size() - ext.size());
+        for (int i = 1;; ++i) {
+            wchar_t suffix[16];
+            swprintf_s(suffix, L"_%03d", i);
+            std::wstring candidate = base + suffix + ext;
+            if (!taken(candidate)) {
+                full = std::move(candidate);
+                break;
+            }
+        }
+    }
+    names.push_back(full);
+    return std::shared_ptr<void>(nullptr, [name = full](void*) {
+        std::lock_guard<std::mutex> lock(ReservedNamesMutex());
+        auto& names = ReservedNames();
+        const auto it = std::find_if(names.begin(), names.end(), [&](const std::wstring& n) { return SamePath(n, name); });
+        if (it != names.end()) names.erase(it);
+    });
+}
+
 }  // namespace
+
+std::wstring ClipTitleForName(const std::wstring& title) {
+    std::wstring name = SanitizeFileName(title);
+    if (name.size() > 64) {
+        name.resize(64);
+        if (IS_HIGH_SURROGATE(name.back())) name.pop_back();  // never half an emoji
+    }
+    while (!name.empty() && (name.back() == L' ' || name.back() == L'.')) name.pop_back();
+    return name;
+}
+
+ClipDestination PickClipPath(SaveContext* ctx, int64_t t_end, const std::wstring* group_folder_name,
+                             const std::wstring& title, uint64_t room_needed, const char* log_tag) {
+    // Copied once: a settings Save can replace these while a save runs on its own thread.
+    std::string output_root, output_filename;
+    bool per_game_folders = false;
+    {
+        std::lock_guard<std::mutex> lock(LiveConfigMutex());
+        output_root = ctx->output_root;
+        output_filename = ctx->output_filename;
+        per_game_folders = ctx->per_game_folders;
+    }
+    const bool templated = (ctx->out_path == L"out\\ombra.mp4");
+    // Always .mp4, whether or not the filename template already ends in it.
+    const std::wstring ext = L".mp4";
+    // The clip's full path under `root_dir`, reserved in `reservation`. A templated name never
+    // overwrites an earlier clip: the check runs on the final name (it used to run before the
+    // extension, so a save overwrote its predecessor) and takes the first free suffix, so suffixes
+    // left by an earlier run are skipped.
+    auto templated_path = [&](std::wstring root_dir, std::shared_ptr<void>& reservation) {
+        std::wstring game_name = (ctx->controller) ? ctx->controller->CurrentGameFolder() : L"";
+        if (per_game_folders && !game_name.empty()) {
+            root_dir += L"\\" + game_name;
+        }
+
+        std::wstring fn;
+        if (group_folder_name && !group_folder_name->empty()) {
+            // N>1 monitors: one subfolder per save event (named like a normal single-monitor
+            // save filename would be, minus the extension), each monitor's file inside named by
+            // its label ("DISPLAY1.mp4", "Primary.mp4", ...) instead of a flat filename with
+            // {monitor_suffix} appended -- easier to browse "one save, N files" as a unit than N
+            // look-alike filenames sharing one folder.
+            root_dir += L"\\" + *group_folder_name;
+            fn = (ctx->monitor_label.empty() ? L"capture" : ctx->monitor_label) + L".mp4";
+        } else {
+            const SYSTEMTIME pressed = LocalTimeAtQpc(t_end);
+            fn = SanitizeFileName(FormatFilename(
+                output_filename.empty() ? "{game} {date} {time}{monitor_suffix}" : output_filename,
+                game_name, ctx->monitor_suffix, &pressed));
+            const std::wstring titled = ClipTitleForName(title);
+            if (!titled.empty()) {
+                // The template may already end in the extension: the title goes before it.
+                if (fn.size() >= ext.size() && _wcsicmp(fn.c_str() + fn.size() - ext.size(), ext.c_str()) == 0)
+                    fn.resize(fn.size() - ext.size());
+                fn += L" - " + titled;
+            }
+        }
+        std::wstring full = WithContainerExtension(root_dir + L"\\" + fn, ext);
+        reservation = ReserveFreeName(full, ext);
+        return full;
+    };
+    const std::wstring root = ResolveOutputRoot(output_root);
+    ClipDestination dest;
+    dest.path = templated ? templated_path(root, dest.reservation) : WithContainerExtension(ctx->out_path, ext);
+    if (FolderTakesFile(dest.path, room_needed)) return dest;
+
+    const bool can_fall_back = templated && !ctx->fallback_root.empty() &&
+                               _wcsicmp(ctx->fallback_root.c_str(), root.c_str()) != 0;
+    std::wstring elsewhere;
+    std::shared_ptr<void> elsewhere_reservation;
+    if (can_fall_back) {
+        elsewhere = templated_path(ctx->fallback_root, elsewhere_reservation);
+        if (!FolderTakesFile(elsewhere, room_needed)) elsewhere.clear();
+    }
+    if (elsewhere.empty()) {
+        Log::Error("%s: \"%ls\" can't take this clip (drive missing, disk full or read-only)", log_tag,
+                   dest.path.c_str());
+        return {};
+    }
+    Log::Warn("%s: \"%ls\" can't take this clip (drive missing, disk full or read-only); writing \"%ls\"",
+              log_tag, dest.path.c_str(), elsewhere.c_str());
+    dest.path        = std::move(elsewhere);
+    dest.reservation = std::move(elsewhere_reservation);
+    dest.fell_back   = true;
+    return dest;
+}
 
 std::wstring WithContainerExtension(const std::wstring& path, const std::wstring& ext) {
     const size_t name_start = path.find_last_of(L"\\/") == std::wstring::npos ? 0 : path.find_last_of(L"\\/") + 1;

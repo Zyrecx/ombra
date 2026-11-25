@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <functional>
 #include <future>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -34,6 +35,31 @@ std::wstring WithContainerExtension(const std::wstring& path, const std::wstring
 // One file-name component with every character Windows rejects (<>:"/\|?* and controls) replaced
 // by '_'. output.filename is user-typed and {game} comes from a process name.
 std::wstring SanitizeFileName(std::wstring name);
+
+// Room a clip of `video_bytes` asks the disk for: the margin covers the audio and the MP4's index.
+inline uint64_t ClipRoomNeeded(uint64_t video_bytes) { return video_bytes + video_bytes / 8 + (16u << 20); }
+
+// Local wall-clock time of `qpc` (a hotkey press, a tool's event), so a clip is named for when it was
+// asked for, not for when the save reached naming it. Outside the last ten minutes (a synthetic test
+// timeline) it falls back to now.
+SYSTEMTIME LocalTimeAtQpc(int64_t qpc);
+
+// A tool's clip title as it goes into a file or folder name: sanitized, at most 64 characters
+// (SanitizeFolderName's cap), so a long one can't push the name past NTFS's limit.
+std::wstring ClipTitleForName(const std::wstring& title);
+
+// Where a clip asked for at `t_end` is written: the output.filename template under output.root (or
+// ctx->out_path when a test set one), never over an existing file or a name another save or clip
+// holds (`reservation`, until the destination is destroyed). `group_folder_name` as for DoSave;
+// `title`, when non-empty, ends a single file's name. When output.root can't take `room_needed`
+// bytes, ctx->fallback_root (`fell_back`). Empty path: neither can (logged under `log_tag`).
+struct ClipDestination {
+    std::wstring          path;
+    bool                  fell_back = false;
+    std::shared_ptr<void> reservation;
+};
+ClipDestination PickClipPath(SaveContext* ctx, int64_t t_end, const std::wstring* group_folder_name,
+                             const std::wstring& title, uint64_t room_needed, const char* log_tag);
 
 // `group_folder_name`, when non-null, names the subfolder a multi-monitor SaveReplay action
 // writes each monitor's file into. Clears ctx->save_in_flight on every
