@@ -406,6 +406,27 @@ std::shared_ptr<SaveToastSignal> SpawnSaveToast(const std::wstring& app) {
     return sig;
 }
 
+// A one-shot toast for an API app's action (`event` as ombra-ui's LookupToastInfo knows it), naming
+// the app through the same inheritable SaveToastInfo mapping a save toast reads: the name is
+// untrusted text, kept off the command line.
+void SpawnAppToast(const wchar_t* event, const std::wstring& app) {
+    SECURITY_ATTRIBUTES inheritable{sizeof(inheritable), nullptr, TRUE};
+    HANDLE info = CreateFileMappingW(INVALID_HANDLE_VALUE, &inheritable, PAGE_READWRITE, 0,
+                                     sizeof(SaveToastInfo), nullptr);
+    if (!info) {
+        Log::Warn("SpawnAppToast: mapping failed (err=%lu)", GetLastError());
+        return;
+    }
+    if (void* view = MapViewOfFile(info, FILE_MAP_WRITE, 0, 0, sizeof(SaveToastInfo))) {
+        SetToastApp(*static_cast<SaveToastInfo*>(view), app);
+        UnmapViewOfFile(view);
+    }
+    SpawnToastProcess(std::wstring(event) + L" --info " +
+                          std::to_wstring(static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(info))),
+                      {info});
+    CloseHandle(info);  // the toast holds its own inherited handle
+}
+
 // Both entry points use the same ring claims, timestamp, grouping and completion result.
 // `app`: the API app asking (its hello name), empty for the user's own save.
 StartSaveFeedback ReplayFeedback(bool enabled, std::wstring app = {}) {
@@ -1378,7 +1399,10 @@ int RunEngine(int argc, wchar_t** argv) {
                                       tray.get(), &screenshot_ctx, &autotune_ctx, &pipelines,
                                       &raw_config, &memory_layout, &audio_control,
                                       ReplayFeedback(true, caller ? WideFromUtf8(caller->app) : std::wstring{}),
-                                      surface, &app_clips, caller);
+                                      surface, &app_clips, caller, [caller](bool on) {
+                                          SpawnAppToast(on ? L"buffer_on" : L"buffer_off",
+                                                        caller ? WideFromUtf8(caller->app) : std::wstring{});
+                                      });
         };
         pipe_server = std::make_unique<PipeServer>(
             [handle](const JsonValue& req) { return handle(req, PipeSurface::kInternal, nullptr); },

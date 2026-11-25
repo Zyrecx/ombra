@@ -181,6 +181,9 @@ JsonValue HandlePipeRequest(const JsonValue& req, Config& cfg, PipelineSuperviso
                              // The API's clips (clip.h); nullptr refuses `clip`.
                              AppClips* app_clips = nullptr,
                              // Who sent an API request; nullptr is an app with no rights.
-                             const PipeCaller* caller = nullptr);
+                             const PipeCaller* caller = nullptr,
+                             // An app turned Instant Replay on (true) or off: its toast, naming
+                             // the app. Empty shows nothing (tests).
+                             const std::function<void(bool)>& replay_toast = {});
 
 }  // namespace ombra

@@ -49,11 +49,11 @@ public:
     }
 
     JsonValue ApiRequest(const std::string& type, JsonValue fields = JsonValue::MakeObject(),
-                         const PipeCaller* caller = nullptr) {
+                         const PipeCaller* caller = nullptr, const std::function<void(bool)>& replay_toast = {}) {
         fields.Set("type", JsonValue::MakeStr(type));
         return HandlePipeRequest(fields, cfg, supervisor, controller, save_ctx, StartupGpuSummary{},
                                  nullptr, nullptr, nullptr, nullptr, &raw_store, nullptr, nullptr, {},
-                                 PipeSurface::kApi, &app_clips, caller);
+                                 PipeSurface::kApi, &app_clips, caller, replay_toast);
     }
 
     JsonValue SetConfig(JsonValue patch) {
@@ -256,6 +256,47 @@ TEST_CASE("engine pipe api: clip answers only Ombra's command line until consent
     // The verdict comes from the image: this process (the tests) passes, another program doesn't.
     CHECK(IsCommandLineClient(GetCurrentProcessId(), L""));
     CHECK_FALSE(IsCommandLineClient(0, L"C:\\Windows\\System32\\notepad.exe"));
+}
+
+// Turning replay off discards the user's buffer: only Ombra's command line may, and every change
+// shows a toast naming who did it (an unchanged switch shows none).
+TEST_CASE("engine pipe api: replay switches Instant Replay for the command line only, with a toast") {
+    HandlerRig rig;
+    std::vector<bool> toasts;
+    const auto toast = [&](bool on) { toasts.push_back(on); };
+    const auto replay = [&](JsonValue value, const PipeCaller* caller) {
+        JsonValue fields = JsonValue::MakeObject();
+        fields.Set("replay", std::move(value));
+        return rig.ApiRequest("replay", std::move(fields), caller, toast);
+    };
+    const bool before = rig.controller.UserEnabled();
+    CHECK(ErrorOf(replay(JsonValue::MakeBool(!before), nullptr)) == "not_allowed");
+    PipeCaller app;
+    app.app = "Command line";
+    CHECK(ErrorOf(replay(JsonValue::MakeBool(!before), &app)) == "not_allowed");
+    CHECK(rig.controller.UserEnabled() == before);
+
+    PipeCaller cli;
+    cli.app          = "Script";
+    cli.command_line = true;
+    CHECK(ErrorOf(replay(JsonValue::MakeStr("off"), &cli)) == "bad_request");
+    CHECK(ErrorOf(rig.ApiRequest("replay", JsonValue::MakeObject(), &cli, toast)) == "bad_request");
+    CHECK(toasts.empty());
+
+    JsonValue off = replay(JsonValue::MakeBool(false), &cli);
+    CHECK(ErrorOf(off).empty());
+    CHECK(IsBool(off.Find("replay"), false));
+    CHECK(IsBool(off.Find("changed"), before));
+    CHECK_FALSE(rig.controller.UserEnabled());
+    JsonValue again = replay(JsonValue::MakeBool(false), &cli);
+    CHECK(IsBool(again.Find("changed"), false));
+    JsonValue on = replay(JsonValue::MakeBool(true), &cli);
+    CHECK(IsBool(on.Find("changed"), true));
+    CHECK(rig.controller.UserEnabled());
+    std::vector<bool> expected;
+    if (before) expected.push_back(false);
+    expected.push_back(true);
+    CHECK(toasts == expected);
 }
 
 TEST_CASE("engine pipe api: clip checks its fields, Instant Replay and the footage") {

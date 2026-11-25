@@ -419,6 +419,7 @@ struct PipeRequest {
     const StartSaveFeedback&                             save_feedback;
     AppClips*                                            app_clips;
     const PipeCaller*                                    caller;
+    const std::function<void(bool)>&                     replay_toast;
     // Held already when the command's table entry says so; save_now releases it before waiting.
     std::unique_lock<std::mutex>&                        config_lock;
 
@@ -431,6 +432,7 @@ struct PipeRequest {
     JsonValue OnApiStatus();
     JsonValue OnApiClip();
     JsonValue OnApiMarker();
+    JsonValue OnApiReplay();
     JsonValue OnSaveNow();
     JsonValue OnScreenshot();
     JsonValue OnSetArmed();
@@ -1002,6 +1004,27 @@ JsonValue PipeRequest::OnApiMarker() {
                             " in the footage Ombra holds; older ones free up as the buffer moves on");
     JsonValue resp = JsonValue::MakeObject();
     resp.Set("marker", JsonValue::MakeNum(static_cast<double>(marker.id)));
+    return resp;
+}
+
+// The public API's Instant Replay switch (protocol.h): only Ombra's command line until consent
+// exists. The same switch as the overlay's tile and the hotkey; a change always toasts, naming the
+// app, whatever the user's toast settings (a tool's action is never silent).
+JsonValue PipeRequest::OnApiReplay() {
+    if (!caller || !caller->command_line)
+        return ApiError("not_allowed", "apps need the user's approval to switch Instant Replay, which "
+                                       "this Ombra can't ask for yet; only Ombra's command line can");
+    const JsonValue* replay_v = req.Find("replay");
+    if (!replay_v || replay_v->type != JsonValue::Type::Bool)
+        return ApiError("bad_request", "\"replay\" must be true or false");
+    const bool on      = replay_v->b;
+    const bool changed = controller.UserEnabled() != on;
+    controller.SetUserEnabled(on);
+    if (tray) tray->SetTooltip(TrayTooltip(on));
+    if (changed && replay_toast) replay_toast(on);
+    JsonValue resp = JsonValue::MakeObject();
+    resp.Set("replay", JsonValue::MakeBool(on));
+    resp.Set("changed", JsonValue::MakeBool(changed));
     return resp;
 }
 
@@ -1610,6 +1633,7 @@ constexpr PipeCommand kApiCommands[] = {
     {"status", true, &PipeRequest::OnApiStatus},
     {"clip",   false, &PipeRequest::OnApiClip},  // not the pipe's lock: a rebuild would delay the event
     {"marker", false, &PipeRequest::OnApiMarker},  // likewise: it marks the moment asked
+    {"replay", false, &PipeRequest::OnApiReplay},  // as set_armed: the controller serializes it
 };
 
 }  // namespace
@@ -1621,7 +1645,8 @@ JsonValue HandlePipeRequest(const JsonValue& req, Config& cfg, PipelineSuperviso
                              const std::vector<std::unique_ptr<MonitorPipeline>>* all_pipelines,
                              RawConfigMap* raw_store, MemoryLayout* memory,
                              AudioSourceControl* audio_sources, const StartSaveFeedback& save_feedback,
-                             PipeSurface surface, AppClips* app_clips, const PipeCaller* caller) {
+                             PipeSurface surface, AppClips* app_clips, const PipeCaller* caller,
+                             const std::function<void(bool)>& replay_toast) {
     const JsonValue* type_v = req.Find("type");
     const std::string type  = (type_v && type_v->type == JsonValue::Type::String)
                                    ? type_v->str : "";
@@ -1642,7 +1667,7 @@ JsonValue HandlePipeRequest(const JsonValue& req, Config& cfg, PipelineSuperviso
     std::unique_lock<std::mutex> config_lock(config_mutex, std::defer_lock);
     PipeRequest request{req, cfg, supervisor, controller, save_ctx, gpu_summary, tray, screenshot_ctx,
                         autotune_ctx, all_pipelines, raw_store, memory, audio_sources, save_feedback,
-                        app_clips, caller, config_lock};
+                        app_clips, caller, replay_toast, config_lock};
     const bool api = surface == PipeSurface::kApi;
     for (const PipeCommand& command : api ? std::span<const PipeCommand>(kApiCommands)
                                           : std::span<const PipeCommand>(kPipeCommands)) {

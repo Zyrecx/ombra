@@ -56,6 +56,12 @@
 //                      tag. Errors: bad_request, not_allowed (as clip), replay_off (no footage
 //                      covers the moment), too_many_markers (256 per app in the footage held).
 //
+//   replay          -> {"replay":bool}
+//                   <- {"replay":bool (the switch now), "changed":bool}
+//                      The Instant Replay switch; off discards the buffer. A change shows a toast
+//                      naming the app. Errors: bad_request, not_allowed (only Ombra's command line:
+//                      no app may switch it until consent exists).
+//
 // Internal (ombra-ui only): {"type":"hello","id":1,"v":kProtocolVersion}, accepted only from
 // ombra-ui.exe beside the engine (PipeServer's internal gate), so apps can't reach set_config,
 // shutdown or update_install around the public API. Exact version match: both ship together.

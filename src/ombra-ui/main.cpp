@@ -1133,9 +1133,13 @@ int RunUi() {
         std::vector<HANDLE> waits;
         HANDLE info = nullptr;
         const auto handle = [&](int i) { return reinterpret_cast<HANDLE>(static_cast<uintptr_t>(_wcstoui64(argv[i], nullptr, 10))); };
+        // --toast <event> --info <info>: an API app's one-shot toast, the mapping naming the app
+        // (SpawnAppToast, engine.cpp).
         if (argc == 10 && std::wstring(argv[3]) == L"--wait") {
             for (int i = 4; i < 9; ++i) waits.push_back(handle(i));
             info = handle(9);
+        } else if (argc == 5 && std::wstring(argv[3]) == L"--info") {
+            info = handle(4);
         }
         const int rc = ombra_ui::RunToast(event, std::move(waits), info);
         LocalFree(argv);
