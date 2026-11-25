@@ -23,7 +23,7 @@ if (-not (Test-Path $iscc)) {
     Remove-Item $setup
 }
 
-foreach ($f in 'ombra.exe', 'ombra-ui.exe') {
+foreach ($f in 'ombra.exe', 'ombra-ui.exe', 'ombra.com') {
     if (-not (Test-Path (Join-Path $build $f))) { throw "$f missing: run build.ps1 first" }
 }
 New-Item -ItemType Directory -Force $out | Out-Null
@@ -36,7 +36,7 @@ if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
 $stage = Join-Path $out 'portable'
 Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $stage | Out-Null
-Copy-Item (Join-Path $build 'ombra.exe'), (Join-Path $build 'ombra-ui.exe'), (Join-Path $root 'THIRD-PARTY-NOTICES.txt') $stage
+Copy-Item (Join-Path $build 'ombra.exe'), (Join-Path $build 'ombra-ui.exe'), (Join-Path $build 'ombra.com'), (Join-Path $root 'THIRD-PARTY-NOTICES.txt') $stage
 Copy-Item (Join-Path $root 'LICENSE') (Join-Path $stage 'LICENSE.txt')
 $zip = Join-Path $out 'Ombra-Portable.zip'
 Remove-Item $zip -ErrorAction SilentlyContinue

@@ -12,6 +12,9 @@
 // The executables. Must match the CMake targets' output names.
 #define OMBRA_ENGINE_EXE "ombra.exe"
 #define OMBRA_UI_EXE "ombra-ui.exe"
+#define OMBRA_CLI_EXE "ombra.com"  // the console twin a bare `ombra` runs from a shell (cli.h)
+// What a shell user types: the usage text's command name.
+#define OMBRA_CLI_NAME "ombra"
 
 // The installation's identity: the %APPDATA%/%LOCALAPPDATA% folder, the Run-key value, the engine's
 // pipe and mutex. Changing it once releases exist is a migration, not a rename: an existing install's

@@ -4,7 +4,7 @@
 // Run:   build\Release\ombra.exe                                    (the real default: resident
 //          forever, no argv. Creates a hidden window the tray routes to, starts PipeServer on
 //          \\.\pipe\OmbraEngine, and runs the capture/encode/pace/hotkey machinery. Ring length is
-//          config's buffer.seconds (60s). Exit via the window's close or Ctrl+C in the console. No
+//          config's buffer.seconds (60s). Exit via the window's close (the tray's Exit). No
 //          auto-save on exit — that behavior is timedtest's, not the resident engine's.)
 //        build\Release\ombra.exe timedtest [total_seconds] [buffer_seconds] [output.mp4]
 //          (an explicit scriptable test harness. default: 15s captured; buffer_seconds defaults to
@@ -33,16 +33,18 @@
 // when stdout/stderr aren't already pointing somewhere (freopen to CONOUT$ unconditionally would
 // silently discard output redirected to a file by a test script), so `timedtest`/`gputest`/etc.
 // invoked from an interactive terminal still print into it.
+//
+// The resident engine (no arguments) never attaches: one started from a terminal (`ombra start`)
+// would otherwise share it, and that terminal's Ctrl+C or closing would end the engine.
 int APIENTRY wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
-    if (GetStdHandle(STD_OUTPUT_HANDLE) == nullptr && AttachConsole(ATTACH_PARENT_PROCESS)) {
+    wchar_t*  cmdline = GetCommandLineW();
+    int       argc    = 0;
+    wchar_t** argv    = CommandLineToArgvW(cmdline, &argc);
+    if (argc > 1 && GetStdHandle(STD_OUTPUT_HANDLE) == nullptr && AttachConsole(ATTACH_PARENT_PROCESS)) {
         FILE* fp = nullptr;
         freopen_s(&fp, "CONOUT$", "w", stdout);
         freopen_s(&fp, "CONOUT$", "w", stderr);
     }
-
-    wchar_t*  cmdline = GetCommandLineW();
-    int       argc    = 0;
-    wchar_t** argv    = CommandLineToArgvW(cmdline, &argc);
     const int rc      = RunEngine(argc, argv);
     if (argv) LocalFree(argv);
     return rc;

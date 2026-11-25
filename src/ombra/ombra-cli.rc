@@ -1,0 +1,8 @@
+// ombra.com's icon and version info (cli_main.cpp): the engine's icon, its own description, so
+// Defender, Task Manager and Explorer name it apart from the engine.
+#include "ombra/resource.h"
+IDI_APP_ICON ICON "ombra/ombra.ico"
+
+#define OMBRA_FILE_DESCRIPTION OMBRA_PRODUCT_NAME " command line"
+#define OMBRA_ORIGINAL_FILENAME OMBRA_CLI_EXE
+#include "ombra/versioninfo.rc2"

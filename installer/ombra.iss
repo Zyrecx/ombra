@@ -75,6 +75,8 @@ SetupLogging=yes
 ; is started by DeinitializeSetup or the finished page.
 CloseApplications=force
 RestartApplications=no
+; {app} joins the user's PATH (CurStepChanged), so terminals opened afterwards find `ombra`.
+ChangesEnvironment=yes
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -82,6 +84,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "{#BuildDir}\ombra.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\ombra-ui.exe"; DestDir: "{app}"; Flags: ignoreversion
+; The command line (cli.h): `ombra` in a terminal, with {app} on the user's PATH (CurStepChanged).
+Source: "{#BuildDir}\ombra.com"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourcePath}\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "{#SourcePath}\..\THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -309,6 +313,72 @@ begin
   Result := RemoveBackslashUnlessRoot(Result);
 end;
 
+// ---- The user's PATH ----
+// HKCU only (setup runs without elevation). An entry matches {app} case-insensitively, with or
+// without a trailing backslash; the type (REG_EXPAND_SZ) and every other entry are kept.
+
+const
+  EnvKey = 'Environment';
+
+function SameDir(Entry, Dir: String): Boolean;
+begin
+  Result := CompareText(RemoveBackslashUnlessRoot(Trim(Entry)), RemoveBackslashUnlessRoot(Dir)) = 0;
+end;
+
+function UserPathHas(Dir: String): Boolean;
+var
+  Path, Entry: String;
+  I: Integer;
+begin
+  Result := False;
+  if not RegQueryStringValue(HKCU, EnvKey, 'Path', Path) then Exit;
+  Path := Path + ';';
+  while Path <> '' do
+  begin
+    I := Pos(';', Path);
+    Entry := Copy(Path, 1, I - 1);
+    Delete(Path, 1, I);
+    if SameDir(Entry, Dir) then begin Result := True; Exit; end;
+  end;
+end;
+
+procedure AddToUserPath(Dir: String);
+var
+  Path: String;
+begin
+  if UserPathHas(Dir) then Exit;
+  if not RegQueryStringValue(HKCU, EnvKey, 'Path', Path) then Path := '';
+  if (Path <> '') and (Path[Length(Path)] <> ';') then Path := Path + ';';
+  if RegWriteExpandStringValue(HKCU, EnvKey, 'Path', Path + Dir) then Log('Added to the user PATH: ' + Dir);
+end;
+
+procedure RemoveFromUserPath(Dir: String);
+var
+  Path, Rest, Entry: String;
+  I: Integer;
+begin
+  if not RegQueryStringValue(HKCU, EnvKey, 'Path', Path) then Exit;
+  Rest := Path + ';';
+  Path := '';
+  while Rest <> '' do
+  begin
+    I := Pos(';', Rest);
+    Entry := Copy(Rest, 1, I - 1);
+    Delete(Rest, 1, I);
+    if (Entry <> '') and not SameDir(Entry, Dir) then
+    begin
+      if Path <> '' then Path := Path + ';';
+      Path := Path + Entry;
+    end;
+  end;
+  RegWriteExpandStringValue(HKCU, EnvKey, 'Path', Path);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then AddToUserPath(ExpandConstant('{app}'));
+end;
+
 // Runs however setup ends, after a failed or cancelled install too.
 procedure DeinitializeSetup;
 var
@@ -356,6 +426,8 @@ var
   RunValue, Home, ConfigDir, DataDir: String;
 begin
   if CurUninstallStep <> usPostUninstall then Exit;
+
+  if UserPathHas(ExpandConstant('{app}')) then RemoveFromUserPath(ExpandConstant('{app}'));
 
   // The engine writes the autostart value itself. Only this copy's is removed: another copy (a
   // portable one, a build) keeps its own.

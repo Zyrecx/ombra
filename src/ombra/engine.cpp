@@ -7,6 +7,7 @@
 #include "ombra/audio.h"
 #include "ombra/capture.h"
 #include "ombra/capturebench.h"
+#include "ombra/cli.h"
 #include "ombra/clip_ops.h"
 #include "ombra/clip_reencode.h"
 #include "ombra/config.h"
@@ -542,6 +543,8 @@ int RunExport(const Config& cfg, int argc, wchar_t** argv) {
 }  // namespace
 
 int RunEngine(int argc, wchar_t** argv) {
+    // The command line (cli.h): a client of the running engine, so it touches nothing of this one.
+    if (argc > 1 && IsCliCommand(argv[1])) return RunCli(argc, argv);
     // Must return before any GPU/capture/audio setup below — the verify line
     // ("--help renders every key") has to work on a machine with no NVIDIA GPU at all.
     if (argc > 1 && std::wstring(argv[1]) == L"--help") {

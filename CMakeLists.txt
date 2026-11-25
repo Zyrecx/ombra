@@ -152,6 +152,7 @@ add_library(ombra_core STATIC
     src/ombra/save.cpp
     src/ombra/clip.cpp
     src/ombra/update.cpp
+    src/ombra/cli.cpp
     src/ombra/engine_pipe.cpp)
 target_include_directories(ombra_core PUBLIC "${CMAKE_CURRENT_BINARY_DIR}/generated")
 add_dependencies(ombra_core ombra_build_info)
@@ -175,7 +176,7 @@ add_custom_command(
     COMMAND ombra-icongen "${OMBRA_ICON}"
     DEPENDS ombra-icongen
     COMMENT "Rendering ombra.ico from the brand mark")
-set_source_files_properties(src/ombra/ombra.rc src/ombra-ui/ombra-ui.rc PROPERTIES
+set_source_files_properties(src/ombra/ombra.rc src/ombra/ombra-cli.rc src/ombra-ui/ombra-ui.rc PROPERTIES
     OBJECT_DEPENDS "${OMBRA_ICON};${CMAKE_CURRENT_SOURCE_DIR}/src/ombra/versioninfo.rc2")
 
 # Dev tool: the engine's encoders on raw frames from stdin, for calibrating the quality presets
@@ -190,6 +191,19 @@ add_executable(ombra WIN32
 target_link_libraries(ombra PRIVATE ombra_core delayimp)
 # Only the `update-check` child calls WinHTTP (update.h); delay-loaded so the resident engine never maps it.
 target_link_options(ombra PRIVATE /DELAYLOAD:winhttp.dll)
+
+# The command line's console twin (cli.h): `ombra` in a shell resolves to ombra.com before ombra.exe.
+# Only the pipe client, none of the engine. The name must match brand.h's OMBRA_CLI_EXE.
+add_executable(ombra-cli
+    src/ombra/cli_main.cpp
+    src/ombra/cli.cpp
+    src/ombra/json.cpp
+    src/ombra/paths.cpp
+    src/ombra/ombra-cli.rc)
+target_link_libraries(ombra-cli PRIVATE ombra_common shell32 ole32)
+target_include_directories(ombra-cli PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+# PDB_NAME: the default (OUTPUT_NAME) would overwrite the engine's ombra.pdb.
+set_target_properties(ombra-cli PROPERTIES OUTPUT_NAME ombra SUFFIX .com PDB_NAME ombra-cli)
 
 # --- ui core: screens/widgets/pipe client, shared by ombra-ui and ombra-tests's headless UI tests -
 # Split out so tests/ui_tests.cpp can link screens.cpp + widget.cpp + a fake PipeClient without
@@ -245,6 +259,7 @@ add_executable(ombra-tests
     tests/instance_tests.cpp
     tests/log_tests.cpp
     tests/crash_tests.cpp
+    tests/cli_tests.cpp
     tests/flight_recorder_tests.cpp
     tests/crash_upload_tests.cpp
     tests/diagnostics_tests.cpp
