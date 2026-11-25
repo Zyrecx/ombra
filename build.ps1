@@ -28,8 +28,28 @@ $dir    = Join-Path $PSScriptRoot "build\$config"
 $extra  = if ($config -eq 'Asan') { '-DOMBRA_ASAN=ON' } else { '-DOMBRA_ASAN=OFF' }
 $type   = if ($config -eq 'Asan') { 'Release' } else { $config }
 
-cmake -G Ninja -S $PSScriptRoot -B $dir "-DCMAKE_BUILD_TYPE=$type" $extra "-DOMBRA_SENTRY_DSN=$env:OMBRA_SENTRY_DSN"
-if ($LASTEXITCODE -ne 0) { throw "cmake configure failed ($LASTEXITCODE)" }
-cmake --build $dir
-if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
-Write-Host "`nbuilt $dir"
+# A running engine locks its ombra.exe and the link fails (LNK1104). Stop the one that runs from
+# this build (cleanly, so it logs no unclean exit) and start it again afterwards, even on failure.
+$exe = Join-Path $dir 'ombra.exe'
+$restart = $false
+if (Get-Process ombra -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe }) {
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'scripts\stop-engine.ps1') -Path $exe
+    if ($LASTEXITCODE -eq 0) { $restart = $true; Write-Host "stopped the engine running from $exe; it restarts after the build" }
+    elseif ($LASTEXITCODE -ne 2) { throw "could not stop the engine: $out" }
+}
+try {
+    cmake -G Ninja -S $PSScriptRoot -B $dir "-DCMAKE_BUILD_TYPE=$type" $extra "-DOMBRA_SENTRY_DSN=$env:OMBRA_SENTRY_DSN"
+    if ($LASTEXITCODE -ne 0) { throw "cmake configure failed ($LASTEXITCODE)" }
+    cmake --build $dir
+    if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
+    Write-Host "`nbuilt $dir"
+} finally {
+    if ($restart) {
+        # The real engine, not an isolated one: drop any OMBRA_HOME this shell carries.
+        $home_ = $env:OMBRA_HOME
+        Remove-Item Env:OMBRA_HOME -ErrorAction SilentlyContinue
+        Start-Process $exe -WindowStyle Hidden
+        if ($home_) { $env:OMBRA_HOME = $home_ }
+        Write-Host "restarted the engine"
+    }
+}

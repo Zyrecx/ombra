@@ -1,7 +1,9 @@
 # Closes the engine that owns the installed pipe the way the installer does (WM_CLOSE to its
 # window), so the next start doesn't record an unclean exit. The pipe only names the process: its
 # internal protocol is reserved for ombra-ui. Waits up to 15 s for the process to end.
-#   powershell -ExecutionPolicy Bypass -File scripts\stop-engine.ps1
+#   powershell -ExecutionPolicy Bypass -File scripts\stop-engine.ps1 [-Path EXE]
+# With -Path, stops it only if it runs from that file; otherwise leaves it alone and exits 2.
+param([string]$Path)
 $ErrorActionPreference = 'Stop'
 if (-not (Get-Process ombra -ErrorAction SilentlyContinue)) { "engine not running"; exit 0 }
 Add-Type -Namespace OmbraStop -Name Win -MemberDefinition @'
@@ -20,6 +22,10 @@ $pipe.Connect(3000)
 $ok = [OmbraStop.Win]::GetNamedPipeServerProcessId($pipe.SafePipeHandle.DangerousGetHandle(), [ref]$enginePid)
 $pipe.Dispose()
 if (-not $ok) { "could not tell which process owns the pipe"; exit 1 }
+if ($Path) {
+    $running = (Get-Process -Id $enginePid).Path
+    if ($running -ne (Resolve-Path $Path).Path) { "engine pid $enginePid runs from $running, left running"; exit 2 }
+}
 # The engine's window is a hidden top-level window (engine.cpp), so a null parent finds it.
 $hwnd = [IntPtr]::Zero
 $closed = $false
