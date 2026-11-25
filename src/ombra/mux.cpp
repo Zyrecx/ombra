@@ -11,9 +11,10 @@
 // the whole clip already exists, encoded, in the Ring (a save pins it and the mux reads it out one
 // sample at a time), so there is no partial-write-during-capture window for the hybrid trick to
 // protect. What OBS's soft-remux produces at finalization time — a plain, non-fragmented moov with
-// full sample tables — is exactly what this file writes directly in one pass. Also not ported:
-// chapter tracks and the mdta/QuickTime metadata boxes. Audio tracks and the audio edit list are
-// Ombra's own.
+// full sample tables — is exactly what this file writes directly in one pass. The chapter track
+// (text trak, gmhd, tref/chap, and the TEXT_STUB_HEADER / CHAPTER_PKT_FOOTER bytes from
+// mp4-mux-internal.h) is ported too. Not ported: OBS's mdta metadata boxes. Audio tracks, the audio
+// edit list, Nero `chpl` and the freeform metadata tag are Ombra's own.
 #include "ombra/mux.h"
 #include "ombra/brand.h"
 
@@ -466,12 +467,21 @@ void WriteTkhd(ByteWriter& w, uint64_t creation_time, uint32_t width, uint32_t h
     w.WB32(height << 16);
 }
 
+// (QTFF) Track reference to the chapter track: what makes players read it as chapters.
+void WriteTrefChap(ByteWriter& w, uint32_t chapter_track_id) {
+    WriteBox(w, 20, "tref");
+    WriteBox(w, 12, "chap");
+    w.WB32(chapter_track_id);
+}
+
 void WriteTrak(ByteWriter& w, uint64_t creation_time, uint32_t width, uint32_t height,
-               const VideoEntry& entry, const TrackTiming& t, uint64_t movie_duration_ms) {
+               const VideoEntry& entry, const TrackTiming& t, uint64_t movie_duration_ms,
+               uint32_t chapter_track_id) {
     const size_t start = w.Pos();
     WriteBox(w, 0, "trak");
     // The display size: the clean aperture where there is one.
     WriteTkhd(w, creation_time, entry.picture.width, entry.picture.height, movie_duration_ms);
+    if (chapter_track_id) WriteTrefChap(w, chapter_track_id);
     WriteMdia(w, creation_time, width, height, entry, t);
     WriteBoxSize(w, start);
 }
@@ -655,6 +665,190 @@ void WriteTrakAudio(ByteWriter& w, uint64_t creation_time, uint32_t track_id, ui
     WriteBoxSize(w, start);
 }
 
+// --- chapters: QuickTime text track (OBS mp4-mux.c) and Nero chpl -------------------------------
+
+// OBS's TEXT_STUB_HEADER (mp4-mux-internal.h), the sample description FFmpeg writes too: no style,
+// one unnamed font.
+constexpr uint8_t kTextStubHeader[] = {
+    0x00, 0x00, 0x00, 0x01,  // displayFlags
+    0x00, 0x00,              // horizontal + vertical justification
+    0x00, 0x00, 0x00, 0x00,  // bgColourRed/Green/Blue/Alpha
+    0x00, 0x00, 0x00, 0x00,  // defTextBoxTop/Left
+    0x00, 0x00, 0x00, 0x00,  // defTextBoxBottom/Right
+    0x00, 0x00, 0x00, 0x00,  // startChar + endChar
+    0x00, 0x01,              // fontID
+    0x00, 0x00,              // fontStyleFlags + fontSize
+    0x00, 0x00, 0x00, 0x00,  // fgColourRed/Green/Blue/Alpha
+    0x00, 0x00, 0x00, 0x0D, 'f', 't', 'a', 'b',  // FontTableBox
+    0x00, 0x01,              // entry count
+    0x00, 0x01,              // font ID
+    0x00,                    // font name length
+};
+
+// OBS's CHAPTER_PKT_FOOTER: an `encd` box saying the sample text is UTF-8.
+constexpr uint8_t kChapterSampleFooter[12] = {0x00, 0x00, 0x00, 0x0C, 'e', 'n', 'c', 'd', 0x00, 0x00, 0x01, 0x00};
+
+// A chapter title cut to `max_bytes` without splitting a UTF-8 sequence.
+size_t Utf8Prefix(const std::string& s, size_t max_bytes) {
+    if (s.size() <= max_bytes) return s.size();
+    size_t n = max_bytes;
+    while (n > 0 && (static_cast<uint8_t>(s[n]) & 0xC0) == 0x80) --n;
+    return n;
+}
+
+// The chapters a file gets: sorted, inside the video, with kStartChapter at 0 when none is there.
+std::vector<MuxChapter> FileChapters(const MuxMarkers& markers, uint64_t video_ms) {
+    std::vector<MuxChapter> out;
+    for (const MuxChapter& c : markers.chapters)
+        if (c.ms < video_ms) out.push_back(c);
+    if (out.empty()) return out;
+    std::stable_sort(out.begin(), out.end(), [](const MuxChapter& a, const MuxChapter& b) { return a.ms < b.ms; });
+    if (out.front().ms > 0) out.insert(out.begin(), MuxChapter{0, kStartChapter});
+    return out;
+}
+
+// (QTFF) Base media information header: what a text track has instead of vmhd/smhd.
+void WriteGmhd(ByteWriter& w) {
+    const size_t start = w.Pos();
+    WriteBox(w, 0, "gmhd");
+    WriteFullBox(w, 24, "gmin", 0, 0);
+    w.WB16(0x40);    // graphics mode
+    w.WB16(0x8000);  // opColor r, g, b
+    w.WB16(0x8000);
+    w.WB16(0x8000);
+    w.WB16(0);       // balance
+    w.WB16(0);       // reserved
+    WriteBox(w, 44, "text");
+    w.WB16(0x01);  // identity matrix, not 16.16 fixed point
+    for (int i = 0; i < 3; ++i) w.WB32(0);
+    w.WB32(0x01);
+    for (int i = 0; i < 3; ++i) w.WB32(0);
+    w.WB32(0x00004000);
+    w.WB16(0);  // undocumented
+    WriteBoxSize(w, start);
+}
+
+void WriteTrakChapters(ByteWriter& w, uint64_t creation_time, uint32_t track_id, const TrackTiming& t,
+                       uint64_t movie_duration_ms) {
+    const size_t start = w.Pos();
+    WriteBox(w, 0, "trak");
+    // Flags: in movie, not enabled, as FFmpeg writes it, or players offer it as a subtitle track.
+    WriteFullBox(w, 92, "tkhd", 0, 0x2);
+    w.WB32(static_cast<uint32_t>(creation_time));
+    w.WB32(static_cast<uint32_t>(creation_time));
+    w.WB32(track_id);
+    w.WB32(0);  // reserved
+    w.WB32(static_cast<uint32_t>(movie_duration_ms));
+    w.WB32(0); w.WB32(0);  // reserved[2]
+    w.WB16(0); w.WB16(0);  // layer, alternate_group
+    w.WB16(0); w.WB16(0);  // volume, reserved
+    for (int32_t v : kUnityMatrix) w.WB32(static_cast<uint32_t>(v));
+    w.WB32(0); w.WB32(0);  // width, height
+
+    const size_t mdia = w.Pos();
+    WriteBox(w, 0, "mdia");
+    WriteMdhd(w, creation_time, t);
+    {
+        const size_t hdlr = w.Pos();
+        WriteFullBox(w, 0, "hdlr", 0, 0);
+        w.WB32(0);
+        w.WriteBytes("text", 4);
+        w.WB32(0); w.WB32(0); w.WB32(0);
+        static const char kName[] = OMBRA_PRODUCT_NAME " Chapter Handler";
+        w.WriteBytes(kName, sizeof(kName));
+        WriteBoxSize(w, hdlr);
+    }
+    const size_t minf = w.Pos();
+    WriteBox(w, 0, "minf");
+    WriteGmhd(w);
+    WriteDinf(w);
+    const size_t stbl = w.Pos();
+    WriteBox(w, 0, "stbl");
+    {
+        const size_t stsd = w.Pos();
+        WriteFullBox(w, 0, "stsd", 0, 0);
+        w.WB32(1);  // entry_count
+        const size_t text = w.Pos();
+        WriteBox(w, 0, "text");
+        w.WB32(0); w.WB16(0);  // reserved[6]
+        w.WB16(1);             // data_reference_index
+        w.WriteBytes(kTextStubHeader, sizeof(kTextStubHeader));
+        WriteBoxSize(w, text);
+        WriteBoxSize(w, stsd);
+    }
+    WriteStts(w, t);
+    WriteStsc(w, t);
+    WriteStsz(w, t);
+    WriteStco(w, t);
+    WriteBoxSize(w, stbl);
+    WriteBoxSize(w, minf);
+    WriteBoxSize(w, mdia);
+    WriteBoxSize(w, start);
+}
+
+// Nero chapters (`chpl`, FFmpeg's layout): what some Windows players read instead of the chapter
+// track. Holds at most 255 chapters of 255 bytes.
+void WriteChpl(ByteWriter& w, const std::vector<MuxChapter>& chapters) {
+    const size_t start = w.Pos();
+    WriteFullBox(w, 0, "chpl", 1, 0);
+    w.WB32(0);  // reserved
+    const size_t count = (std::min)(chapters.size(), size_t{255});
+    w.W8(static_cast<uint8_t>(count));
+    for (size_t i = 0; i < count; ++i) {
+        w.WB64(chapters[i].ms * 10000);  // 100 ns units
+        const size_t len = Utf8Prefix(chapters[i].title, 255);
+        w.W8(static_cast<uint8_t>(len));
+        w.WriteBytes(chapters[i].title.data(), len);
+    }
+    WriteBoxSize(w, start);
+}
+
+// iTunes-style metadata with one freeform ("----") tag: mean OMBRA_PRODUCT_NAME, name `key`.
+void WriteFreeformMeta(ByteWriter& w, const char* key, const std::string& value) {
+    const size_t meta = w.Pos();
+    WriteFullBox(w, 0, "meta", 0, 0);
+    {
+        const size_t hdlr = w.Pos();
+        WriteFullBox(w, 0, "hdlr", 0, 0);
+        w.WB32(0);
+        w.WriteBytes("mdir", 4);
+        w.WriteBytes("appl", 4);
+        w.WB32(0); w.WB32(0);
+        w.W8(0);  // empty name
+        WriteBoxSize(w, hdlr);
+    }
+    const size_t ilst = w.Pos();
+    WriteBox(w, 0, "ilst");
+    const size_t item = w.Pos();
+    WriteBox(w, 0, "----");
+    const size_t mean = w.Pos();
+    WriteFullBox(w, 0, "mean", 0, 0);
+    w.WriteBytes(OMBRA_PRODUCT_NAME, sizeof(OMBRA_PRODUCT_NAME) - 1);
+    WriteBoxSize(w, mean);
+    const size_t name = w.Pos();
+    WriteFullBox(w, 0, "name", 0, 0);
+    w.WriteBytes(key, std::strlen(key));
+    WriteBoxSize(w, name);
+    const size_t data = w.Pos();
+    WriteBox(w, 0, "data");
+    w.WB32(1);  // type: UTF-8
+    w.WB32(0);  // locale
+    w.WriteBytes(value.data(), value.size());
+    WriteBoxSize(w, data);
+    WriteBoxSize(w, item);
+    WriteBoxSize(w, ilst);
+    WriteBoxSize(w, meta);
+}
+
+void WriteUdta(ByteWriter& w, const std::vector<MuxChapter>& chapters, const std::string& json) {
+    if (chapters.empty() && json.empty()) return;
+    const size_t start = w.Pos();
+    WriteBox(w, 0, "udta");
+    if (!chapters.empty()) WriteChpl(w, chapters);
+    if (!json.empty()) WriteFreeformMeta(w, "markers", json);
+    WriteBoxSize(w, start);
+}
+
 // 8.2.2 Movie Header Box.
 void WriteMvhd(ByteWriter& w, uint64_t creation_time, uint64_t movie_duration_ms, uint32_t next_track_id) {
     WriteFullBox(w, 108, "mvhd", 0, 0);
@@ -695,9 +889,11 @@ struct AudioMoovParams {
     uint32_t                    skip_samples = 0;     // MuxAudioTrack::skip_samples
 };
 
+// `chapter_t` null: no chapter track.
 void WriteMoov(ByteWriter& w, uint64_t creation_time, uint32_t width, uint32_t height,
                const VideoEntry& entry, const TrackTiming& video_t,
-               const std::vector<AudioMoovParams>& audio) {
+               const std::vector<AudioMoovParams>& audio, const TrackTiming* chapter_t,
+               const std::vector<MuxChapter>& chapters, const std::string& markers_json) {
     auto duration_ms = [](const TrackTiming& t) {
         return t.timescale ? (t.duration * 1000 / t.timescale) : 0;
     };
@@ -710,14 +906,17 @@ void WriteMoov(ByteWriter& w, uint64_t creation_time, uint32_t width, uint32_t h
 
     const size_t start = w.Pos();
     WriteBox(w, 0, "moov");
-    WriteMvhd(w, creation_time, movie_duration_ms, static_cast<uint32_t>(2 + audio.size()));
-    WriteTrak(w, creation_time, width, height, entry, video_t, movie_duration_ms);
+    const uint32_t chapter_track_id = chapter_t ? static_cast<uint32_t>(2 + audio.size()) : 0;
+    WriteMvhd(w, creation_time, movie_duration_ms, static_cast<uint32_t>(2 + audio.size() + (chapter_t ? 1 : 0)));
+    WriteTrak(w, creation_time, width, height, entry, video_t, movie_duration_ms, chapter_track_id);
     for (size_t i = 0; i < audio.size(); ++i) {
         const auto& a = audio[i];
         WriteTrakAudio(w, creation_time, /*track_id=*/static_cast<uint32_t>(2 + i), a.sample_rate,
                        *a.asc, a.bitrate_bps, *a.timing, movie_duration_ms, a.name, a.lang_packed,
                        a.skip_samples);
     }
+    if (chapter_t) WriteTrakChapters(w, creation_time, chapter_track_id, *chapter_t, movie_duration_ms);
+    WriteUdta(w, chapters, markers_json);
     WriteBoxSize(w, start);
 }
 
@@ -822,7 +1021,7 @@ bool AudioTracksFit(const std::vector<MuxAudioTrack>& tracks) {
 
 bool MuxWriteMp4Stream(const std::wstring& path, const std::vector<uint8_t>& codec_header,
                         uint32_t width, uint32_t height, uint32_t fps, const MuxPullSample& next,
-                        const MuxTakeAudio& take_audio, VideoCodec codec, uint32_t last_sample_ticks,
+                        const MuxTakeTail& take_tail, VideoCodec codec, uint32_t last_sample_ticks,
                         MuxPicture picture) {
     const bool av1 = codec == VideoCodec::AV1;
     VideoEntry entry = av1 ? VideoEntry{"av01", "av1C", BuildAv1C(codec_header.data(), codec_header.size())}
@@ -934,14 +1133,19 @@ bool MuxWriteMp4Stream(const std::wstring& path, const std::vector<uint8_t>& cod
     add_delta(last_sample_ticks ? last_sample_ticks : 1);
     t.duration = total_ticks;
 
-    // Audio is taken only now, so a source still recording hands over everything it collected.
+    // Audio and markers are taken only now, so a source still recording hands over everything it
+    // collected.
     static const std::vector<MuxAudioTrack> kNoAudio;
-    const std::vector<MuxAudioTrack>* taken = take_audio ? take_audio() : &kNoAudio;
-    if (!taken || !AudioTracksFit(*taken)) {
+    MuxTail tail;
+    if (take_tail && !take_tail(tail)) {
         sink.Discard();
         return false;
     }
-    const std::vector<MuxAudioTrack>& audio_tracks = *taken;
+    const std::vector<MuxAudioTrack>& audio_tracks = tail.audio ? *tail.audio : kNoAudio;
+    if (!AudioTracksFit(audio_tracks)) {
+        sink.Discard();
+        return false;
+    }
 
     // N audio tracks, each written back to back
     // into the same mdat the video samples just filled. Every AAC frame is a fixed
@@ -964,6 +1168,30 @@ bool MuxWriteMp4Stream(const std::wstring& path, const std::vector<uint8_t>& cod
         }
         audio_t.deltas.push_back({static_cast<uint32_t>(track.frames.size()), kSamplesPerAacFrame});
         audio_t.duration = static_cast<uint64_t>(track.frames.size()) * kSamplesPerAacFrame;
+    }
+
+    // Chapter samples last (OBS writes them at the final flush): a 16-bit length, the UTF-8 title,
+    // the encd footer. Each lasts until the next; the last until the video ends.
+    const uint64_t video_ms = t.duration * 1000 / fps;
+    const std::vector<MuxChapter> chapters = FileChapters(tail.markers, video_ms);
+    TrackTiming chapter_t;
+    if (!chapters.empty()) {
+        chapter_t.timescale        = 1000;
+        chapter_t.duration         = video_ms;
+        chapter_t.mdat_data_offset = sink.Pos();
+        for (size_t i = 0; i < chapters.size(); ++i) {
+            const MuxChapter& c   = chapters[i];
+            const size_t      len = Utf8Prefix(c.title, UINT16_MAX);
+            const uint8_t     len_be[2] = {uint8_t(len >> 8), uint8_t(len)};
+            sink.Write(len_be, 2);
+            sink.Write(reinterpret_cast<const uint8_t*>(c.title.data()), len);
+            sink.Write(kChapterSampleFooter, sizeof(kChapterSampleFooter));
+            chapter_t.sample_sizes.push_back(static_cast<uint32_t>(2 + len + sizeof(kChapterSampleFooter)));
+            const uint64_t until = i + 1 < chapters.size() ? chapters[i + 1].ms : video_ms;
+            const uint32_t delta = static_cast<uint32_t>(until - c.ms);
+            if (!chapter_t.deltas.empty() && chapter_t.deltas.back().delta == delta) chapter_t.deltas.back().count++;
+            else chapter_t.deltas.push_back({1, delta});
+        }
     }
 
     const uint64_t mdat_end = sink.Pos();
@@ -996,7 +1224,8 @@ bool MuxWriteMp4Stream(const std::wstring& path, const std::vector<uint8_t>& cod
         p.skip_samples = track.skip_samples;
     }
     ByteWriter moov;
-    WriteMoov(moov, creation_time, width, height, entry, t, audio_moov_params);
+    WriteMoov(moov, creation_time, width, height, entry, t, audio_moov_params,
+              chapters.empty() ? nullptr : &chapter_t, chapters, tail.markers.json);
     sink.Write(moov.Data());
     return sink.Finish();
 }
@@ -1005,7 +1234,7 @@ bool MuxWriteMp4(const std::wstring& path, const std::vector<uint8_t>& codec_hea
                   uint32_t width, uint32_t height, uint32_t fps,
                   const std::vector<MuxVideoSample>& samples, const MuxReadSample& read,
                   const std::vector<MuxAudioTrack>& audio_tracks, VideoCodec codec,
-                  uint32_t last_sample_ticks, MuxPicture picture) {
+                  uint32_t last_sample_ticks, MuxPicture picture, const MuxMarkers& markers) {
     if (samples.empty() || !samples.front().is_keyframe)
         die("mux: MuxWriteMp4 called with no AUs, or a range not starting on a keyframe");
     if (!AudioTracksFit(audio_tracks)) return false;  // before any video is written
@@ -1017,19 +1246,24 @@ bool MuxWriteMp4(const std::wstring& path, const std::vector<uint8_t>& codec_hea
             sample = samples[i];
             return read(i++, bytes) ? MuxPull::kSample : MuxPull::kFail;
         },
-        [&] { return &audio_tracks; },
+        [&](MuxTail& tail) {
+            tail.audio   = &audio_tracks;
+            tail.markers = markers;
+            return true;
+        },
         codec, last_sample_ticks, picture);
 }
 
 bool MuxWriteMp4(const std::wstring& path, const std::vector<uint8_t>& codec_header,
                   uint32_t width, uint32_t height, uint32_t fps, const std::vector<MuxAu>& aus,
-                  const std::vector<MuxAudioTrack>& audio_tracks, VideoCodec codec, MuxPicture picture) {
+                  const std::vector<MuxAudioTrack>& audio_tracks, VideoCodec codec, MuxPicture picture,
+                  const MuxMarkers& markers) {
     std::vector<MuxVideoSample> samples;
     samples.reserve(aus.size());
     for (const MuxAu& au : aus) samples.push_back({au.is_keyframe, au.tick_index});
     return MuxWriteMp4(path, codec_header, width, height, fps, samples,
-                       [&](size_t i, std::vector<uint8_t>& out) { out = aus[i].annexb; return true; },
-                       audio_tracks, codec, 1, picture);
+                       MuxReadSample([&](size_t i, std::vector<uint8_t>& out) { out = aus[i].annexb; return true; }),
+                       audio_tracks, codec, 1, picture, markers);
 }
 
 }  // namespace ombra

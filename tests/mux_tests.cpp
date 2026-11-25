@@ -6,6 +6,7 @@
 #include <doctest/doctest.h>
 
 #include "support/h264_fixture.h"
+#include "support/media_probe.h"
 #include "support/test_env.h"
 
 #include "ombra/clip_file.h"
@@ -207,9 +208,10 @@ TEST_CASE("mux: a streamed write matches the list write and takes audio after th
             bytes  = aus[pulled++].annexb;
             return MuxPull::kSample;
         },
-        [&, tracks = std::vector<MuxAudioTrack>{track}] {
+        [&, tracks = std::vector<MuxAudioTrack>{track}](MuxTail& tail) {
             pulled_at_audio = pulled;
-            return &tracks;
+            tail.audio = &tracks;
+            return true;
         },
         VideoCodec::H264));
     CHECK(pulled_at_audio == aus.size());
@@ -270,7 +272,7 @@ TEST_CASE("mux: a streamed write that fails, or holds nothing, leaves no file") 
             bytes  = fx.aus[i++].annexb;
             return MuxPull::kSample;
         },
-        []() -> const std::vector<MuxAudioTrack>* { return nullptr; }, VideoCodec::H264));
+        [](MuxTail&) { return false; }, VideoCodec::H264));
     CHECK_FALSE(exists(no_audio));
 
     const std::wstring no_key = TestOutputPath(L"mux_stream_no_keyframe.mp4");
@@ -294,6 +296,62 @@ TEST_CASE("mux: equal ticks are a zero-duration sample, as before") {
     ClipInfo info;
     REQUIRE(ReadClipInfo(path, info));
     CHECK(info.duration_s == doctest::Approx(30.0 / fx.fps));
+}
+
+TEST_CASE("mux: markers become chapters and a metadata tag that ffprobe reads") {
+    const H264Fixture& fx = StandardFixture();
+    std::vector<MuxAu> aus;
+    for (uint64_t i = 0; i < 90; ++i) aus.push_back({fx.aus[i].annexb, fx.aus[i].idr, i});
+    const uint64_t video_ms = 90 * 1000 / fx.fps;
+    MuxAudioTrack track;
+    track.name = "Game";
+    track.asc  = {0x11, 0x90};
+    for (int k = 0; k < 10; ++k) track.frames.push_back({std::vector<uint8_t>(32, static_cast<uint8_t>(k))});
+
+    MuxMarkers markers;
+    // Out of order, one past the end (dropped), a UTF-8 title.
+    markers.chapters = {{video_ms / 2, "Death \xC2\xB7 Tool"}, {video_ms + 5, "Too late"}, {500, "Kill \xC2\xB7 Tool"}};
+    markers.json     = R"({"v":1,"markers":[{"type":"kill"}]})";
+    const std::wstring path = TestOutputPath(L"mux_chapters.mp4");
+    REQUIRE(MuxWriteMp4(path, fx.sps_pps, fx.width, fx.height, fx.fps, aus, {track}, VideoCodec::H264, {}, markers));
+
+    const ProbeInfo info = Probe(path);
+    REQUIRE_MESSAGE(info.ok, info.error);
+    REQUIRE(info.chapters.size() == 3);
+    CHECK(info.chapters[0].title == kStartChapter);  // nothing at 0, so the forced first chapter
+    CHECK(info.chapters[0].start_s == doctest::Approx(0.0));
+    CHECK(info.chapters[1].title == "Kill \xC2\xB7 Tool");
+    CHECK(info.chapters[1].start_s == doctest::Approx(0.5));
+    CHECK(info.chapters[1].end_s == doctest::Approx(static_cast<double>(video_ms / 2) / 1000.0));
+    CHECK(info.chapters[2].title == "Death \xC2\xB7 Tool");
+    CHECK(info.chapters[2].end_s == doctest::Approx(static_cast<double>(video_ms) / 1000.0));
+    REQUIRE(info.format_tags.count("markers") == 1);
+    CHECK(info.format_tags.at("markers") == markers.json);
+    // The chapter track isn't a playable stream: one video, one audio, the rest data.
+    CHECK(info.Of("video").size() == 1);
+    CHECK(info.Of("audio").size() == 1);
+
+    // Ombra's own reader still sees the same clip.
+    ClipInfo clip;
+    REQUIRE(ReadClipInfo(path, clip));
+    CHECK(clip.duration_s == doctest::Approx(90.0 / fx.fps));
+    CHECK(clip.audio_track_names == std::vector<std::string>{"Game"});
+
+    // A chapter at 0 is the first one; no markers writes neither track nor tag.
+    MuxMarkers at_zero;
+    at_zero.chapters = {{0, "Round start"}};
+    const std::wstring zero = TestOutputPath(L"mux_chapter_zero.mp4");
+    REQUIRE(MuxWriteMp4(zero, fx.sps_pps, fx.width, fx.height, fx.fps, aus, {}, VideoCodec::H264, {}, at_zero));
+    const ProbeInfo zero_info = Probe(zero);
+    REQUIRE(zero_info.chapters.size() == 1);
+    CHECK(zero_info.chapters[0].title == "Round start");
+    CHECK(DecodeErrors(zero).empty());  // the placeholder AAC above wouldn't decode, so checked here
+    const std::wstring none = TestOutputPath(L"mux_no_chapters.mp4");
+    REQUIRE(MuxWriteMp4(none, fx.sps_pps, fx.width, fx.height, fx.fps, aus));
+    const ProbeInfo none_info = Probe(none);
+    CHECK(none_info.chapters.empty());
+    CHECK(none_info.streams.size() == 1);
+    CHECK(none_info.format_tags.count("markers") == 0);
 }
 
 }  // namespace ombra::test

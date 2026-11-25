@@ -5,6 +5,7 @@
 #include "support/audio_analysis.h"
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -26,12 +27,19 @@ struct StreamInfo {
     std::string color_range, color_space, color_transfer, color_primaries;
 };
 
+struct ChapterInfo {
+    double      start_s = 0.0, end_s = 0.0;
+    std::string title;
+};
+
 struct ProbeInfo {
     bool                    ok = false;
     std::string             error;
     std::string             format_name;
     double                  duration_s = 0.0;
     std::vector<StreamInfo> streams;
+    std::vector<ChapterInfo> chapters;
+    std::map<std::string, std::string> format_tags;  // container metadata, freeform tags included
 
     std::vector<StreamInfo> Of(const std::string& codec_type) const;
 };

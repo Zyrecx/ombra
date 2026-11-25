@@ -65,7 +65,7 @@ std::vector<StreamInfo> ProbeInfo::Of(const std::string& codec_type) const {
 ProbeInfo Probe(const std::wstring& file) {
     ProbeInfo info;
     const ProcessResult r = RunProcess(Quote(FfprobePath()) +
-                                       L" -v error -show_streams -show_format -of json " + Quote(file));
+                                       L" -v error -show_streams -show_format -show_chapters -of json " + Quote(file));
     if (!r.launched || r.exit_code != 0) {
         info.error = "ffprobe failed: " + r.err;
         return info;
@@ -80,6 +80,17 @@ ProbeInfo Probe(const std::wstring& file) {
     if (const JsonValue* format = root.Find("format")) {
         info.format_name = Str(format->Find("format_name"));
         info.duration_s  = std::strtod(Str(format->Find("duration")).c_str(), nullptr);
+        if (const JsonValue* tags = format->Find("tags"); tags && tags->type == JsonValue::Type::Object)
+            for (const auto& [key, value] : tags->obj) info.format_tags[key] = Str(&value);
+    }
+    if (const JsonValue* chapters = root.Find("chapters"); chapters && chapters->type == JsonValue::Type::Array) {
+        for (const JsonValue& c : chapters->arr) {
+            ChapterInfo ci;
+            ci.start_s = std::strtod(Str(c.Find("start_time")).c_str(), nullptr);
+            ci.end_s   = std::strtod(Str(c.Find("end_time")).c_str(), nullptr);
+            if (const JsonValue* tags = c.Find("tags")) ci.title = Str(tags->Find("title"));
+            info.chapters.push_back(std::move(ci));
+        }
     }
     if (const JsonValue* streams = root.Find("streams"); streams && streams->type == JsonValue::Type::Array) {
         for (const JsonValue& s : streams->arr) {

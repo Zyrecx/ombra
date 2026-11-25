@@ -65,6 +65,21 @@ struct MuxAudioTrack {
     uint32_t                    skip_samples = 0;
 };
 
+// A named moment in the file, `ms` from its first frame (UTF-8 title).
+struct MuxChapter {
+    uint64_t    ms = 0;
+    std::string title;
+};
+
+// What marks the footage: chapters (a QuickTime chapter track plus Nero `chpl`, as ffmpeg writes
+// both) and `json`, stored as the freeform metadata tag "markers". A chapter at or past the end of
+// the video is dropped; a first chapter later than 0 gets kStartChapter before it.
+struct MuxMarkers {
+    std::vector<MuxChapter> chapters;  // any order
+    std::string             json;      // empty: no tag
+};
+inline constexpr const char* kStartChapter = "Start";
+
 // Writes a standard (non-fragmented) ISO/IEC 14496-12 MP4 file — ftyp + mdat + moov (full stts/
 // stss/stsc/stsz/stco sample tables, a video sample entry built from `codec_header` per `codec`,
 // plus one audio trak/esds per entry in `audio_tracks`) — to `path`. `samples` must be in
@@ -89,7 +104,7 @@ bool MuxWriteMp4(const std::wstring& path, const std::vector<uint8_t>& codec_hea
                   uint32_t width, uint32_t height, uint32_t fps,
                   const std::vector<MuxVideoSample>& samples, const MuxReadSample& read,
                   const std::vector<MuxAudioTrack>& audio_tracks, VideoCodec codec,
-                  uint32_t last_sample_ticks = 1, MuxPicture picture = {});
+                  uint32_t last_sample_ticks = 1, MuxPicture picture = {}, const MuxMarkers& markers = {});
 
 // What a streaming video source hands MuxWriteMp4Stream next.
 enum class MuxPull {
@@ -103,25 +118,31 @@ enum class MuxPull {
 // for footage that hasn't been encoded yet (an open clip).
 using MuxPullSample = std::function<MuxPull(MuxVideoSample& sample, std::vector<uint8_t>& bytes)>;
 
-// Called once, after the last video sample: the audio tracks to write behind the video, which must
-// stay alive until the mux returns. A source still collecting audio hands over all of it here.
-// Null aborts like kFail. Audio is held whole until then, which is fine for a clip (minutes of AAC
-// is a few MB); an hour-long recording would need interleaved chunks instead.
-using MuxTakeAudio = std::function<const std::vector<MuxAudioTrack>*()>;
+// What a source hands over after its last video sample. `audio` must stay alive until the mux
+// returns; null is no audio.
+struct MuxTail {
+    const std::vector<MuxAudioTrack>* audio = nullptr;
+    MuxMarkers                        markers;
+};
+
+// Called once, after the last video sample. A source still collecting audio or markers hands over
+// all of it here; false aborts like kFail. Audio is held whole until then, which is fine for a clip
+// (minutes of AAC is a few MB); an hour-long recording would need interleaved chunks instead.
+using MuxTakeTail = std::function<bool(MuxTail& tail)>;
 
 // MuxWriteMp4 over a source that doesn't know its samples up front. Holds only the sample tables
 // (4 bytes a frame, plus one per keyframe and per duration change); an empty stream, or one not
-// starting on a keyframe, fails. Null `take_audio`: video only.
+// starting on a keyframe, fails. Null `take_tail`: video only.
 bool MuxWriteMp4Stream(const std::wstring& path, const std::vector<uint8_t>& codec_header,
                         uint32_t width, uint32_t height, uint32_t fps, const MuxPullSample& next,
-                        const MuxTakeAudio& take_audio, VideoCodec codec,
+                        const MuxTakeTail& take_tail, VideoCodec codec,
                         uint32_t last_sample_ticks = 1, MuxPicture picture = {});
 
 // The same over AUs already in memory (tests).
 bool MuxWriteMp4(const std::wstring& path, const std::vector<uint8_t>& codec_header,
                   uint32_t width, uint32_t height, uint32_t fps, const std::vector<MuxAu>& aus,
                   const std::vector<MuxAudioTrack>& audio_tracks = {},
-                  VideoCodec codec = VideoCodec::H264, MuxPicture picture = {});
+                  VideoCodec codec = VideoCodec::H264, MuxPicture picture = {}, const MuxMarkers& markers = {});
 
 // ISO/IEC 14496-15 AVCDecoderConfigurationRecord built from Encoder::SequenceParams()'s Annex-B
 // SPS/PPS. Exported for mux_tests.cpp, which checks it against a real x264 fixture.

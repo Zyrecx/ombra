@@ -230,14 +230,15 @@ ClipSession::Result ClipSession::Run(const std::function<int64_t()>& now, const 
             }
         }
     };
-    const MuxTakeAudio take_audio = [&]() -> const std::vector<MuxAudioTrack>* {
+    const MuxTakeTail take_tail = [&](MuxTail& tail) {
         if (audio_) audio_tracks_ = ctx_->audio->FinishClip(*audio_, end_qpc_);
         audio_.reset();
         pin_.Unpin();  // the last AU is written: the mux's finalize must not hold back eviction
-        return &audio_tracks_;
+        tail.audio = &audio_tracks_;
+        return true;
     };
     const bool ok = MuxWriteMp4Stream(dest_.path, segment_->codec_header, segment_->width, segment_->height, fps_,
-                                      next, take_audio, segment_->codec, 1,
+                                      next, take_tail, segment_->codec, 1,
                                       {segment_->picture_width, segment_->picture_height});
     pin_.Unpin();
     audio_.reset();
