@@ -301,6 +301,8 @@ public:
     // one for a toast on the left of the screen).
     bool compact = false;
     bool trailing = true;
+    // The API app whose action this is, shown so a tool's save is never anonymous; empty for the user's own.
+    std::wstring app;
     void Draw(ID2D1DeviceContext* dc, const Theme& theme, float s) override;
 };
 

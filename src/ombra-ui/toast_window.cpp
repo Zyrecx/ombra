@@ -230,7 +230,15 @@ public:
         waits_   = std::move(waits);
         info_    = info_mapping;
         pending_ = waits_.size() == 5;
+        // The engine wrote the asking app's name before spawning this process: shown in every state.
+        if (info_) {
+            if (const void* view = MapViewOfFile(info_, FILE_MAP_READ, 0, 0, sizeof(ombra::SaveToastInfo))) {
+                app = ombra::ToastApp(*static_cast<const ombra::SaveToastInfo*>(view));
+                UnmapViewOfFile(view);
+            }
+        }
     }
+    std::wstring app;     // the API app whose action this is; empty for the user's own
     void SetCompact(bool compact) { compact_ = compact; }
 
 private:
@@ -448,6 +456,7 @@ void ToastWindow::DrawCard(float width, float height) {
     card.icon = info.icon;
     card.tone = info.tone;
     card.brand = info.brand;
+    card.app = app;
     card.compact = compact_;
     card.trailing = slide_from_right_;
     card.bounds = D2D1::RectF(0, 0, width, height);
@@ -796,15 +805,21 @@ int RunToast(const std::wstring& event, std::vector<HANDLE> save_waits, HANDLE s
 }
 
 int RunToastTest(const std::wstring& out_png_path, const std::wstring& event, bool compact, double seconds, bool alpha,
-                 float scale) {
+                 float scale, const std::wstring& app, uint32_t clips) {
     ToastInfo info{};
     if (!LookupToastInfo(event, &info)) {
         ombra::Log::Error("RunToastTest: unrecognized event \"%ls\"", event.c_str());
         return 1;
     }
-    if (event == L"save_ok" && seconds > 0) info.title = ombra::SavedToastTitle({1, static_cast<float>(seconds)});
+    if (event == L"save_ok" && (seconds > 0 || clips > 1)) {
+        ombra::SaveToastInfo saved;
+        saved.clips = clips;
+        saved.seconds = static_cast<float>(seconds);
+        info.title = ombra::SavedToastTitle(saved);
+    }
     ToastWindow toast;
     toast.info = info;
+    toast.app = app;
     toast.SetCompact(compact);
     const int w = static_cast<int>((kCardWidthDip + 2.0f * kTestMarginPx) * scale);
     const int h = static_cast<int>((kCardHeightDip + 2.0f * kTestMarginPx) * scale);

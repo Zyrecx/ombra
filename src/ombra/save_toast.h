@@ -7,13 +7,35 @@
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace ombra {
+
+// An API app name is 1-64 bytes of UTF-8 (pipe.cpp ValidAppName): at most 64 UTF-16 units.
+inline constexpr size_t kToastAppUnits = 64;
 
 struct SaveToastInfo {
     uint32_t clips = 0;     // clips written (one per monitor saved)
     float    seconds = 0;   // the longest clip's length; 0 = unknown
+    // The API app whose action this is, written before the toast starts so every state names it;
+    // empty for the user's own save. NUL-terminated; read it through ToastApp.
+    wchar_t  app[kToastAppUnits + 1] = {};
 };
+
+// Copies `name` in, cut to the buffer on a code-point boundary.
+inline void SetToastApp(SaveToastInfo& info, std::wstring_view name) {
+    size_t n = (std::min)(name.size(), kToastAppUnits);
+    if (n < name.size() && n > 0 && name[n - 1] >= 0xD800 && name[n - 1] <= 0xDBFF) --n;  // a split pair
+    std::copy_n(name.data(), n, info.app);
+    info.app[n] = L'\0';
+}
+
+// The name from a mapping another process wrote: bounded even if it isn't terminated.
+inline std::wstring ToastApp(const SaveToastInfo& info) {
+    size_t n = 0;
+    while (n < kToastAppUnits && info.app[n]) ++n;
+    return std::wstring(info.app, n);
+}
 
 // "30 s", "2 min", "1 min 30 s": rounded to the second.
 inline std::wstring FormatClipLength(double seconds) {

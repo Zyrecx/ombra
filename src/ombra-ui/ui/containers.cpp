@@ -1387,7 +1387,8 @@ void StatusStrip::Draw(ID2D1DeviceContext* dc, const Theme& t, float s) {
 
 // The icon in its tone on a soft disc of it; a save shows the
 // brand mark instead. Compact is a pill as wide as its content, against the
-// screen edge; a title too long for one line makes it the full card, wrapped.
+// screen edge; a title too long for one line makes it the full card, wrapped. An app's action
+// puts the app's name on a caption line above the title (in a pill too: it fits its height).
 void ToastCard::Draw(ID2D1DeviceContext* dc, const Theme& t, float s) {
     using namespace paint;
     const Paint p{dc, t, s};
@@ -1404,7 +1405,10 @@ void ToastCard::Draw(ID2D1DeviceContext* dc, const Theme& t, float s) {
         glyph = d;
         gap = z.space_sm() * s;
         role = TypeRole::Label;
-        const float w = lead + d + gap + p.TextW(title, role) + pad;
+        const float fixed = lead + d + gap + pad, title_w = p.TextW(title, role);
+        // A name only widens the pill up to the card's width; past that it ends in "...".
+        const float name_w = app.empty() ? 0.0f : (std::min)(p.TextW(app, TypeRole::Caption), r.right - r.left - fixed);
+        const float w = fixed + (std::max)(title_w, name_w);
         if (w <= r.right - r.left) {
             if (trailing) r.left = r.right - w;
             else r.right = r.left + w;
@@ -1444,6 +1448,20 @@ void ToastCard::Draw(ID2D1DeviceContext* dc, const Theme& t, float s) {
         DrawIcon(dc, t, icon, cx, cy, glyph * 0.6f, p.B(hue).Get());
     }
     const auto tr = D2D1::RectF(cx + glyph / 2 + gap, r.top, r.right - pad, r.bottom);
+    if (!app.empty()) {
+        // The asking app on a caption line above the title: where it came from, then what happened.
+        // A title too long for one line (a save that fell back to Videos) drops to Label over two.
+        const TextOpts trim{TextAlign::Leading, false, true};
+        const bool one_line = !wrap && p.TextW(title, role) <= tr.right - tr.left;
+        const TypeRole title_role = one_line ? role : TypeRole::Label;
+        const float th = LineHeight(title_role) * s * (one_line ? 1 : 2);
+        const float ah = LineHeight(TypeRole::Caption) * s, gap2 = z.space_xxs() * s;
+        const float top = cy - (ah + gap2 + th) / 2;
+        p.Text(app, TypeRole::Caption, D2D1::RectF(tr.left, top, tr.right, top + ah), c.text2, trim);
+        p.Text(title, title_role, D2D1::RectF(tr.left, top + ah + gap2, tr.right, top + ah + gap2 + th), c.text,
+               one_line ? trim : TextOpts{TextAlign::Leading, true, true, false});
+        return;
+    }
     // A title too long for one line (the CPU-encoder fallback) drops to Label and wraps to two.
     if (!wrap && p.TextW(title, role) <= tr.right - tr.left) p.Text(title, role, tr, c.text);
     else p.Text(title, TypeRole::Label, tr, c.text, {TextAlign::Leading, true, true});

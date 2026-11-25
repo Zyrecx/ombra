@@ -237,6 +237,32 @@ TEST_CASE("save: the toast's title names the clip's real length") {
     CHECK(SavedToastTitle({1, 0.0f}) == L"Clip saved");  // length unknown
 }
 
+TEST_CASE("save: the toast carries the asking app's name, bounded") {
+    SaveToastInfo info;
+    CHECK(ToastApp(info).empty());  // the user's own save
+    SetToastApp(info, L"Command line");
+    CHECK(ToastApp(info) == L"Command line");
+
+    // The longest hello name is 64 bytes of UTF-8: here 16 characters outside the BMP. Kept whole,
+    // and so is a name that fills the buffer exactly.
+    std::wstring astral;
+    for (int i = 0; i < 16; ++i) astral += L"\U0001F3AE";
+    SetToastApp(info, astral);
+    CHECK(ToastApp(info) == astral);
+    astral += astral;
+    REQUIRE(astral.size() == kToastAppUnits);
+    SetToastApp(info, astral);
+    CHECK(ToastApp(info) == astral);
+
+    // Longer than the buffer (no valid hello sends this): cut, never through a surrogate pair.
+    SetToastApp(info, L"x" + astral);
+    CHECK(ToastApp(info) == L"x" + astral.substr(0, kToastAppUnits - 2));
+
+    // A mapping without its terminator (another process wrote it) still reads in bounds.
+    std::fill(std::begin(info.app), std::end(info.app), L'a');
+    CHECK(ToastApp(info) == std::wstring(kToastAppUnits, L'a'));
+}
+
 TEST_CASE("save: replay skips busy monitors and reports incomplete instead of success") {
     SaveRig first(L"busy-first"), second(L"busy-second");
     first.ctx.save_in_flight = true;

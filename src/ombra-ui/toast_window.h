@@ -32,7 +32,9 @@ int RunToast(const std::wstring& event, std::vector<HANDLE> save_waits = {}, HAN
 // `compact`: ui.toast_style compact; `seconds` > 0 titles a save_ok as a clip of that length.
 // `alpha`: no test backdrop, the card on transparency (straight-alpha PNG) for compositing.
 // `scale`: the DPI scale to draw at (2 = 200%), so a zoomed-in demo shot stays sharp.
+// `app`: the API app whose action it is (empty: the user's own); `clips` > 1 titles several clips.
 int RunToastTest(const std::wstring& out_png_path, const std::wstring& event, bool compact = false,
-                 double seconds = 0, bool alpha = false, float scale = 1.0f);
+                 double seconds = 0, bool alpha = false, float scale = 1.0f,
+                 const std::wstring& app = {}, uint32_t clips = 1);
 
 }  // namespace ombra_ui

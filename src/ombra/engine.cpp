@@ -362,7 +362,9 @@ struct SaveToastSignal {
             summary.seconds = (std::max)(summary.seconds, static_cast<float>(m.seconds));
         }
         if (void* view = MapViewOfFile(info, FILE_MAP_WRITE, 0, 0, sizeof(SaveToastInfo))) {
-            *static_cast<SaveToastInfo*>(view) = summary;
+            auto* out = static_cast<SaveToastInfo*>(view);  // its app was written at the spawn
+            out->clips = summary.clips;
+            out->seconds = summary.seconds;
             UnmapViewOfFile(view);
         }
         // SetEvent orders the write above before the toast's wait returns.
@@ -372,7 +374,9 @@ struct SaveToastSignal {
     }
 };
 
-std::shared_ptr<SaveToastSignal> SpawnSaveToast() {
+// `app` names the app whose action this is (empty for the user's own): the toast shows it from the
+// start, pending included.
+std::shared_ptr<SaveToastSignal> SpawnSaveToast(const std::wstring& app) {
     SECURITY_ATTRIBUTES inheritable{sizeof(inheritable), nullptr, TRUE};
     auto sig = std::make_shared<SaveToastSignal>();
     sig->ok          = CreateEventW(&inheritable, TRUE, FALSE, nullptr);
@@ -386,6 +390,14 @@ std::shared_ptr<SaveToastSignal> SpawnSaveToast() {
         Log::Warn("SpawnSaveToast: handle setup failed (err=%lu)", GetLastError());
         return nullptr;
     }
+    if (!app.empty()) {
+        if (void* view = MapViewOfFile(sig->info, FILE_MAP_WRITE, 0, 0, sizeof(SaveToastInfo))) {
+            SetToastApp(*static_cast<SaveToastInfo*>(view), app);
+            UnmapViewOfFile(view);
+        } else {
+            Log::Warn("SpawnSaveToast: the app's name couldn't be written (err=%lu)", GetLastError());
+        }
+    }
     // The toast's argv: the five wait handles (in WaitForMultipleObjects order), then the info.
     std::wstring args = L"save --wait";
     for (HANDLE h : {sig->ok, sig->nothing_new, sig->failed, sig->engine, sig->elsewhere, sig->info})
@@ -395,10 +407,11 @@ std::shared_ptr<SaveToastSignal> SpawnSaveToast() {
 }
 
 // Both entry points use the same ring claims, timestamp, grouping and completion result.
-StartSaveFeedback ReplayFeedback(bool enabled) {
+// `app`: the API app asking (its hello name), empty for the user's own save.
+StartSaveFeedback ReplayFeedback(bool enabled, std::wstring app = {}) {
     if (!enabled) return {};
-    return []() -> SaveFeedback {
-        auto toast = SpawnSaveToast();
+    return [app = std::move(app)]() -> SaveFeedback {
+        auto toast = SpawnSaveToast(app);
         return [toast](const ReplaySaveResults& r) { if (toast) toast->Resolve(r); };
     };
 }
@@ -1362,7 +1375,8 @@ int RunEngine(int argc, wchar_t** argv) {
             return HandlePipeRequest(req, cfg, supervisor, controller, save_ctx, gpu_summary,
                                       tray.get(), &screenshot_ctx, &autotune_ctx, &pipelines,
                                       &raw_config, &memory_layout, &audio_control,
-                                      ReplayFeedback(true), surface, &app_clips, caller);
+                                      ReplayFeedback(true, caller ? WideFromUtf8(caller->app) : std::wstring{}),
+                                      surface, &app_clips, caller);
         };
         pipe_server = std::make_unique<PipeServer>(
             [handle](const JsonValue& req) { return handle(req, PipeSurface::kInternal, nullptr); },

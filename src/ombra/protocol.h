@@ -20,7 +20,7 @@
 //   <- {"type":"hello","id":1,"ok":false,"error":"unsupported_version","message":"...",
 //       "min":1,"max":1}
 //
-//   "app" (required, 1-64 characters, no control characters) names the caller. Every request
+//   "app" (required, 1-64 bytes of UTF-8, no control characters) names the caller. Every request
 //   after the hello needs an "id"; a line over kMaxApiMessageBytes closes the connection, as does
 //   no hello within kHelloTimeoutMs. At most kMaxApiClients apps connect at once.
 //   Error codes: bad_message, bad_request, unsupported_version, not_allowed, too_many_connections,
