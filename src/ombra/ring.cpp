@@ -272,6 +272,12 @@ bool Ring::Released() const {
     return released_;
 }
 
+std::optional<Ring::Span> Ring::HeldSpan() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (descriptors_.empty()) return std::nullopt;
+    return Span{descriptors_.front().qpc, descriptors_.back().qpc};
+}
+
 size_t Ring::CommittedBytes() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return arena_ ? arena_->CommittedBytes() : 0;

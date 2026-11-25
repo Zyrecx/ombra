@@ -19,6 +19,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -293,6 +294,9 @@ public:
     bool Release();
     // Released and not appended to since.
     bool Released() const;
+    // qpc of the oldest and newest frame held; nullopt while empty.
+    struct Span { int64_t oldest_qpc; int64_t newest_qpc; };
+    std::optional<Span> HeldSpan() const;
     // Private memory the arena holds now; 0 when released.
     size_t CommittedBytes() const;
     // A commit was refused: the ring holds what CommittedBytes() fits. Reset by a release or Init.

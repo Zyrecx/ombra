@@ -45,6 +45,17 @@
 //                      footage extends that clip to now + after ("extended", same id, one file);
 //                      its title and before are ignored.
 //
+//   marker          -> {"label"?:string (at most 64 characters; control characters dropped),
+//                       "kind"?:"generic"|"kill"|"death"|"assist"|"win"|"loss"|"objective"|
+//                       "highlight"|"round_start"|"round_end" (default generic),
+//                       "at"?:number (seconds from now, -buffer_seconds to 0; default 0),
+//                       "important"?:bool}
+//                   <- {"marker":number (this engine run's id)}
+//                      Every clip covering the moment gets it: an MP4 chapter ("label · app",
+//                      or the type's name without a label) and an entry in the file's "markers"
+//                      tag. Errors: bad_request, not_allowed (as clip), replay_off (no footage
+//                      covers the moment), too_many_markers (256 per app in the footage held).
+//
 // Internal (ombra-ui only): {"type":"hello","id":1,"v":kProtocolVersion}, accepted only from
 // ombra-ui.exe beside the engine (PipeServer's internal gate), so apps can't reach set_config,
 // shutdown or update_install around the public API. Exact version match: both ship together.

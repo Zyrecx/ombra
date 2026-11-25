@@ -430,6 +430,7 @@ struct PipeRequest {
     JsonValue OnGetStatus();
     JsonValue OnApiStatus();
     JsonValue OnApiClip();
+    JsonValue OnApiMarker();
     JsonValue OnSaveNow();
     JsonValue OnScreenshot();
     JsonValue OnSetArmed();
@@ -917,6 +918,90 @@ JsonValue PipeRequest::OnApiClip() {
             : outcome == SaveOutcome::kBusy     ? "the buffer is being resized; try again in a moment"
                                                 : "one or more monitors couldn't write the clip; see the log"));
     }
+    return resp;
+}
+
+// The public API's marker (protocol.h, marker.h): only Ombra's command line until consent exists.
+JsonValue PipeRequest::OnApiMarker() {
+    const int64_t now = QpcNow();  // "at" counts back from the moment asked, as clip's event does
+    if (!caller || !caller->command_line)
+        return ApiError("not_allowed", "apps need the user's approval to place markers, which this Ombra "
+                                       "can't ask for yet; only Ombra's command line can");
+    const double buffer_seconds = ReadLiveConfig(cfg, [](const Config& c) { return c.buffer_seconds; });
+    std::string label;
+    if (const JsonValue* label_v = req.Find("label")) {
+        const std::optional<std::string> clean =
+            label_v->type == JsonValue::Type::String ? CleanMarkerLabel(label_v->str) : std::nullopt;
+        if (!clean)
+            return ApiError("bad_request", "\"label\" must be text of at most " +
+                                               std::to_string(kMarkerLabelMaxChars) + " characters");
+        label = *clean;
+    }
+    MarkerType type = MarkerType::kGeneric;
+    if (const JsonValue* type_v = req.Find("kind")) {
+        const std::optional<MarkerType> parsed =
+            type_v->type == JsonValue::Type::String ? ParseMarkerType(type_v->str) : std::nullopt;
+        if (!parsed) {
+            std::string names;
+            for (int t = 0; t <= static_cast<int>(MarkerType::kRoundEnd); ++t)
+                names += std::string(names.empty() ? "" : ", ") + MarkerTypeName(static_cast<MarkerType>(t));
+            return ApiError("bad_request", "\"kind\" must be one of: " + names);
+        }
+        type = *parsed;
+    }
+    const JsonValue* important_v = req.Find("important");
+    if (important_v && important_v->type != JsonValue::Type::Bool)
+        return ApiError("bad_request", "\"important\" must be true or false");
+    double at = 0;
+    if (const JsonValue* at_v = req.Find("at")) {
+        if (at_v->type != JsonValue::Type::Number || !std::isfinite(at_v->num) || at_v->num > 0 ||
+            at_v->num < -buffer_seconds)
+            return ApiError("bad_request", "\"at\" is seconds before now: a number from -buffer_seconds to 0");
+        at = at_v->num;
+    }
+    if (!save_ctx.markers) return ApiError("not_allowed", "this engine takes no markers");
+    if (!controller.UserEnabled())
+        return ApiError("replay_off", "Instant Replay is off: there is no footage to mark");
+
+    const int64_t qpc = now + std::llround(at * static_cast<double>(QpcFrequency()));
+    std::vector<SaveContext*> contexts;
+    if (all_pipelines) {
+        for (const auto& pipeline : *all_pipelines) contexts.push_back(&pipeline->save_ctx);
+    } else {
+        contexts.push_back(&save_ctx);
+    }
+    // Footage must cover the moment, or no file could ever show the marker: held frames reaching
+    // it, give or take a frame. A recording ring also covers the next 2 s (its newest frame trails
+    // "now" by the encode, and the frames after it are on their way); a stalled one doesn't. A
+    // disarmed ring keeps stale footage until it's freed; that covers only its own past.
+    bool    covered = false;
+    int64_t oldest  = (std::numeric_limits<int64_t>::max)();
+    for (SaveContext* ctx : contexts) {
+        const std::optional<Ring::Span> span = ctx->ring ? ctx->ring->HeldSpan() : std::nullopt;
+        if (!span) continue;
+        oldest = (std::min)(oldest, span->oldest_qpc);
+        const int64_t frame = QpcFrequency() / (std::max)(1u, ctx->fps.load());
+        const bool    live  = ctx->supervisor && ctx->supervisor->Armed();
+        covered |= span->oldest_qpc <= qpc && qpc <= span->newest_qpc + (live ? 2 * QpcFrequency() : frame);
+    }
+    if (!covered) return ApiError("replay_off", "no footage covers that moment: Ombra isn't recording");
+
+    Marker marker;
+    marker.qpc       = qpc;
+    marker.type      = type;
+    marker.label     = std::move(label);
+    marker.owner     = caller->app;
+    marker.important = important_v && important_v->b;
+    // Every script using the command line is one app ("--as" only names it), so they share a cap.
+    const MarkerTimeline::AddResult added = save_ctx.markers->Add(marker, "command line", oldest);
+    if (added != MarkerTimeline::AddResult::kAdded)
+        return ApiError("too_many_markers",
+                        (added == MarkerTimeline::AddResult::kAppFull
+                             ? "this app has " + std::to_string(kMarkersPerApp) + " markers"
+                             : "apps have " + std::to_string(kMarkersTotal) + " markers") +
+                            " in the footage Ombra holds; older ones free up as the buffer moves on");
+    JsonValue resp = JsonValue::MakeObject();
+    resp.Set("marker", JsonValue::MakeNum(static_cast<double>(marker.id)));
     return resp;
 }
 
@@ -1524,6 +1609,7 @@ constexpr PipeCommand kPipeCommands[] = {
 constexpr PipeCommand kApiCommands[] = {
     {"status", true, &PipeRequest::OnApiStatus},
     {"clip",   false, &PipeRequest::OnApiClip},  // not the pipe's lock: a rebuild would delay the event
+    {"marker", false, &PipeRequest::OnApiMarker},  // likewise: it marks the moment asked
 };
 
 }  // namespace

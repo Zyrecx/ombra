@@ -19,6 +19,7 @@
 #include "ombra/ring.h"
 #include "ombra/save.h"
 #include "ombra/supervisor.h"
+#include "ombra/util.h"
 #include "support/test_env.h"
 
 #include <string>
@@ -38,6 +39,7 @@ public:
         save_ctx.ring       = &ring;
         save_ctx.supervisor = &supervisor;
         save_ctx.controller = &controller;
+        save_ctx.markers    = &markers;
     }
 
     JsonValue Request(const std::string& type, JsonValue fields = JsonValue::MakeObject()) {
@@ -65,6 +67,7 @@ public:
     Ring               ring;
     PipelineSupervisor supervisor;
     BufferController   controller;
+    MarkerTimeline     markers;
     SaveContext        save_ctx;
     AppClips           app_clips;
 };
@@ -288,6 +291,72 @@ TEST_CASE("engine pipe api: clip checks its fields, Instant Replay and the foota
     off.Set("armed", JsonValue::MakeBool(false));
     REQUIRE(IsBool(rig.Request("set_armed", off).Find("ok"), true));
     CHECK(ErrorOf(clip()) == "replay_off");
+}
+
+TEST_CASE("engine pipe api: marker checks its fields, the footage and the per-app cap") {
+    HandlerRig rig;
+    CHECK(ErrorOf(rig.ApiRequest("marker")) == "not_allowed");  // no caller
+    PipeCaller cli;
+    cli.app          = "Script";
+    cli.command_line = true;
+    const auto marker = [&](JsonValue fields = JsonValue::MakeObject()) {
+        return rig.ApiRequest("marker", std::move(fields), &cli);
+    };
+    const auto with = [](const char* key, JsonValue value) {
+        JsonValue fields = JsonValue::MakeObject();
+        fields.Set(key, std::move(value));
+        return fields;
+    };
+    const auto at = [&](double seconds) { return with("at", JsonValue::MakeNum(seconds)); };
+    CHECK(ErrorOf(marker(with("label", JsonValue::MakeNum(1)))) == "bad_request");
+    CHECK(ErrorOf(marker(with("label", JsonValue::MakeStr(std::string(65, 'a'))))) == "bad_request");
+    CHECK(ErrorOf(marker(with("kind", JsonValue::MakeStr("Kill")))) == "bad_request");
+    CHECK(ErrorOf(marker(with("kind", JsonValue::MakeNum(1)))) == "bad_request");
+    CHECK(ErrorOf(marker(with("important", JsonValue::MakeStr("yes")))) == "bad_request");
+    CHECK(ErrorOf(marker(at(1))) == "bad_request");
+    CHECK(ErrorOf(marker(at(-rig.cfg.buffer_seconds - 1))) == "bad_request");
+    CHECK(ErrorOf(marker(at(-std::numeric_limits<double>::infinity()))) == "bad_request");
+
+    // Instant Replay off: nothing to mark, whatever the ring holds.
+    JsonValue off = JsonValue::MakeObject();
+    off.Set("armed", JsonValue::MakeBool(false));
+    REQUIRE(IsBool(rig.Request("set_armed", off).Find("ok"), true));
+    CHECK(ErrorOf(marker()) == "replay_off");
+    JsonValue on = JsonValue::MakeObject();
+    on.Set("armed", JsonValue::MakeBool(true));
+    REQUIRE(IsBool(rig.Request("set_armed", on).Find("ok"), true));
+    CHECK(ErrorOf(marker()) == "replay_off");  // an empty ring
+
+    // A disarmed ring holding a second of footage from 2 s ago covers that second only.
+    const int64_t freq = QpcFrequency(), now = QpcNow();
+    const uint8_t au[64] = {};
+    for (uint64_t i = 0; i < 60; ++i)
+        rig.ring.Append(au, sizeof(au), now - 2 * freq + static_cast<int64_t>(i) * freq / 60, i, i % 30 == 0);
+    rig.supervisor.SetArmed(false);  // the user switch on, but nothing recording (game mode, no game)
+    CHECK(ErrorOf(marker()) == "replay_off");      // now: the ring stopped a second ago
+    CHECK(ErrorOf(marker(at(-3))) == "replay_off");  // before its oldest frame
+    JsonValue past = at(-1.5);
+    past.Set("label", JsonValue::MakeStr("  Ace\n"));
+    past.Set("kind", JsonValue::MakeStr("kill"));
+    past.Set("important", JsonValue::MakeBool(true));
+    const JsonValue placed = marker(std::move(past));
+    CHECK(ErrorOf(placed) == "");
+    REQUIRE(placed.Find("marker"));
+    const std::vector<Marker> held = rig.markers.Between(0, (std::numeric_limits<int64_t>::max)());
+    REQUIRE(held.size() == 1);
+    CHECK(held[0].id == static_cast<uint64_t>(placed.Find("marker")->num));
+    CHECK(held[0].label == "Ace");
+    CHECK(held[0].type == MarkerType::kKill);
+    CHECK(held[0].owner == "Script");
+    CHECK(held[0].important);
+
+    // Recording: now is covered, though the newest frame trails it.
+    rig.supervisor.SetArmed(true);
+    CHECK(ErrorOf(marker()) == "");
+    // Every command-line script is one app: its 257th marker in the held footage is refused.
+    for (size_t i = 2; i < kMarkersPerApp; ++i) REQUIRE(ErrorOf(marker()) == "");
+    CHECK(ErrorOf(marker()) == "too_many_markers");
+    rig.supervisor.SetArmed(false);
 }
 
 TEST_CASE("engine pipe: set_config accepts a valid key and rejects a bad value and an unknown key") {

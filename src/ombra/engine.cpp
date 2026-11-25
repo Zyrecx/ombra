@@ -694,6 +694,7 @@ int RunEngine(int argc, wchar_t** argv) {
         PruneThumbs();
     }
     MemoryLayout memory_layout;  // declared before pipe_server so it outlives the handler reading it
+    MarkerTimeline markers;      // before what holds it: app_clips, the pipelines' saves
     AppClips     app_clips;      // the API's clips, likewise
     std::unique_ptr<PipeServer> pipe_server;
     LogRssStage("process start");
@@ -929,6 +930,7 @@ int RunEngine(int argc, wchar_t** argv) {
 
         mp.save_ctx.ring             = &mp.ring;
         mp.save_ctx.audio            = &audio_hub;
+        mp.save_ctx.markers          = &markers;
         mp.save_ctx.buffer_seconds   = buffer_seconds;
         // Every pipeline gets the same literal out_path — harmless for resident mode, where this
         // is always the sentinel "out\ombra.mp4" that makes DoSave take the templated

@@ -109,7 +109,7 @@ MuxMarkers MarkersForFile(const std::vector<Marker>& markers, const FileClock& c
         out.chapters.push_back({*ms, MarkerChapterTitle(m)});
         JsonValue item = JsonValue::MakeObject();
         item.Set("ms", JsonValue::MakeNum(static_cast<double>(*ms)));
-        item.Set("type", JsonValue::MakeStr(MarkerTypeName(m.type)));
+        item.Set("kind", JsonValue::MakeStr(MarkerTypeName(m.type)));
         if (!m.label.empty()) item.Set("label", JsonValue::MakeStr(m.label));
         if (!m.owner.empty()) item.Set("app", JsonValue::MakeStr(m.owner));
         if (m.important) item.Set("important", JsonValue::MakeBool(true));
@@ -148,7 +148,8 @@ MarkerTimeline::AddResult MarkerTimeline::Add(Marker& marker, const std::string&
 
     const auto mine = std::count_if(entries_.begin(), entries_.end(),
                                     [&](const Entry& e) { return e.app_key == app_key; });
-    if (static_cast<size_t>(mine) >= kMarkersPerApp || entries_.size() >= kMarkersTotal) return AddResult::kTooMany;
+    if (static_cast<size_t>(mine) >= kMarkersPerApp) return AddResult::kAppFull;
+    if (entries_.size() >= kMarkersTotal) return AddResult::kFull;
     marker.id = next_id_++;
     // `at` puts a marker in the past, so keep the list in qpc order.
     auto at = std::upper_bound(entries_.begin(), entries_.end(), marker.qpc,

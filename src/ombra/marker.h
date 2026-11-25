@@ -66,7 +66,7 @@ private:
 };
 
 // The markers a file gets: chapters, and the tag's JSON
-// ({"v":1,"markers":[{"ms","type","label","app","important"}]}). Markers off the file are left out.
+// ({"v":1,"markers":[{"ms","kind","label","app","important"}]}). Markers off the file are left out.
 MuxMarkers MarkersForFile(const std::vector<Marker>& markers, const FileClock& clock);
 
 // Every marker on the engine's timeline. Keeps a marker while it's within the buffer's reach or a
@@ -89,7 +89,7 @@ public:
         uint64_t        id_ = 0;
     };
 
-    enum class AddResult { kAdded, kTooMany };
+    enum class AddResult { kAdded, kAppFull /* its kMarkersPerApp */, kFull /* kMarkersTotal */ };
     // `app_key` counts against kMarkersPerApp (every command-line script is one app, whatever it
     // calls itself). `oldest_qpc`: the buffer's reach now; anything older and unheld is dropped first.
     AddResult Add(Marker& marker, const std::string& app_key, int64_t oldest_qpc);

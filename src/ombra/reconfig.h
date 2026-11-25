@@ -5,6 +5,7 @@
 #include "ombra/controller.h"
 #include "ombra/audio_tracks.h"
 #include "ombra/json.h"
+#include "ombra/marker.h"
 #include "ombra/ring.h"
 #include "ombra/supervisor.h"
 #include "ombra/tray.h"
@@ -75,6 +76,8 @@ struct SaveContext {
     // other footage or a busy refusal.
     std::atomic<bool>    save_in_flight{false};
     std::atomic<int>     save_count{0};
+    // The engine's one marker timeline, shared by every pipeline; null: no markers.
+    MarkerTimeline*      markers = nullptr;
 
     // Tools' clips open on this pipeline (clip.h), under clip_mutex. A buffer reallocation refuses
     // while any is open and sets clips_blocked meanwhile, so none opens between its check and the

@@ -67,7 +67,7 @@ TEST_CASE("marker: 256 per app within the held footage, then too many") {
         REQUIRE(timeline.Add(m, "a", 0) == MarkerTimeline::AddResult::kAdded);
     }
     Marker over = At(5000);
-    CHECK(timeline.Add(over, "a", 0) == MarkerTimeline::AddResult::kTooMany);
+    CHECK(timeline.Add(over, "a", 0) == MarkerTimeline::AddResult::kAppFull);
     // Another app has its own allowance.
     Marker other = At(5000);
     CHECK(timeline.Add(other, "b", 0) == MarkerTimeline::AddResult::kAdded);
@@ -160,7 +160,7 @@ TEST_CASE("marker: a file's markers become chapters and the tag's JSON") {
     REQUIRE(list->arr.size() == 2);
     const JsonValue& first = list->arr[0];
     CHECK(first.Find("ms")->num == 2000);
-    CHECK(first.Find("type")->str == "kill");
+    CHECK(first.Find("kind")->str == "kill");
     CHECK(first.Find("label")->str == "Ace");
     CHECK(first.Find("app")->str == "Tool");
     CHECK(first.Find("important")->b);
