@@ -245,13 +245,52 @@ private:
     }
 };
 
-void WriteJsonString(std::ostream& os, const std::string& s) {
+void WriteHex4(std::ostream& os, uint32_t unit) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    os << "\\u" << kHex[(unit >> 12) & 0xF] << kHex[(unit >> 8) & 0xF] << kHex[(unit >> 4) & 0xF]
+       << kHex[unit & 0xF];
+}
+
+// The code point of the UTF-8 sequence at s[i], advancing i past it; U+FFFD for a malformed one
+// (one byte consumed), so ASCII output never carries a raw byte.
+uint32_t NextCodePoint(const std::string& s, size_t& i) {
+    const auto byte = [&](size_t k) { return static_cast<uint8_t>(s[k]); };
+    const uint8_t lead = byte(i);
+    const int     len  = lead < 0xC2 ? 0 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : lead < 0xF5 ? 4 : 0;
+    if (len == 0 || i + len > s.size()) { ++i; return 0xFFFD; }
+    uint32_t cp = lead & (0xFF >> (len + 1));
+    for (int k = 1; k < len; ++k) {
+        if ((byte(i + k) & 0xC0) != 0x80) { ++i; return 0xFFFD; }
+        cp = (cp << 6) | (byte(i + k) & 0x3F);
+    }
+    const bool overlong = (len == 3 && cp < 0x800) || (len == 4 && cp < 0x10000);
+    if (overlong || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) { ++i; return 0xFFFD; }
+    i += len;
+    return cp;
+}
+
+// `ascii`: every non-ASCII character as \uXXXX (a surrogate pair above U+FFFF), so the text reads
+// the same in any code page.
+void WriteJsonString(std::ostream& os, const std::string& s, bool ascii = false) {
     os << '"';
-    for (char c : s) {
+    for (size_t i = 0; i < s.size();) {
+        const char c = s[i];
+        if (ascii && static_cast<uint8_t>(c) >= 0x80) {
+            const uint32_t cp = NextCodePoint(s, i);
+            if (cp < 0x10000) {
+                WriteHex4(os, cp);
+            } else {
+                WriteHex4(os, 0xD800 + ((cp - 0x10000) >> 10));
+                WriteHex4(os, 0xDC00 + ((cp - 0x10000) & 0x3FF));
+            }
+            continue;
+        }
+        ++i;
         if (c == '"' || c == '\\') os << '\\' << c;
         else if (c == '\n') os << "\\n";
         else if (c == '\r') os << "\\r";
         else if (c == '\t') os << "\\t";
+        else if (static_cast<uint8_t>(c) < 0x20) WriteHex4(os, static_cast<uint8_t>(c));  // JSON forbids them raw
         else os << c;
     }
     os << '"';
@@ -315,17 +354,17 @@ namespace {
 // boundaries). Kept as a separate function rather than an indent==-1 sentinel on WriteJson: the
 // two have different enough shapes (no pad(), no trailing newline-per-entry) that sharing the
 // body would need more branches than writing it twice plainly.
-void WriteJsonCompactTo(std::ostream& os, const JsonValue& v) {
+void WriteJsonCompactTo(std::ostream& os, const JsonValue& v, bool ascii) {
     switch (v.type) {
         case JsonValue::Type::Null:   os << "null"; return;
         case JsonValue::Type::Bool:   os << (v.b ? "true" : "false"); return;
         case JsonValue::Type::Number: WriteJsonNumber(os, v.num); return;
-        case JsonValue::Type::String: WriteJsonString(os, v.str); return;
+        case JsonValue::Type::String: WriteJsonString(os, v.str, ascii); return;
         case JsonValue::Type::Array: {
             os << "[";
             for (size_t i = 0; i < v.arr.size(); ++i) {
                 if (i) os << ",";
-                WriteJsonCompactTo(os, v.arr[i]);
+                WriteJsonCompactTo(os, v.arr[i], ascii);
             }
             os << "]";
             return;
@@ -334,8 +373,9 @@ void WriteJsonCompactTo(std::ostream& os, const JsonValue& v) {
             os << "{";
             for (size_t i = 0; i < v.obj.size(); ++i) {
                 if (i) os << ",";
-                os << '"' << v.obj[i].first << "\":";
-                WriteJsonCompactTo(os, v.obj[i].second);
+                WriteJsonString(os, v.obj[i].first, ascii);
+                os << ':';
+                WriteJsonCompactTo(os, v.obj[i].second, ascii);
             }
             os << "}";
             return;
@@ -347,7 +387,13 @@ void WriteJsonCompactTo(std::ostream& os, const JsonValue& v) {
 
 std::string WriteJsonCompact(const JsonValue& v) {
     std::ostringstream os;
-    WriteJsonCompactTo(os, v);
+    WriteJsonCompactTo(os, v, false);
+    return os.str();
+}
+
+std::string WriteJsonCompactAscii(const JsonValue& v) {
+    std::ostringstream os;
+    WriteJsonCompactTo(os, v, true);
     return os.str();
 }
 

@@ -123,4 +123,23 @@ TEST_CASE("json: JsonValue::Set overwrites in place, Find returns nullptr for a 
     CHECK(obj.Find("z") == nullptr);
 }
 
+// The command line's --json: readable in any console code page, so every byte is ASCII; control
+// characters are escaped in both writers (a raw one is invalid JSON).
+TEST_CASE("json: the ASCII writer escapes non-ASCII and control characters, and reads back the same") {
+    JsonValue v = JsonValue::MakeObject();
+    v.Set("caf\xC3\xA9", JsonValue::MakeStr("\xF0\x9F\x98\x80 \x01 \xE2\x82\xAC"));  // key é; 😀, U+0001, €
+    const std::string ascii = WriteJsonCompactAscii(v);
+    // Not raw strings: MSVC expands \u inside them too.
+    CHECK(ascii == "{\"caf\\u00e9\":\"\\ud83d\\ude00 \\u0001 \\u20ac\"}");
+    CHECK(WriteJsonCompact(v) == "{\"caf\xC3\xA9\":\"\xF0\x9F\x98\x80 \\u0001 \xE2\x82\xAC\"}");
+    JsonValue back;
+    REQUIRE_NOTHROW(back = ParseJson(ascii));
+    CHECK(JsonEqual(back, v));
+
+    // Malformed UTF-8 can't round-trip: each bad byte becomes U+FFFD, the rest survives.
+    JsonValue bad = JsonValue::MakeObject();
+    bad.Set("s", JsonValue::MakeStr("a\xFFz\xC3"));
+    CHECK(WriteJsonCompactAscii(bad) == "{\"s\":\"a\\ufffdz\\ufffd\"}");
+}
+
 }  // namespace ombra::test

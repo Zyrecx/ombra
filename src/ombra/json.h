@@ -45,6 +45,9 @@ void WriteJson(std::ostream& os, const JsonValue& v, int indent = 0);
 // Single-line, no whitespace, no embedded newline — required framing for pipe.cpp's
 // newline-delimited protocol (a pretty-printed value would be mistaken for multiple messages).
 std::string WriteJsonCompact(const JsonValue& v);
+// The same, with every non-ASCII character escaped (\uXXXX): reads the same in any code page,
+// which is what the command line prints for scripts.
+std::string WriteJsonCompactAscii(const JsonValue& v);
 
 // Deep equality; object keys compare regardless of order.
 bool JsonEquals(const JsonValue& a, const JsonValue& b);
