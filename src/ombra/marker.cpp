@@ -87,7 +87,9 @@ void FileClock::Add(int64_t qpc, uint64_t tick) {
 }
 
 std::optional<uint64_t> FileClock::MsAt(int64_t qpc) const {
-    if (anchors_.empty() || qpc < anchors_.front().qpc || qpc > last_qpc_ + qpc_freq_ / fps_) return std::nullopt;
+    if (anchors_.empty() || qpc < anchors_.front().qpc ||
+        qpc > last_qpc_ + static_cast<int64_t>(kMarkerTrailSeconds * static_cast<double>(qpc_freq_)))
+        return std::nullopt;
     auto next = std::upper_bound(anchors_.begin(), anchors_.end(), qpc,
                                  [](int64_t q, const Anchor& a) { return q < a.qpc; });
     const Anchor& a = *(next - 1);

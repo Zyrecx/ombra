@@ -708,6 +708,53 @@ TEST_CASE("save: a clip plays at its footage's frame rate, not the one configure
     CHECK(frames.last_pts_s - frames.first_pts_s == doctest::Approx(double(frames.count - 1) / fx.fps).epsilon(0.01));
 }
 
+TEST_CASE("save: markers in the window become chapters and the markers tag, placed on the file's clock") {
+    MarkerTimeline timeline;
+    SaveRig rig(L"markers");
+    rig.ctx.markers = &timeline;
+    rig.FeedVideo(0, 240);  // 0..4 s; the 3 s window starts on the keyframe at 1 s
+    auto place = [&](double at_s, MarkerType type, const char* label) {
+        Marker m;
+        m.qpc   = rig.timeline.At(at_s);
+        m.type  = type;
+        m.label = label;
+        m.owner = "Tool";
+        REQUIRE(timeline.Add(m, "command line", rig.timeline.At(0)) == MarkerTimeline::AddResult::kAdded);
+    };
+    place(0.5, MarkerType::kDeath, "");     // before the file: left out
+    place(2.0, MarkerType::kKill, "Ace");
+    place(4.0, MarkerType::kWin, "");       // the moment of the save, past the last frame: on it
+    place(4.5, MarkerType::kGeneric, "");  // after the save: left out
+
+    REQUIRE(rig.Save(4.0));
+    const ProbeInfo info = Probe(rig.SavedPath());
+    REQUIRE_MESSAGE(info.ok, info.error);
+    const double last_frame_s = 179.0 / StandardFixture().fps;  // the file's 180th frame
+    REQUIRE(info.chapters.size() == 3);
+    CHECK(info.chapters[0].title == kStartChapter);
+    CHECK(info.chapters[1].title == "Ace \xC2\xB7 Tool");
+    CHECK(info.chapters[1].start_s == doctest::Approx(1.0).epsilon(0.002));
+    CHECK(info.chapters[2].title == "Win \xC2\xB7 Tool");
+    CHECK(info.chapters[2].start_s == doctest::Approx(last_frame_s).epsilon(0.002));
+    REQUIRE(info.format_tags.count("markers") == 1);
+    const std::string& tag = info.format_tags.at("markers");
+    CHECK(tag.find(R"("kind":"kill")") != std::string::npos);
+    CHECK(tag.find(R"("label":"Ace")") != std::string::npos);
+    CHECK(tag.find(R"("kind":"death")") == std::string::npos);
+    CHECK(tag.find(R"("kind":"generic")") == std::string::npos);
+
+    // The footage stopped at 4 s (capture paused). Saved at 7 s: a marker half a second past the
+    // last frame still lands on it, one 2.5 s past it isn't this file's.
+    place(6.5, MarkerType::kLoss, "");
+    rig.ctx.buffer_seconds = 5.0;
+    REQUIRE(rig.Save(7.0));
+    const ProbeInfo late = Probe(rig.SavedPath());
+    REQUIRE_MESSAGE(late.ok, late.error);
+    REQUIRE(late.format_tags.count("markers") == 1);
+    CHECK(late.format_tags.at("markers").find(R"("kind":"generic")") != std::string::npos);
+    CHECK(late.format_tags.at("markers").find(R"("kind":"loss")") == std::string::npos);
+}
+
 TEST_CASE("save: frames the pacer dropped keep their time, so video stays as long as its audio") {
     SaveRig rig(L"dropped-ticks");
     const size_t game = rig.AddSource("Game", "game");

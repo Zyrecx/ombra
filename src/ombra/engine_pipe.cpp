@@ -971,7 +971,7 @@ JsonValue PipeRequest::OnApiMarker() {
         contexts.push_back(&save_ctx);
     }
     // Footage must cover the moment, or no file could ever show the marker: held frames reaching
-    // it, give or take a frame. A recording ring also covers the next 2 s (its newest frame trails
+    // it, give or take a frame. A recording ring also covers kMarkerTrailSeconds more (its newest frame trails
     // "now" by the encode, and the frames after it are on their way); a stalled one doesn't. A
     // disarmed ring keeps stale footage until it's freed; that covers only its own past.
     bool    covered = false;
@@ -982,7 +982,7 @@ JsonValue PipeRequest::OnApiMarker() {
         oldest = (std::min)(oldest, span->oldest_qpc);
         const int64_t frame = QpcFrequency() / (std::max)(1u, ctx->fps.load());
         const bool    live  = ctx->supervisor && ctx->supervisor->Armed();
-        covered |= span->oldest_qpc <= qpc && qpc <= span->newest_qpc + (live ? 2 * QpcFrequency() : frame);
+        covered |= span->oldest_qpc <= qpc && qpc <= span->newest_qpc + (live ? static_cast<int64_t>(kMarkerTrailSeconds * double(QpcFrequency())) : frame);
     }
     if (!covered) return ApiError("replay_off", "no footage covers that moment: Ombra isn't recording");
 

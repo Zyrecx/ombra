@@ -128,6 +128,9 @@ SaveOutcome DoSaveImpl(SaveContext* ctx, int64_t t_end, const std::wstring* grou
     if (timing) timing->clip_seconds = static_cast<double>(ticks) / fps;
 
     const int64_t video_floor_qpc = descriptors.front().qpc;
+    // The pin keeps the ring's reach, not the timeline's: a marker added during the disk checks
+    // below prunes by the reach of every ring, so hold ours until they're collected.
+    MarkerTimeline::Hold marker_hold = ctx->markers ? ctx->markers->HoldFrom(video_floor_qpc) : MarkerTimeline::Hold{};
 
     // Finished AAC frames from the hub (audio_tracks.h), trimmed to this window. Starts at the
     // first video frame so audio and video share time zero.
@@ -151,8 +154,10 @@ SaveOutcome DoSaveImpl(SaveContext* ctx, int64_t t_end, const std::wstring* grou
     size_t   save_bytes     = 0;
     uint32_t save_keyframes = 0;
     std::vector<MuxVideoSample> samples(descriptors.size());
+    FileClock clock(qpc_freq, fps);
     for (size_t i = 0; i < descriptors.size(); ++i) {
         samples[i] = {descriptors[i].is_keyframe, descriptors[i].index};
+        clock.Add(descriptors[i].qpc, descriptors[i].index);
         save_bytes += descriptors[i].length;
         if (descriptors[i].is_keyframe) ++save_keyframes;
     }
@@ -185,9 +190,12 @@ SaveOutcome DoSaveImpl(SaveContext* ctx, int64_t t_end, const std::wstring* grou
     // `segment` came from the ring at Pin() time — see the comment where it is read.
     const auto mux_started = std::chrono::steady_clock::now();
     if (timing) timing->codec = VideoCodecName(segment->codec);
+    // Taken while the pin still holds the window's footage, so the timeline still has its markers.
+    const MuxMarkers markers =
+        ctx->markers ? MarkersForFile(ctx->markers->Between(video_floor_qpc, t_end), clock) : MuxMarkers{};
     const bool ok = MuxWriteMp4(path, segment->codec_header, segment->width, segment->height, fps,
                                 samples, read, audio_tracks, segment->codec, 1,
-                                {segment->picture_width, segment->picture_height});
+                                {segment->picture_width, segment->picture_height}, markers);
     const auto mux_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - mux_started).count();
     // Only a written clip cuts the next one short: after a failure (a full disk) the footage is still

@@ -77,6 +77,9 @@ std::shared_ptr<ClipSession> ClipSession::Open(SaveContext* ctx, const ClipReque
     s->pin_ = ctx->ring->PinCovering(request.event_qpc - SecondsToQpc(before, s->qpc_freq_), s->until_,
                                      TruncateFloor::kIgnore);
     if (s->pin_.empty()) return refuse(SaveOutcome::kNothingNew);
+    // Held from the pin on, before the disk checks: a marker added meanwhile mustn't prune ours.
+    s->first_qpc_ = s->pin_.front().qpc;
+    if (ctx->markers) s->marker_hold_ = ctx->markers->HoldFrom(s->first_qpc_);
 
     s->segment_ = s->pin_.Params();
     if (!s->segment_) {
@@ -105,6 +108,7 @@ std::shared_ptr<ClipSession> ClipSession::Open(SaveContext* ctx, const ClipReque
     if (s->dest_.path.empty()) return refuse(SaveOutcome::kFailed);
 
     s->queue_       = s->pin_.Aus();
+    s->clock_.emplace(s->qpc_freq_, s->fps_);
     s->newest_qpc_  = s->queue_.back().qpc;
     s->first_index_ = s->queue_.front().index;
     s->written_qpc_.store(s->queue_.front().qpc, std::memory_order_relaxed);
@@ -203,6 +207,7 @@ ClipSession::Pull ClipSession::Step(int64_t now, MuxVideoSample& sample, std::ve
         return Pull::kFail;
     }
     sample   = {d.is_keyframe, d.index};
+    clock_->Add(d.qpc, d.index);
     written_ = d;
     written_qpc_.store(d.qpc, std::memory_order_relaxed);
     if (audio_ && now - last_drain_ >= SecondsToQpc(kClipDrainSeconds, qpc_freq_)) {
@@ -235,6 +240,8 @@ ClipSession::Result ClipSession::Run(const std::function<int64_t()>& now, const 
         audio_.reset();
         pin_.Unpin();  // the last AU is written: the mux's finalize must not hold back eviction
         tail.audio = &audio_tracks_;
+        if (ctx_->markers) tail.markers = MarkersForFile(ctx_->markers->Between(first_qpc_, end_qpc_), *clock_);
+        marker_hold_.Reset();
         return true;
     };
     const bool ok = MuxWriteMp4Stream(dest_.path, segment_->codec_header, segment_->width, segment_->height, fps_,
@@ -242,6 +249,7 @@ ClipSession::Result ClipSession::Run(const std::function<int64_t()>& now, const 
                                       {segment_->picture_width, segment_->picture_height});
     pin_.Unpin();
     audio_.reset();
+    marker_hold_.Reset();
     {
         std::lock_guard<std::mutex> lock(mutex_);
         ended_     = true;  // a mux that failed mid-stream never reached EndLocked

@@ -132,9 +132,12 @@ TEST_CASE("marker: a file clock lands on the frame at or before the moment") {
     CHECK(clock.MsAt(base + 2 * kFreq) == 59u * 1000 / kFps);
     CHECK(clock.MsAt(resume) == 1000u);
     CHECK(clock.MsAt(resume + 59 * kFrame) == 119u * 1000 / kFps);
-    // Up to a frame past the last frame still lands on it; later is off the file.
-    CHECK(clock.MsAt(resume + 60 * kFrame) == 119u * 1000 / kFps);
-    CHECK(!clock.MsAt(resume + 61 * kFrame));
+    // Up to kMarkerTrailSeconds past the last frame lands on it (a "now" marker runs ahead of the
+    // encode); later, the file's footage had stopped and the marker isn't its.
+    const int64_t last = resume + 59 * kFrame;
+    CHECK(clock.MsAt(last + kFrame) == 119u * 1000 / kFps);
+    CHECK(clock.MsAt(last + kFreq * 19 / 10) == 119u * 1000 / kFps);
+    CHECK(!clock.MsAt(last + kFreq * 21 / 10));
 }
 
 TEST_CASE("marker: a file's markers become chapters and the tag's JSON") {

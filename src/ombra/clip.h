@@ -103,6 +103,10 @@ private:
     ClipDestination                      dest_;
     std::optional<AudioTrackHub::ClipAudio> audio_;
     std::vector<MuxAudioTrack>           audio_tracks_;
+    // Markers from the first frame on: the timeline keeps them though the ring lets that footage go.
+    MarkerTimeline::Hold                 marker_hold_;
+    std::optional<FileClock>             clock_;  // Run's thread, once open
+    int64_t                              first_qpc_ = 0;
 
     std::mutex mutex_;  // until_, ended_, stop_, end_, end_qpc_; held across Follow and the end decision
     int64_t    until_   = 0;

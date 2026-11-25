@@ -149,6 +149,48 @@ TEST_CASE("clip: tails live footage from before the event to after it") {
     CHECK_FALSE(ClipsOpen(&rig.ctx));
 }
 
+TEST_CASE("clip: markers from its first frame to its end become chapters, though the ring let them go") {
+    MarkerTimeline timeline;
+    ClipRig rig(L"markers");
+    rig.ctx.markers = &timeline;
+    auto place = [&](double at_s, const char* label, double oldest_s) {
+        Marker m;
+        m.qpc   = rig.At(at_s);
+        m.label = label;
+        REQUIRE(timeline.Add(m, "command line", rig.At(oldest_s)) == MarkerTimeline::AddResult::kAdded);
+    };
+    rig.FeedTo(180);
+    rig.now_s = 3.0;
+    place(2.0, "Before", 0.0);
+    auto clip = rig.Open(3.0, 2.0, 2.0);  // ticks 60..299: 1 s .. 5 s
+    REQUIRE(clip);
+    bool placed = false;
+    const auto r = rig.Run(*clip, 10.0, [&](double now) {
+        if (!placed && now >= 4.5) {
+            // The buffer's reach has moved past 2 s: only the clip's hold keeps that marker.
+            place(4.5, "During", 4.5);
+            place(5.5, "After", 4.5);
+            placed = true;
+        }
+    });
+    REQUIRE(placed);
+    REQUIRE(r.outcome == SaveOutcome::kSaved);
+    const ProbeInfo info = Probe(r.path);
+    REQUIRE_MESSAGE(info.ok, info.error);
+    REQUIRE(info.chapters.size() == 3);
+    CHECK(info.chapters[0].title == kStartChapter);
+    CHECK(info.chapters[1].title == "Before");
+    CHECK(info.chapters[1].start_s == doctest::Approx(1.0).epsilon(0.002));
+    CHECK(info.chapters[2].title == "During");
+    CHECK(info.chapters[2].start_s == doctest::Approx(3.5).epsilon(0.002));
+    REQUIRE(info.format_tags.count("markers") == 1);
+    CHECK(info.format_tags.at("markers").find("After") == std::string::npos);
+    clip->Close();
+    // The hold went with the clip: the next Add prunes what the buffer no longer reaches.
+    place(9.0, "Later", 5.0);
+    CHECK(timeline.Size() == 2);  // "After" and "Later"
+}
+
 TEST_CASE("clip: Extend moves the end out while the clip records") {
     ClipRig rig(L"extend");
     rig.FeedTo(180);

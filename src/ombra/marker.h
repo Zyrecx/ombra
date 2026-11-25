@@ -25,6 +25,9 @@ std::optional<MarkerType> ParseMarkerType(std::string_view name);
 inline constexpr size_t kMarkerLabelMaxChars = 64;  // code points, not bytes
 inline constexpr size_t kMarkersPerApp       = 256;  // within the footage still held
 inline constexpr size_t kMarkersTotal        = 16 * kMarkersPerApp;  // 16 apps at once
+// How far past a file's last frame a marker still lands on it. The pipe's `marker` takes "now" as
+// covered by a live ring up to the same distance past its newest frame.
+inline constexpr double kMarkerTrailSeconds = 2.0;
 
 // A label as stored: control characters dropped, spaces trimmed. Nullopt when it isn't valid
 // UTF-8 or runs past kMarkerLabelMaxChars.
@@ -47,10 +50,12 @@ std::string MarkerChapterTitle(const Marker& marker);
 // (a pause, a jump), so it costs a few entries, not one per frame.
 class FileClock {
 public:
-    FileClock(int64_t qpc_freq, uint32_t fps) : qpc_freq_(qpc_freq), fps_(fps) {}
+    FileClock(int64_t qpc_freq, uint32_t fps) : qpc_freq_(qpc_freq), fps_(fps ? fps : 1) {}
     void Add(int64_t qpc, uint64_t tick);
-    // Milliseconds into the file of the frame at or before `qpc` (within 1 ms); nullopt before the first frame
-    // or more than a frame past the last.
+    // Milliseconds into the file of the frame at or before `qpc` (within 1 ms); nullopt before the
+    // first frame or more than kMarkerTrailSeconds past the last. Up to that, past the last frame
+    // is the last frame: a marker placed "now" runs ahead of the newest frame by the encode, while
+    // a file whose footage stopped long before (a paused or disarmed ring) mustn't collect it.
     std::optional<uint64_t> MsAt(int64_t qpc) const;
     bool Empty() const { return anchors_.empty(); }
 
@@ -66,7 +71,8 @@ private:
 };
 
 // The markers a file gets: chapters, and the tag's JSON
-// ({"v":1,"markers":[{"ms","kind","label","app","important"}]}). Markers off the file are left out.
+// ({"v":1,"markers":[{"ms","kind","label","app","important"}]}). `markers`: those from the file's
+// first frame to its end (MarkerTimeline::Between); any before the first frame are left out.
 MuxMarkers MarkersForFile(const std::vector<Marker>& markers, const FileClock& clock);
 
 // Every marker on the engine's timeline. Keeps a marker while it's within the buffer's reach or a
