@@ -1,5 +1,6 @@
-// Markers: named moments on the engine's timeline, not in any one file. Every clip covering a
-// marker's moment gets it, as an MP4 chapter plus an entry in the file's "markers" tag (mux.h).
+// Markers: named moments on the engine's timeline, not in any one file. A file covering a marker's
+// moment gets it, as an MP4 chapter plus an entry in the file's "markers" tag (mux.h), when the
+// marker is Ombra's or the user's, or the file is the user's or the marking app's own.
 #pragma once
 
 #include "ombra/mux.h"
@@ -26,6 +27,12 @@ const char* MarkerTypeName(MarkerType type);
 std::optional<MarkerType> ParseMarkerType(std::string_view name);
 inline bool IsOmbraMarkerType(MarkerType type) { return type > kLastAppType; }
 inline constexpr const char* kOmbraMarkerOwner = "Ombra";
+// The timeline keys (MarkerTimeline::Add) whose markers every file gets: Ombra's own, and the user's
+// (the bookmark hotkey, not built). Any other key is an app's, kept to its own files and the user's.
+// Both start with ':', which no app's key does (the engine names those, never from what an app
+// calls itself), so no app passes as either.
+inline constexpr const char* kOmbraMarkerKey = ":ombra";
+inline constexpr const char* kUserMarkerKey  = ":user";
 
 inline constexpr size_t kMarkerLabelMaxChars = 64;  // code points, not bytes
 inline constexpr size_t kMarkersPerApp       = 256;  // within the footage still held
@@ -119,10 +126,10 @@ public:
     // Markers with `from_qpc` <= qpc <= `to_qpc`, oldest first.
     std::vector<Marker> Between(int64_t from_qpc, int64_t to_qpc) const;
     // What a file from `first_qpc` (its first frame) to `end_qpc` may get: Between, reaching back
-    // the lead. MarkersForFile decides which land.
-    std::vector<Marker> ForFile(int64_t first_qpc, int64_t end_qpc) const {
-        return Between(first_qpc - lead_qpc_, end_qpc);
-    }
+    // the lead, kept to the markers its owner may see. `file_app`: the key (as Add's) of the app
+    // whose file it is, which gets its own and Ombra's and the user's; empty: the user's file, which
+    // gets every app's too. MarkersForFile decides which land.
+    std::vector<Marker> ForFile(int64_t first_qpc, int64_t end_qpc, std::string_view file_app = {}) const;
     int64_t LeadQpc() const { return lead_qpc_; }
     size_t Size() const;
 

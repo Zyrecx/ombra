@@ -77,6 +77,7 @@ std::shared_ptr<ClipSession> ClipSession::Open(SaveContext* ctx, const ClipReque
 
     const double before = std::clamp(request.before_seconds, 0.0, ctx->buffer_seconds);
     const double after  = std::clamp(request.after_seconds, 0.0, kClipMaxAfterSeconds);
+    s->marker_app_ = request.marker_app;
     s->until_   = request.event_qpc + SecondsToQpc(after, s->qpc_freq_);
     s->cap_qpc_ = request.event_qpc + SecondsToQpc(kClipMaxAfterSeconds, s->qpc_freq_);
     // Nothing before Instant Replay's floor (ApplyReplayReach): from the first keyframe after it.
@@ -251,7 +252,7 @@ ClipSession::Result ClipSession::Run(const std::function<int64_t()>& now, const 
         audio_.reset();
         pin_.Unpin();  // the last AU is written: the mux's finalize must not hold back eviction
         tail.audio = &audio_tracks_;
-        if (ctx_->markers) tail.markers = MarkersForFile(ctx_->markers->ForFile(first_qpc_, end_qpc_), *clock_);
+        if (ctx_->markers) tail.markers = MarkersForFile(ctx_->markers->ForFile(first_qpc_, end_qpc_, marker_app_), *clock_);
         marker_hold_.Reset();
         return true;
     };
@@ -392,6 +393,8 @@ std::optional<AppClips::Started> AppClips::Request(const std::string& app,
     const uint64_t id = next_id_++;
     ClipRequest numbered = request;
     numbered.id = id;
+    // Its markers are this app's (every command-line script is one app): not another app's.
+    numbered.marker_app = app;
     auto group = StartClip(contexts, numbered, feedback ? feedback() : SaveFeedback{});
     Started started{id, false, group->Done()};
     if (started.done.wait_for(std::chrono::seconds(0)) != std::future_status::ready)

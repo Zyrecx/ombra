@@ -134,6 +134,7 @@ std::shared_ptr<RecordingSession> RecordingSession::Open(SaveContext* ctx, const
     }
 
     s->app_   = request.app;
+    s->marker_app_ = request.marker_app;
     s->title_ = NarrowUtf8(request.title);
     const double rate = ctx->bitrate_kbps.load() * 1000.0 / 8.0;
     s->dest_ = PickClipPath(ctx, request.start_qpc, group_folder_name, request.title,
@@ -253,7 +254,7 @@ void RecordingSession::KeepRecordMarkers(Part& part) {
     if (durable == part.durable_ticks) return;  // no fragment synced since the last look
     part.durable_ticks = durable;
     const int64_t end_qpc = part.first_qpc + static_cast<int64_t>(durable) * qpc_freq_ / part.fps;
-    part.record.SetMarkers(MarkersForFile(ctx_->markers->ForFile(part.first_qpc, end_qpc), *part.clock));
+    part.record.SetMarkers(MarkersForFile(ctx_->markers->ForFile(part.first_qpc, end_qpc, marker_app_), *part.clock));
 }
 
 void RecordingSession::TakeAudio(Part& part) {
@@ -288,7 +289,7 @@ bool RecordingSession::FinishPart(Part& part) {
     }
     part.pin.Unpin();  // the last AU is written: the index mustn't hold back eviction
     MuxMarkers markers;
-    if (ctx_->markers) markers = MarkersForFile(ctx_->markers->ForFile(part.first_qpc, end_qpc), *part.clock);
+    if (ctx_->markers) markers = MarkersForFile(ctx_->markers->ForFile(part.first_qpc, end_qpc, marker_app_), *part.clock);
     part.marker_hold.Reset();
     const bool finished = part.writer.Finish(1, markers);
     // Plain: no record needed. Not: the next engine start makes it plain from its fragments.
@@ -651,6 +652,7 @@ Recordings::Started Recordings::Start(const std::string& app, const std::vector<
         entries_.erase(it);  // an ended one the app never stopped: this start replaces it
     }
     request.id = next_id_++;
+    request.marker_app = app;  // its markers are this app's, not another app's
     std::shared_ptr<void> hold = arm ? arm(request) : nullptr;
     auto group = StartRecording(contexts, request, std::move(hold), std::move(feedback));
     entries_.push_back({app, request.id, group});

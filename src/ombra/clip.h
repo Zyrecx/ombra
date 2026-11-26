@@ -38,6 +38,7 @@ struct ClipRequest {
     double       after_seconds  = 0;  // capped at kClipMaxAfterSeconds
     std::wstring title;               // optional; sanitized into the file (or group folder) name
     std::string  app;                 // who asked, as its toast names it: the "clip saved" marker's label
+    std::string  marker_app;          // its app's marker key (MarkerTimeline::ForFile); empty: the user's
     uint64_t     id = 0;              // AppClips' id for it, told in the clip_saved event; 0: none
 };
 
@@ -109,6 +110,7 @@ private:
     MarkerTimeline::Hold                 marker_hold_;
     std::optional<FileClock>             clock_;  // Run's thread, once open
     int64_t                              first_qpc_ = 0;
+    std::string                          marker_app_;  // ClipRequest's
 
     std::mutex mutex_;  // until_, ended_, stop_, end_, end_qpc_; held across Follow and the end decision
     int64_t    until_   = 0;

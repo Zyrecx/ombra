@@ -444,10 +444,20 @@ TEST_CASE("clip: an app's request during its own open clip extends it; another a
     rig.ctx.events      = &events;
     rig.ctx.out_path    = L"out\\ombra.mp4";  // templated, so two clips get two names
     rig.ctx.output_root = NarrowUtf8(TestOutputPath(L"clip\\apps"));
+    MarkerTimeline timeline;
+    rig.ctx.markers = &timeline;
     rig.EndNow(3.0);
     rig.FeedTo(180);
     ClipRequest req;
     req.event_qpc      = QpcNow();
+    // Each app's marker goes only into its own clip.
+    for (const char* app : {"tool", "other"}) {
+        Marker m;
+        m.qpc   = req.event_qpc - QpcFrequency();
+        m.label = std::string(app) + " mark";
+        m.owner = app;
+        REQUIRE(timeline.Add(m, app, 0) == MarkerTimeline::AddResult::kAdded);
+    }
     req.before_seconds = 2.0;
     req.after_seconds  = 30.0;
     AppClips clips;
@@ -479,6 +489,14 @@ TEST_CASE("clip: an app's request during its own open clip extends it; another a
     REQUIRE(b.outcome == SaveOutcome::kSaved);
     CHECK(a.monitors.at(0).path != b.monitors.at(0).path);
     CHECK(ProbeVideoFrames(a.monitors.at(0).path).count >= 120);
+    const auto marks = [](const std::wstring& path) {
+        std::string out;
+        for (const auto& c : Probe(path).chapters)
+            if (c.title.find(" mark") != std::string::npos) out += c.title.substr(0, c.title.find(" mark"));
+        return out;
+    };
+    CHECK(marks(a.monitors.at(0).path) == "tool");
+    CHECK(marks(b.monitors.at(0).path) == "other");
 
     // One clip_saved per file, naming its app and id; only Ombra's own client hears the path.
     std::vector<std::string> lines, own_lines;

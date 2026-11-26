@@ -218,6 +218,27 @@ TEST_CASE("marker: the timeline keeps and hands a file the lead before its first
     CHECK(timeline.ForFile(1000, 2000).size() == 1);
 }
 
+TEST_CASE("marker: an app's markers go only into its own files and the user's") {
+    MarkerTimeline timeline;
+    Marker ombra = At(100, MarkerType::kGameStart);
+    Marker user  = At(200);
+    Marker a     = At(300, MarkerType::kKill);
+    Marker b     = At(400, MarkerType::kDeath);
+    REQUIRE(timeline.Add(ombra, kOmbraMarkerKey, 0) == MarkerTimeline::AddResult::kAdded);
+    REQUIRE(timeline.Add(user, kUserMarkerKey, 0) == MarkerTimeline::AddResult::kAdded);
+    REQUIRE(timeline.Add(a, "a", 0) == MarkerTimeline::AddResult::kAdded);
+    REQUIRE(timeline.Add(b, "b", 0) == MarkerTimeline::AddResult::kAdded);
+    const auto ids = [&](std::string_view file_app) {
+        std::vector<uint64_t> out;
+        for (const Marker& m : timeline.ForFile(0, 1000, file_app)) out.push_back(m.id);
+        return out;
+    };
+    CHECK(ids("a") == std::vector<uint64_t>{ombra.id, user.id, a.id});
+    CHECK(ids("b") == std::vector<uint64_t>{ombra.id, user.id, b.id});
+    CHECK(ids("c") == std::vector<uint64_t>{ombra.id, user.id});
+    CHECK(ids({}) == std::vector<uint64_t>{ombra.id, user.id, a.id, b.id});  // the user's file
+}
+
 TEST_CASE("marker: game sessions become start and end markers, debounced") {
     MarkerTimeline timeline;
     GameMarkers games(timeline, kFreq);

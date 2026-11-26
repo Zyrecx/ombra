@@ -58,6 +58,7 @@ struct RecordRequest {
     int64_t      floor_qpc      = 0;  // nothing before it, whatever `before` says (0: no floor)
     std::wstring title;               // optional; sanitized into the file (or group folder) name
     std::string  app;                 // who asked, as its toast names it
+    std::string  marker_app;          // its app's marker key (MarkerTimeline::ForFile); empty: the user's
     uint64_t     id = 0;              // its Recordings id
 };
 
@@ -136,6 +137,7 @@ private:
     std::vector<std::wstring>          paths_;
     std::string     app_;  // RecordRequest's, for the crash record
     std::string     title_;
+    std::string     marker_app_;  // RecordRequest's
     std::vector<OpenRecording> kept_records_;  // of parts whose Finish failed: the next start's
     double          written_seconds_ = 0;  // finished parts
 

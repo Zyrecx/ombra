@@ -199,6 +199,19 @@ std::vector<Marker> MarkerTimeline::Between(int64_t from_qpc, int64_t to_qpc) co
     return out;
 }
 
+std::vector<Marker> MarkerTimeline::ForFile(int64_t first_qpc, int64_t end_qpc, std::string_view file_app) const {
+    const int64_t from_qpc = first_qpc - lead_qpc_;
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<Marker> out;
+    for (const Entry& e : entries_) {
+        if (e.marker.qpc < from_qpc || e.marker.qpc > end_qpc) continue;
+        const bool everyones = e.app_key == kOmbraMarkerKey || e.app_key == kUserMarkerKey;
+        if (!file_app.empty() && !everyones && e.app_key != file_app) continue;  // another app's
+        out.push_back(e.marker);
+    }
+    return out;
+}
+
 bool MarkerTimeline::Remove(uint64_t id) {
     std::lock_guard<std::mutex> lock(mutex_);
     return std::erase_if(entries_, [&](const Entry& e) { return e.marker.id == id; }) > 0;
@@ -217,7 +230,7 @@ uint64_t GameMarkers::Place(MarkerType type, int64_t qpc, int64_t oldest_qpc) {
     m.type  = type;
     m.label = game_;
     m.owner = kOmbraMarkerOwner;
-    return timeline_.Add(m, kOmbraMarkerOwner, oldest_qpc) == MarkerTimeline::AddResult::kAdded ? m.id : 0;
+    return timeline_.Add(m, kOmbraMarkerKey, oldest_qpc) == MarkerTimeline::AddResult::kAdded ? m.id : 0;
 }
 
 void GameMarkers::End(int64_t qpc, int64_t oldest_qpc) {

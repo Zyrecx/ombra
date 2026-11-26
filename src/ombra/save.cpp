@@ -197,6 +197,7 @@ SaveOutcome DoSaveImpl(SaveContext* ctx, int64_t t_end, const std::wstring* grou
     const auto mux_started = std::chrono::steady_clock::now();
     if (timing) timing->codec = VideoCodecName(segment->codec);
     // Taken while the pin still holds the window's footage, so the timeline still has its markers.
+    // A replay save is the user's: every app's markers.
     const MuxMarkers markers =
         ctx->markers ? MarkersForFile(ctx->markers->ForFile(video_floor_qpc, t_end), clock) : MuxMarkers{};
     const bool ok = MuxWriteMp4(path, segment->codec_header, segment->width, segment->height, fps,
@@ -543,7 +544,7 @@ void PlaceClipSavedMarker(const std::vector<SaveContext*>& contexts, int64_t qpc
     m.type  = MarkerType::kClipSaved;
     m.label = app;
     m.owner = kOmbraMarkerOwner;
-    if (contexts.front()->markers->Add(m, kOmbraMarkerOwner, MarkerReachAt(contexts, qpc).oldest_qpc) !=
+    if (contexts.front()->markers->Add(m, kOmbraMarkerKey, MarkerReachAt(contexts, qpc).oldest_qpc) !=
         MarkerTimeline::AddResult::kAdded)
         Log::Info("markers: no room for Ombra's clip-saved marker");
 }
