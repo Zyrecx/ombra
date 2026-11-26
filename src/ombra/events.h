@@ -22,7 +22,8 @@ namespace ombra {
 
 // The events this engine raises, in the order `subscribe` lists them.
 inline constexpr const char* kEventNames[] = {"replay", "buffering", "game_start", "game_end",
-                                              "clip_saved", "exiting"};
+                                              "clip_saved", "recording_started", "recording_stopped",
+                                              "exiting"};
 // A connection this far behind is dropped (it catches up with `status` when it comes back).
 inline constexpr size_t kMaxQueuedEvents = 64;
 

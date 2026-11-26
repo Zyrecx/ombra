@@ -17,7 +17,10 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <future>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -59,7 +62,7 @@ struct RecordRequest {
 
 // Why a recording ended.
 enum class RecordEnd {
-    kStopped,      // Stop(): asked for, its connection closed, or the engine is exiting
+    kStopped,      // StopAt(): asked for, its connection closed, or the engine is exiting
     kDiskLow,      // the disk can't take kRecordDiskReserveSeconds more
     kWriteFailed,  // a write failed: the file keeps what was written
     kNoFootage,    // nothing to record within kRecordStartSeconds
@@ -77,8 +80,11 @@ public:
     RecordingSession(const RecordingSession&) = delete;
     RecordingSession& operator=(const RecordingSession&) = delete;
 
-    // Ends the recording with the footage taken so far; Run still finishes the file.
-    void Stop() { stop_.store(true, std::memory_order_release); }
+    // Ends the recording at `at_qpc` (the moment the stop was asked for): Run still writes the footage
+    // from before it, the `before` it hasn't caught up on included and up to half a second of what
+    // the encoder hasn't delivered yet, then finishes the file.
+    // A later call never moves the end later.
+    void StopAt(int64_t at_qpc);
     // Seconds written so far, every part together.
     double Seconds() const { return seconds_.load(std::memory_order_relaxed); }
 
@@ -127,9 +133,90 @@ private:
     std::vector<std::wstring>          paths_;
     double          written_seconds_ = 0;  // finished parts
 
-    std::atomic<bool>   stop_{false};
+    std::atomic<int64_t> stop_qpc_{(std::numeric_limits<int64_t>::max)()};  // max: not stopped
     std::atomic<double> seconds_{0};
     bool listed_ = false;  // in ctx_->open_recordings
+};
+
+// Every monitor's end of one recording, in input order. A monitor that refused at Open has that
+// outcome (kBusy, kFailed) and no paths.
+struct RecordingResults {
+    // kSaved: every monitor that opened wrote its files; kNothingNew: none had footage; kFailed:
+    // a monitor refused or a write failed (what was written is kept).
+    SaveOutcome outcome = SaveOutcome::kNothingNew;
+    RecordEnd   end     = RecordEnd::kStopped;  // the first monitor's that wasn't stopped
+    std::vector<RecordingSession::Result> monitors;
+    double Seconds() const;  // the longest monitor's
+};
+
+// What the engine tells the user about a recording. Both run on a recording thread.
+struct RecordFeedback {
+    std::function<void()>                        started;  // once, when the first file opens
+    std::function<void(const RecordingResults&)> ended;    // once, when every file is finished
+};
+
+// One recording on every monitor, a thread each, like StartClip.
+class RecordingGroup {
+public:
+    void   Stop();  // every monitor's StopAt now
+    double Seconds() const;  // the longest monitor's so far
+    // True once a monitor wrote its first frame; false when every one ended before that.
+    std::shared_future<bool>             Started() const { return started_; }
+    std::shared_future<RecordingResults> Done() const { return done_; }
+
+private:
+    friend std::shared_ptr<RecordingGroup> StartRecording(const std::vector<SaveContext*>&, const RecordRequest&,
+                                                          std::shared_ptr<void>, RecordFeedback);
+    std::vector<std::shared_ptr<RecordingSession>> sessions_;
+    std::shared_future<bool>                       started_;
+    std::shared_future<RecordingResults>           done_;
+};
+// `hold` (BufferController::HoldRecording, taken before this so capture arms in time) keeps capture
+// armed until the last monitor's Run returns; that thread drops it before it reports and before its
+// session leaves open_recordings, so once StopClipsAndWait returned for every context no hold is left.
+// Raises recording_started and recording_stopped (events.h) when request.id is set.
+std::shared_ptr<RecordingGroup> StartRecording(const std::vector<SaveContext*>& contexts, const RecordRequest& request,
+                                               std::shared_ptr<void> hold, RecordFeedback feedback = {});
+
+// The recordings apps asked for: one per app at a time (a second start is refused while its own
+// runs), each stopped only by the app that started it. Thread-safe: one per engine, every pipe client.
+class Recordings {
+public:
+    enum class Refusal { kNone, kAlreadyRecording, kClosed };
+    struct Started {
+        Refusal                         refusal = Refusal::kNone;
+        uint64_t                        id      = 0;  // the new recording's, or the one already running
+        std::shared_ptr<RecordingGroup> group;
+    };
+    // `arm` runs once the request is accepted, before any monitor opens: it takes the controller's
+    // hold and sets request.floor_qpc from the Instant Replay switch as it stands with that hold.
+    // When no monitor opens, `feedback.ended` runs inside this call, under the registry's lock: it
+    // must not call back into Recordings.
+    Started Start(const std::string& app, const std::vector<SaveContext*>& contexts, RecordRequest request,
+                  const std::function<std::shared_ptr<void>(RecordRequest&)>& arm, RecordFeedback feedback = {});
+    // Stops `app`'s recording `id` (0: its latest, running or ended) and forgets it: the caller waits
+    // on Done. Null when the app has none by that id.
+    std::shared_ptr<RecordingGroup> Stop(const std::string& app, uint64_t id);
+
+    struct Running {
+        uint64_t    id = 0;
+        std::string app;
+        double      seconds = 0;
+    };
+    std::vector<Running> List();
+    // Engine exit, before StopClipsAndWait: refuses every start and stops every recording.
+    void Close();
+
+private:
+    struct Entry {
+        std::string                     app;
+        uint64_t                        id = 0;
+        std::shared_ptr<RecordingGroup> group;
+    };
+    std::mutex         mutex_;  // held across StartRecording: an app can't start two at once
+    std::vector<Entry> entries_;  // the latest per app, kept after it ends until stopped or replaced
+    uint64_t           next_id_ = 1;
+    bool               closed_  = false;
 };
 
 }  // namespace ombra

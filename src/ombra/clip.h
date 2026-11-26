@@ -129,6 +129,10 @@ private:
     bool                      listed_ = false;  // in ctx_->open_clips
 };
 
+// The folder a multi-monitor clip or recording asked for at `at_qpc` writes each monitor's file into,
+// named as a single monitor's file is ("{game} {date} {time}", then " - title"); empty for one monitor.
+std::wstring GroupFolderName(const std::vector<SaveContext*>& contexts, int64_t at_qpc, const std::wstring& title);
+
 // One request on every monitor, a thread each, like SaveReplay. `feedback` runs once, on the last
 // clip thread, with every monitor's result.
 class ClipGroup {
@@ -174,11 +178,11 @@ private:
     bool                             closed_  = false;
 };
 
-// Engine exit: ends every clip open on `ctx` with what it took and waits until their files are
-// written.
+// Engine exit: ends every clip and recording open on `ctx` with what it took and waits until their
+// files are written.
 void StopClipsAndWait(SaveContext* ctx);
 
-// True while a clip is open on `ctx` (the update's idle gate).
+// True while a clip or recording is open on `ctx` (the update's idle gate).
 bool ClipsOpen(SaveContext* ctx);
 
 }  // namespace ombra

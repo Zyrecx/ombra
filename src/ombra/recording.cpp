@@ -3,6 +3,8 @@
 #include "ombra/audio_tracks.h"
 #include "ombra/clip.h"
 #include "ombra/crash_upload.h"
+#include "ombra/events.h"
+#include "ombra/json.h"
 #include "ombra/log.h"
 #include "ombra/marker.h"
 #include "ombra/mux.h"
@@ -19,6 +21,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <utility>
 
 namespace ombra {
@@ -27,6 +30,11 @@ namespace {
 
 // How often the audio encoded so far goes into the file, well within the audio rings' reach.
 constexpr double kRecordDrainSeconds = 1.0;
+// A live recording's wait when it has written everything there is, as an open clip's.
+constexpr DWORD kRecordPollMs = 50;
+// A stopped recording waits this long past the stop for frames captured before it that the encoder
+// hasn't handed the ring yet (capture to ring is a few frames); then it ends with what it has.
+constexpr double kRecordStopGraceSeconds = 0.5;
 
 int64_t SecondsToQpc(double seconds, int64_t freq) {
     return static_cast<int64_t>(std::llround(seconds * static_cast<double>(freq)));
@@ -310,10 +318,15 @@ RecordingSession::Result RecordingSession::Run(const std::function<int64_t()>& n
     };
 
     for (;;) {
-        if (stop_.load(std::memory_order_acquire)) break;
+        // Stopped: footage from before the stop is still written, waiting kRecordStopGraceSeconds
+        // at most for what the encoder hasn't delivered yet.
+        const int64_t stop_at  = stop_qpc_.load(std::memory_order_acquire);
+        const bool    stopping = stop_at != (std::numeric_limits<int64_t>::max)();
         const int64_t t = now();
+        const bool    grace_over = stopping && t - stop_at >= SecondsToQpc(kRecordStopGraceSeconds, qpc_freq_);
         if (!part) {
             if (rebuilding && ctx_->ring->Closing()) {
+                if (stopping) break;
                 wait();
                 continue;
             }
@@ -321,6 +334,7 @@ RecordingSession::Result RecordingSession::Run(const std::function<int64_t()>& n
             RingPin pin = ctx_->ring->PinCovering(paths_.empty() ? first_floor_qpc_ : after_qpc + 1,
                                                   (std::numeric_limits<int64_t>::max)(), TruncateFloor::kIgnore);
             if (pin.empty()) {
+                if (grace_over) break;
                 if (paths_.empty() && t - start_qpc_ > SecondsToQpc(kRecordStartSeconds, qpc_freq_)) {
                     end = RecordEnd::kNoFootage;
                     break;
@@ -361,6 +375,10 @@ RecordingSession::Result RecordingSession::Run(const std::function<int64_t()>& n
             part->next = 0;
             if (part->queue.empty()) {
                 if (state == TailState::kOpen) {
+                    // Stopped: done once the newest frame reaches the stop, or the encoder had its time.
+                    if (grace_over || (stopping && part->written &&
+                                       part->written->qpc + qpc_freq_ / part->fps >= stop_at))
+                        break;
                     // Footage paused (or not yet here): a recording waits, it never ends on a stall.
                     if (part->written) drain(t, part->written->qpc + qpc_freq_ / part->fps);
                     if (part->audio_failed) {
@@ -382,6 +400,7 @@ RecordingSession::Result RecordingSession::Run(const std::function<int64_t()>& n
         }
 
         const AuDescriptor d = part->queue[part->next++];
+        if (d.qpc >= stop_at) break;
         if (part->open && d.is_keyframe && part->audio && part->audio->format_changed) {
             // The audio changed format (its bitrate crossed 128 kbps) with no cut in the video: a
             // track can't, so the next part starts at this keyframe, losing no frame.
@@ -454,6 +473,176 @@ RecordingSession::Result RecordingSession::Run(const std::function<int64_t()>& n
                          result.fell_back ? 1 : 0, paths_.empty() ? "" : NarrowUtf8(paths_.front()).c_str());
     }
     return result;
+}
+
+double RecordingResults::Seconds() const {
+    double seconds = 0;
+    for (const RecordingSession::Result& m : monitors) seconds = (std::max)(seconds, m.seconds);
+    return seconds;
+}
+
+void RecordingSession::StopAt(int64_t at_qpc) {
+    int64_t current = stop_qpc_.load(std::memory_order_acquire);
+    while (at_qpc < current && !stop_qpc_.compare_exchange_weak(current, at_qpc, std::memory_order_acq_rel)) {
+    }
+}
+
+void RecordingGroup::Stop() {
+    const int64_t now = QpcNow();
+    for (const auto& s : sessions_) s->StopAt(now);
+}
+
+double RecordingGroup::Seconds() const {
+    double seconds = 0;
+    for (const auto& s : sessions_) seconds = (std::max)(seconds, s->Seconds());
+    return seconds;
+}
+
+std::shared_ptr<RecordingGroup> StartRecording(const std::vector<SaveContext*>& contexts, const RecordRequest& request,
+                                               std::shared_ptr<void> hold, RecordFeedback feedback) {
+    struct Operation {
+        std::promise<bool>             started;
+        std::promise<RecordingResults> done;
+        RecordingResults               result;
+        std::atomic<size_t>            remaining{0};
+        std::atomic<size_t>            not_started{0};
+        std::atomic<bool>              told{false};
+        std::shared_ptr<void>          hold;  // the last thread drops it, before it reports and Closes
+        RecordFeedback                 feedback;
+    };
+    auto op = std::make_shared<Operation>();
+    op->hold     = std::move(hold);
+    op->feedback = std::move(feedback);
+    std::shared_ptr<RecordingGroup> group(new RecordingGroup());
+    group->started_ = op->started.get_future().share();
+    group->done_    = op->done.get_future().share();
+    EventHub* events = contexts.empty() || !request.id ? nullptr : contexts.front()->events;
+
+    // A monitor's first frame (true) or its end before one (false): Started is true at the first
+    // true, false once every monitor said false.
+    const auto tell = [op, events, app = request.app, id = request.id](bool ok) {
+        if (ok) {
+            if (op->told.exchange(true)) return;
+            op->started.set_value(true);
+            if (events)
+                events->PublishIfActive("recording_started", [&](JsonValue& f, JsonValue&) {
+                    f.Set("app", JsonValue::MakeStr(app));
+                    f.Set("recording", JsonValue::MakeNum(static_cast<double>(id)));
+                });
+            if (op->feedback.started) op->feedback.started();
+        } else if (op->not_started.fetch_sub(1) == 1 && !op->told.exchange(true)) {
+            op->started.set_value(false);
+        }
+    };
+    const auto finish = [op, events, app = request.app, id = request.id] {
+        RecordingResults& r = op->result;
+        bool any_saved = false, any_failed = false;
+        for (const RecordingSession::Result& m : r.monitors) {
+            any_saved |= m.outcome == SaveOutcome::kSaved;
+            any_failed |= m.outcome == SaveOutcome::kFailed || m.outcome == SaveOutcome::kBusy;
+            if (r.end == RecordEnd::kStopped) r.end = m.end;
+        }
+        r.outcome = any_failed ? SaveOutcome::kFailed : any_saved ? SaveOutcome::kSaved : SaveOutcome::kNothingNew;
+        if (events)
+            events->PublishIfActive("recording_stopped", [&](JsonValue& f, JsonValue& private_fields) {
+                JsonValue paths = JsonValue::MakeArray();
+                for (const RecordingSession::Result& m : r.monitors)
+                    for (const std::wstring& p : m.paths) paths.arr.push_back(JsonValue::MakeStr(NarrowUtf8(p)));
+                f.Set("app", JsonValue::MakeStr(app));
+                f.Set("recording", JsonValue::MakeNum(static_cast<double>(id)));
+                f.Set("reason", JsonValue::MakeStr(SaveOutcomeName(r.outcome)));
+                f.Set("end", JsonValue::MakeStr(RecordEndName(r.end)));
+                f.Set("seconds", JsonValue::MakeNum(std::round(r.Seconds() * 100) / 100));
+                private_fields.Set("paths", std::move(paths));
+            });
+        if (op->feedback.ended) op->feedback.ended(r);
+        op->done.set_value(r);
+    };
+
+    const std::wstring folder = GroupFolderName(contexts, request.start_qpc, request.title);
+    op->result.monitors.resize(contexts.size());
+    std::vector<size_t> opened;
+    for (size_t i = 0; i < contexts.size(); ++i) {
+        SaveOutcome why = SaveOutcome::kFailed;
+        auto session = RecordingSession::Open(contexts[i], request, folder.empty() ? nullptr : &folder, &why);
+        if (!session) {
+            op->result.monitors[i].outcome = why;
+            continue;
+        }
+        group->sessions_.push_back(std::move(session));
+        opened.push_back(i);
+    }
+    if (opened.empty()) {
+        op->hold.reset();
+        op->told = true;
+        op->started.set_value(false);
+        finish();
+        return group;
+    }
+    op->remaining   = opened.size();  // fixed before any thread can finish
+    op->not_started = opened.size();
+    for (size_t k = 0; k < opened.size(); ++k) {
+        std::thread([op, tell, finish, session = group->sessions_[k], i = opened[k]] {
+            Log::SetThreadName("recording");
+            RecordingSession::Result r = session->Run(QpcNow, [] { Sleep(kRecordPollMs); }, tell);
+            op->result.monitors[i] = std::move(r);
+            if (op->remaining.fetch_sub(1) == 1) {
+                op->hold.reset();  // capture may disarm: nothing reads the rings for this any more
+                if (!op->told.exchange(true)) op->started.set_value(false);  // never left unset
+                finish();
+                // The callbacks hold engine objects that go once the exit wait below passes.
+                op->feedback = {};
+            }
+            session->Close();  // last: the engine's exit waits for it before tearing the context down
+        }).detach();
+    }
+    return group;
+}
+
+Recordings::Started Recordings::Start(const std::string& app, const std::vector<SaveContext*>& contexts,
+                                      RecordRequest request,
+                                      const std::function<std::shared_ptr<void>(RecordRequest&)>& arm,
+                                      RecordFeedback feedback) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (closed_) return {Refusal::kClosed, 0, nullptr};
+    const auto it = std::find_if(entries_.begin(), entries_.end(), [&](const Entry& e) { return e.app == app; });
+    if (it != entries_.end()) {
+        if (it->group->Done().wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+            return {Refusal::kAlreadyRecording, it->id, it->group};
+        entries_.erase(it);  // an ended one the app never stopped: this start replaces it
+    }
+    request.id = next_id_++;
+    std::shared_ptr<void> hold = arm ? arm(request) : nullptr;
+    auto group = StartRecording(contexts, request, std::move(hold), std::move(feedback));
+    entries_.push_back({app, request.id, group});
+    return {Refusal::kNone, request.id, std::move(group)};
+}
+
+std::shared_ptr<RecordingGroup> Recordings::Stop(const std::string& app, uint64_t id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = std::find_if(entries_.begin(), entries_.end(),
+                                 [&](const Entry& e) { return e.app == app && (id == 0 || e.id == id); });
+    if (it == entries_.end()) return nullptr;
+    auto group = std::move(it->group);
+    entries_.erase(it);
+    group->Stop();
+    return group;
+}
+
+std::vector<Recordings::Running> Recordings::List() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<Running> out;
+    for (const Entry& e : entries_)
+        if (e.group->Done().wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+            out.push_back({e.id, e.app, e.group->Seconds()});
+    return out;
+}
+
+void Recordings::Close() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    closed_ = true;
+    for (const Entry& e : entries_) e.group->Stop();
+    entries_.clear();  // each recording's own threads finish it; nothing here outlives the contexts
 }
 
 }  // namespace ombra

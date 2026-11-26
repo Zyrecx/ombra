@@ -14,6 +14,7 @@
 #include "ombra/clip_file.h"
 #include "ombra/config.h"
 #include "ombra/controller.h"
+#include "ombra/events.h"
 #include "ombra/json.h"
 #include "ombra/marker.h"
 #include "ombra/reconfig.h"
@@ -25,8 +26,11 @@
 
 #include <windows.h>
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <functional>
+#include <future>
 #include <memory>
 #include <numbers>
 #include <string>
@@ -78,6 +82,9 @@ public:
     }
 
     int64_t At(double seconds) const { return origin_ + static_cast<int64_t>(std::llround(seconds * freq_)); }
+    // Puts the timeline on the real clock, `seconds_ago` of footage ending now (StartRecording's
+    // threads read QpcNow). Call before feeding.
+    void EndNow(double seconds_ago) { origin_ = QpcNow() - static_cast<int64_t>(seconds_ago * freq_); }
     int64_t Tick(uint64_t t) const { return origin_ + static_cast<int64_t>(t) * freq_ / StandardFixture().fps; }
 
     void AddAudio(double audio_seconds) {
@@ -127,7 +134,7 @@ public:
                            REQUIRE(++waits < 100000);
                            if (on_wait) on_wait(now_s);
                            if (now_s >= stop_s - 1e-9 && !stopped) {
-                               rec.Stop();
+                               rec.StopAt(At(now_s));
                                stopped = appended;
                            }
                            now_s += 0.1;
@@ -457,6 +464,179 @@ TEST_CASE("replay reach: a recording's footage with the switch off is its own; s
     ApplyReplayReach(ctxs, quiet_state, false, false, rig.At(16));
     ApplyReplayReach(ctxs, quiet_state, true, false, rig.At(17));
     CHECK(rig.ctx.replay_floor_qpc.load() == rig.At(10));
+}
+
+TEST_CASE("recording group: every monitor in one folder; the hold goes before the last session closes") {
+    EventHub events;  // before the rigs: their recordings publish into it
+    Subscription heard(events, false), own(events, true);
+    heard.Set({"recording_started", "recording_stopped"});
+    own.Set({"recording_stopped"});
+    RecordRig first(L"group-a"), second(L"group-b");
+    for (RecordRig* rig : {&first, &second}) {
+        rig->ctx.events        = &events;
+        rig->ctx.out_path      = L"out\\ombra.mp4";  // templated, under the test's own root
+        rig->ctx.output_root   = NarrowUtf8(TestOutputPath(L"recording\\group"));
+        rig->ctx.monitor_label = rig == &first ? L"A" : L"B";
+        rig->EndNow(3.0);
+        rig->FeedTo(180);
+    }
+    // The hold's drop sees whether a session is still listed: the engine's exit wait must not pass
+    // while a hold is out.
+    std::atomic<bool> dropped{false}, listed_at_drop{false};
+    std::shared_ptr<void> hold(new int(0), [&](int* p) {
+        listed_at_drop = Listed(first.ctx) || Listed(second.ctx);
+        dropped        = true;
+        delete p;
+    });
+    std::atomic<int> started{0}, ended{0};
+    RecordFeedback feedback;
+    feedback.started = [&] { ++started; };
+    feedback.ended   = [&](const RecordingResults&) { ++ended; };
+    RecordRequest req;
+    req.start_qpc      = QpcNow();
+    req.before_seconds = 2.0;
+    req.app            = "tool";
+    req.id             = 7;
+    auto group = StartRecording({&first.ctx, &second.ctx}, req, std::move(hold), feedback);
+    REQUIRE(group);
+    REQUIRE(group->Started().wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    CHECK(group->Started().get());
+    CHECK_FALSE(dropped.load());
+    CHECK(ClipsOpen(&first.ctx));
+
+    group->Stop();
+    StopClipsAndWait(&first.ctx);
+    StopClipsAndWait(&second.ctx);
+    CHECK(dropped.load());
+    CHECK(listed_at_drop.load());
+    CHECK(group->Done().wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+    CHECK(started.load() == 1);
+    CHECK(ended.load() == 1);
+    const RecordingResults r = group->Done().get();
+    CHECK(r.outcome == SaveOutcome::kSaved);
+    CHECK(r.end == RecordEnd::kStopped);
+    REQUIRE(r.monitors.size() == 2);
+    for (const auto& m : r.monitors) {
+        REQUIRE(m.paths.size() == 1);
+        CHECK(ProbeVideoFrames(m.paths[0]).count >= 110);
+        CHECK(DecodeErrors(m.paths[0]).empty());
+    }
+    CHECK(r.monitors[0].paths[0] != r.monitors[1].paths[0]);
+    CHECK(DirOf(r.monitors[0].paths[0]) == DirOf(r.monitors[1].paths[0]));  // the group folder
+
+    // Started and stopped name the app and the id; only Ombra's own client hears the paths.
+    std::vector<std::string> lines, own_lines;
+    REQUIRE(heard.Take(lines));
+    REQUIRE(own.Take(own_lines));
+    REQUIRE(lines.size() == 2);
+    const JsonValue start = ParseJson(lines[0]), stop = ParseJson(lines[1]), mine = ParseJson(own_lines.at(0));
+    CHECK(start.Find("event")->str == "recording_started");
+    CHECK(start.Find("app")->str == "tool");
+    CHECK(start.Find("recording")->num == 7);
+    CHECK(stop.Find("event")->str == "recording_stopped");
+    CHECK(stop.Find("end")->str == "stopped");
+    CHECK(stop.Find("reason")->str == "saved");
+    CHECK(stop.Find("seconds")->num >= 1.5);
+    CHECK_FALSE(stop.Find("paths"));
+    REQUIRE(mine.Find("paths"));
+    CHECK(mine.Find("paths")->arr.size() == 2);
+}
+
+TEST_CASE("recording group: no monitor opens: it reports at once and drops the hold") {
+    RecordRig rig(L"group-refused");
+    {
+        std::lock_guard<std::mutex> lock(rig.ctx.clip_mutex);
+        rig.ctx.clips_blocked = true;
+    }
+    bool dropped = false;
+    std::shared_ptr<void> hold(new int(0), [&](int* p) { dropped = true; delete p; });
+    RecordRequest req;
+    req.start_qpc = QpcNow();
+    auto group = StartRecording({&rig.ctx}, req, std::move(hold));
+    CHECK(dropped);
+    REQUIRE(group->Started().wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+    CHECK_FALSE(group->Started().get());
+    REQUIRE(group->Done().wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+    const RecordingResults r = group->Done().get();
+    CHECK(r.outcome == SaveOutcome::kFailed);
+    CHECK(r.monitors.at(0).outcome == SaveOutcome::kBusy);
+}
+
+TEST_CASE("recordings: one per app; a second start is refused before it arms; only its app stops it") {
+    RecordRig rig(L"registry");
+    rig.ctx.out_path    = L"out\\ombra.mp4";
+    rig.ctx.output_root = NarrowUtf8(TestOutputPath(L"recording\\registry"));
+    rig.EndNow(3.0);
+    rig.FeedTo(180);
+    Recordings recordings;
+    int arms = 0;
+    const auto arm = [&](RecordRequest& r) -> std::shared_ptr<void> {
+        ++arms;
+        r.floor_qpc = r.start_qpc;  // as with the switch off: nothing from before the start
+        return std::make_shared<int>(0);
+    };
+    RecordRequest req;
+    req.start_qpc      = QpcNow();
+    req.before_seconds = 2.0;
+    const auto a = recordings.Start("tool", {&rig.ctx}, req, arm);
+    REQUIRE(a.refusal == Recordings::Refusal::kNone);
+    REQUIRE(a.group);
+    const auto again = recordings.Start("tool", {&rig.ctx}, req, arm);
+    CHECK(again.refusal == Recordings::Refusal::kAlreadyRecording);
+    CHECK(again.id == a.id);
+    CHECK(arms == 1);  // refused before it touched the controller
+    const auto other = recordings.Start("other", {&rig.ctx}, req, arm);
+    REQUIRE(other.refusal == Recordings::Refusal::kNone);
+    CHECK(other.id != a.id);
+    CHECK(recordings.List().size() == 2);
+
+    CHECK_FALSE(recordings.Stop("other", a.id));  // not its own
+    const auto stopped = recordings.Stop("tool", a.id);
+    REQUIRE(stopped);
+    REQUIRE(stopped->Done().wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    CHECK_FALSE(recordings.Stop("tool", a.id));  // forgotten once stopped
+    REQUIRE(recordings.List().size() == 1);
+    CHECK(recordings.List()[0].app == "other");
+
+    // The floor held it to footage from its start: nothing from the 3 s already in the ring.
+    const RecordingResults ra = stopped->Done().get();
+    CHECK(ra.outcome == SaveOutcome::kNothingNew);
+    CHECK(ra.monitors.at(0).paths.empty());
+
+    recordings.Close();
+    CHECK(recordings.Start("tool", {&rig.ctx}, req, arm).refusal == Recordings::Refusal::kClosed);
+    StopClipsAndWait(&rig.ctx);
+    CHECK(other.group->Done().wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+    CHECK(arms == 2);
+}
+
+TEST_CASE("recordings: an ended recording is stopped by id 0 and replaced by the app's next start") {
+    RecordRig rig(L"registry-ended");
+    rig.ctx.out_path    = L"out\\ombra.mp4";
+    rig.ctx.output_root = NarrowUtf8(TestOutputPath(L"recording\\registry-ended"));
+    rig.EndNow(3.0);
+    rig.FeedTo(180);
+    Recordings recordings;
+    RecordRequest req;
+    req.start_qpc      = QpcNow();
+    req.before_seconds = 2.0;
+    const auto first = recordings.Start("tool", {&rig.ctx}, req, {});
+    REQUIRE(first.group);
+    REQUIRE(first.group->Started().wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    first.group->Stop();  // as a full disk would end it: the registry still holds its result
+    REQUIRE(first.group->Done().wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    CHECK(recordings.List().empty());
+    const auto next = recordings.Start("tool", {&rig.ctx}, req, {});
+    REQUIRE(next.refusal == Recordings::Refusal::kNone);
+    CHECK(next.id != first.id);
+    CHECK_FALSE(recordings.Stop("tool", first.id));  // replaced
+    const auto latest = recordings.Stop("tool", 0);
+    REQUIRE(latest);
+    REQUIRE(latest->Done().wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    CHECK(latest->Done().get().outcome == SaveOutcome::kSaved);
+    CHECK(latest->Done().get().monitors.at(0).paths.at(0) != first.group->Done().get().monitors.at(0).paths.at(0));
+    recordings.Close();
+    StopClipsAndWait(&rig.ctx);
 }
 
 }  // namespace ombra::test

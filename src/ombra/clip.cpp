@@ -4,6 +4,7 @@
 #include "ombra/crash_upload.h"
 #include "ombra/log.h"
 #include "ombra/mux.h"
+#include "ombra/recording.h"
 #include "ombra/supervisor.h"
 #include "ombra/telemetry.h"
 #include "ombra/util.h"
@@ -301,6 +302,16 @@ ClipSession::Result ClipSession::Run(const std::function<int64_t()>& now, const 
     return result;
 }
 
+std::wstring GroupFolderName(const std::vector<SaveContext*>& contexts, int64_t at_qpc, const std::wstring& title) {
+    if (contexts.size() < 2) return {};
+    const auto* controller = contexts.front()->controller;
+    const SYSTEMTIME at = LocalTimeAtQpc(at_qpc);  // as a single monitor's file is named
+    std::wstring folder = FormatFilename("{game} {date} {time}", controller ? controller->CurrentGameFolder() : L"", L"", &at);
+    const std::wstring titled = ClipTitleForName(title);
+    if (!titled.empty()) folder += L" - " + titled;
+    return SanitizeFileName(folder);
+}
+
 bool ClipGroup::Extend(int64_t until_qpc) {
     std::vector<ClipSession*> all;
     for (const auto& s : sessions_) all.push_back(s.get());
@@ -331,15 +342,7 @@ std::shared_ptr<ClipGroup> StartClip(const std::vector<SaveContext*>& contexts, 
         op->promise.set_value(std::move(op->result));
     };
 
-    std::wstring folder;
-    if (contexts.size() > 1) {
-        const auto* controller = contexts.front()->controller;
-        const SYSTEMTIME at = LocalTimeAtQpc(request.event_qpc);  // as a single monitor's file is named
-        folder = FormatFilename("{game} {date} {time}", controller ? controller->CurrentGameFolder() : L"", L"", &at);
-        const std::wstring titled = ClipTitleForName(request.title);
-        if (!titled.empty()) folder += L" - " + titled;
-        folder = SanitizeFileName(folder);
-    }
+    const std::wstring folder = GroupFolderName(contexts, request.event_qpc, request.title);
     op->result.monitors.resize(contexts.size());
     std::vector<size_t> opened;
     for (size_t i = 0; i < contexts.size(); ++i) {
@@ -407,13 +410,15 @@ void StopClipsAndWait(SaveContext* ctx) {
         std::lock_guard<std::mutex> lock(ctx->clip_mutex);
         ctx->clips_blocked = true;  // and none opens behind this
         for (ClipSession* s : ctx->open_clips) s->Stop();
+        const int64_t now = QpcNow();
+        for (RecordingSession* s : ctx->open_recordings) s->StopAt(now);
     }
     while (ClipsOpen(ctx)) Sleep(10);
 }
 
 bool ClipsOpen(SaveContext* ctx) {
     std::lock_guard<std::mutex> lock(ctx->clip_mutex);
-    return !ctx->open_clips.empty();
+    return !ctx->open_clips.empty() || !ctx->open_recordings.empty();
 }
 
 }  // namespace ombra
