@@ -118,6 +118,52 @@ TEST_CASE("config: a hotkey patch is canonicalised, and a bad or duplicate one i
     CHECK(r.rejected.empty());
     CHECK(cfg.hotkeys_screenshot == "Alt+F9");
     CHECK(cfg.hotkeys_toggle_buffer == "Alt+F1");
+
+    // Record has no shortcut by default; one can be set and taken away again.
+    CHECK(cfg.hotkeys_toggle_record.empty());
+    r = ApplyConfigPatch(cfg, Patch("hotkeys.toggle_record", "alt+f8"));
+    CHECK_FALSE(Rejected(r, "hotkeys.toggle_record"));
+    CHECK(cfg.hotkeys_toggle_record == "Alt+F8");
+    r = ApplyConfigPatch(cfg, Patch("hotkeys.save_replay", "Alt+F8"));
+    CHECK(Rejected(r, "hotkeys.save_replay"));  // Record has it now
+    r = ApplyConfigPatch(cfg, Patch("hotkeys.toggle_record", ""));
+    CHECK_FALSE(Rejected(r, "hotkeys.toggle_record"));
+    CHECK(cfg.hotkeys_toggle_record.empty());
+    // An action with a default always keeps a shortcut.
+    r = ApplyConfigPatch(cfg, Patch("hotkeys.overlay", ""));
+    CHECK(Rejected(r, "hotkeys.overlay"));
+    CHECK(cfg.hotkeys_overlay == "Alt+Z");
+}
+
+TEST_CASE("hotkey registry: an action with no shortcut is neither bound nor reported") {
+    HotkeyRegistry reg({{1, "hotkeys.save_replay", "Ctrl+Alt+Shift+F20", [] {}},
+                        {5, "hotkeys.toggle_record", "", [] {}}},
+                       HotkeyPolicy::kPolling);
+    reg.ApplyPending();
+    REQUIRE(reg.Status().bindings.size() == 1);
+    CHECK(reg.Status().bindings[0].key == "hotkeys.save_replay");
+
+    reg.RequestBindings(HotkeyPolicy::kPolling, {{"hotkeys.toggle_record", "ctrl+alt+shift+f19"}});
+    reg.ApplyPending();
+    REQUIRE(reg.Status().bindings.size() == 2);
+    CHECK(reg.Status().bindings[1].spec == "Ctrl+Alt+Shift+F19");
+    CHECK(reg.Status().bindings[1].ok);
+
+    // Unparseable, with no default to fall back on: no shortcut, not a guess.
+    reg.RequestBindings(HotkeyPolicy::kPolling, {{"hotkeys.toggle_record", "garbage"}});
+    reg.ApplyPending();
+    CHECK(reg.Status().bindings.size() == 1);
+    reg.RequestBindings(HotkeyPolicy::kPolling, {{"hotkeys.toggle_record", "ctrl+alt+shift+f19"}});
+    reg.ApplyPending();
+    reg.RequestBindings(HotkeyPolicy::kPolling, {{"hotkeys.toggle_record", ""}});
+    reg.ApplyPending();
+    CHECK(reg.Status().bindings.size() == 1);
+
+    // Empty for an action with a default: its default, as any unparseable spec.
+    reg.RequestBindings(HotkeyPolicy::kPolling, {{"hotkeys.save_replay", ""}});
+    reg.ApplyPending();
+    REQUIRE(reg.Status().bindings.size() == 1);
+    CHECK(reg.Status().bindings[0].spec == "Ctrl+Alt+Shift+F20");
 }
 
 namespace {

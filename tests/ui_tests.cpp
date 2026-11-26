@@ -3748,6 +3748,28 @@ TEST_CASE("ui: reset to a default another action took records with the reason, i
     CHECK(p.host.hotkey_suspends.back() == true);
 }
 
+TEST_CASE("ui: Record has no shortcut by default; one set is taken away by the row's reset") {
+    HotkeysPage p;
+    auto v = p.screen.ShortcutRowForTest("hotkeys.toggle_record");
+    REQUIRE(v.capture);
+    CHECK(v.capture->spec.empty());  // drawn "Not set"
+    CHECK_FALSE(v.reset->visible);
+    p.screen.ApplySettingChangeForTest("hotkeys.toggle_record", ombra::JsonValue::MakeStr("F15"));
+    p.screen.Layout(D2D1::RectF(0, 0, 1280, 800), 1.0f);
+    v = p.screen.ShortcutRowForTest("hotkeys.toggle_record");
+    REQUIRE(v.reset);
+    REQUIRE(v.reset->visible);
+    CHECK(v.reset->tooltip == L"Remove this shortcut");
+    const D2D1_RECT_F& r = v.reset->bounds;
+    p.screen.OnMouseDown(D2D1::Point2F((r.left + r.right) * 0.5f, (r.top + r.bottom) * 0.5f));
+    CHECK_FALSE(p.screen.IsRecordingShortcut());
+    // Back to the saved value (none), so nothing is left staged.
+    const auto* staged = p.screen.StagedValueForTest("hotkeys.toggle_record");
+    CHECK((!staged || staged->str.empty()));
+    p.screen.Layout(D2D1::RectF(0, 0, 1280, 800), 1.0f);
+    CHECK(p.screen.ShortcutRowForTest("hotkeys.toggle_record").capture->spec.empty());
+}
+
 TEST_CASE("ui: a click outside a recording row (the Save bar) stops recording and resumes hotkeys") {
     HotkeysPage p;
     p.screen.ApplySettingChangeForTest("hotkeys.backend", ombra::JsonValue::MakeStr("poll"));

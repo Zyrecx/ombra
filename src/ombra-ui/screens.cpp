@@ -223,6 +223,7 @@ const FieldFormEntry kFieldForms[] = {
     { "ui.toast_enabled",          FieldForm::Custom },
     { "hotkeys.save_replay",       FieldForm::Custom },    // KeyCaptureControl rows (BuildShortcutsPage)
     { "hotkeys.toggle_buffer",     FieldForm::Custom },
+    { "hotkeys.toggle_record",     FieldForm::Custom },
     { "hotkeys.screenshot",        FieldForm::Custom },
     { "hotkeys.overlay",           FieldForm::Custom },
     { "hotkeys.backend",           FieldForm::Custom },    // Troubleshooting card (BuildShortcutsPage)
@@ -3762,6 +3763,7 @@ constexpr ShortcutDef kShortcutDefs[] = {
     {"hotkeys.screenshot", &ombra::Config::hotkeys_screenshot, L"Screenshot", L"Saves the current frame as a PNG"},
     {"hotkeys.toggle_buffer", &ombra::Config::hotkeys_toggle_buffer, L"Buffer on/off",
      L"Pauses or resumes the replay buffer"},
+    {"hotkeys.toggle_record", &ombra::Config::hotkeys_toggle_record, L"Record", L"Starts or stops your own recording"},
     {"hotkeys.overlay", &ombra::Config::hotkeys_overlay, L"Open overlay", L"Opens and closes this overlay"},
 };
 
@@ -3970,15 +3972,16 @@ void SettingsScreen::BuildShortcutsPage() {
         };
 
         // Back to the default: commits it, or records with the reason when another action has it.
+        // A shortcut with none by default goes back to none.
         auto reset = std::make_shared<IconButtonControl>();
         reset->glyph = IconButtonControl::Glyph::Reset;
-        reset->tooltip = L"Reset to " + refs.default_spec;
-        reset->visible = !refs.default_spec.empty() && capture->spec != refs.default_spec;
+        reset->tooltip = refs.default_spec.empty() ? std::wstring(L"Remove this shortcut") : L"Reset to " + refs.default_spec;
+        reset->visible = capture->spec != refs.default_spec;
         const std::wstring def = refs.default_spec;
         reset->on_click = [this, weak, def, key] {
             auto c = weak.lock();
             if (!c) return;
-            const std::wstring why = c->validate ? c->validate(def) : L"";
+            const std::wstring why = c->validate && !def.empty() ? c->validate(def) : L"";
             if (why.empty()) {
                 if (c->on_commit) c->on_commit(def);
                 return;

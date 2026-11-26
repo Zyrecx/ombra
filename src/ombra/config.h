@@ -208,6 +208,9 @@ struct SettingMeta {
     X(hotkeys_toggle_buffer, "hotkeys.toggle_buffer", "Alt+F9", Tier::Common, "Hotkeys", \
       "", "", ApplyTier::Free, true, \
       "Toggle buffer hotkey", "Pauses or resumes buffering without exiting.", "") \
+    X(hotkeys_toggle_record, "hotkeys.toggle_record", "", Tier::Common, "Hotkeys", \
+      "", "", ApplyTier::Free, true, \
+      "Record hotkey", "Starts or stops your own recording. Empty: no shortcut.", "") \
     X(hotkeys_screenshot, "hotkeys.screenshot", "Alt+F1", Tier::Common, "Hotkeys", \
       "", "", ApplyTier::Free, true, \
       "Screenshot hotkey", "Saves a single frame from the newest buffered access unit.", "") \

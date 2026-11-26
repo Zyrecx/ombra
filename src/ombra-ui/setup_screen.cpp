@@ -239,7 +239,7 @@ KeyCaptureControl& SetupScreen::KeyField(const std::string& name, std::string* s
         ombra::HotkeyCombo want, theirs;
         if (!ombra::ParseHotkeySpec(Narrow(candidate), want)) return L"" OMBRA_PRODUCT_NAME " can't bind that.";
         if (ombra::ParseHotkeySpec(*other, theirs) && theirs == want) return L"already used by the other shortcut.";
-        for (const char* key : {"hotkeys.toggle_buffer", "hotkeys.screenshot"}) {
+        for (const char* key : {"hotkeys.toggle_buffer", "hotkeys.toggle_record", "hotkeys.screenshot"}) {
             const std::string taken = StrOf(&ui_config_, key, "");
             if (ombra::ParseHotkeySpec(taken, theirs) && theirs == want) return Wide(taken) + L" is already a shortcut in Settings.";
         }

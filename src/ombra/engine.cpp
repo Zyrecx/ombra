@@ -1657,6 +1657,17 @@ int RunEngine(int argc, wchar_t** argv) {
         RequestScreenshot(&screenshot_ctx, &supervisor, &controller, root, per_game, L"out\\ombra_shot.png");
     }});
     hotkey_actions.push_back({3, "hotkeys.toggle_buffer", "Alt+F9", toggle_replay});
+    // The user's own recording, from now; pressed again, it stops. Never waits: this is the pump.
+    hotkey_actions.push_back({5, "hotkeys.toggle_record", "", [&] {
+        if (!recordings.List(kUserRecordingApp).empty()) {
+            recordings.Stop(kUserRecordingApp, 0);
+            return;
+        }
+        RecordRequest request;
+        request.start_qpc = QpcNow();
+        StartHeldRecording(recordings, controller, all_save_ctxs, kUserRecordingApp, std::move(request),
+                           pipe_api.user_record_feedback());
+    }});
     // Opens ombra-ui's overlay (spawning ombra-ui.exe if it isn't running) or closes it.
     hotkey_actions.push_back({4, "hotkeys.overlay", "Alt+Z", [&] {
         if (tray) tray->ToggleOverlay();

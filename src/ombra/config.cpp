@@ -1005,6 +1005,7 @@ struct HotkeyField {
 constexpr HotkeyField kHotkeyFields[] = {
     {"hotkeys.save_replay", &Config::hotkeys_save_replay},
     {"hotkeys.toggle_buffer", &Config::hotkeys_toggle_buffer},
+    {"hotkeys.toggle_record", &Config::hotkeys_toggle_record},
     {"hotkeys.screenshot", &Config::hotkeys_screenshot},
     {"hotkeys.overlay", &Config::hotkeys_overlay},
 };
@@ -1025,6 +1026,9 @@ void ValidateHotkeyFields(Config& cfg, const HotkeySnapshot& before, const FlatM
     for (size_t i = 0; i < std::size(kHotkeyFields); ++i) {
         const HotkeyField& hf = kHotkeyFields[i];
         if (!flat.count(hf.key) || cfg.*hf.field == before[i]) continue;
+        // No shortcut: only for an action that has none by default (Record). The others always have one.
+        static const Config kDefaults;
+        if ((cfg.*hf.field).empty() && (kDefaults.*hf.field).empty()) continue;
         HotkeyCombo combo;
         const HotkeyProblem problem = ParseHotkeySpec(cfg.*hf.field, combo) ? ValidateHotkeyCombo(combo)
                                                                              : HotkeyProblem::Unparseable;

@@ -335,9 +335,16 @@ void HotkeyRegistry::ApplyPending() {
     } else {
         for (const auto& a : actions_) {
             const std::string& configured = wanted.specs[a.key];
+            // Empty is "no shortcut" for an action with none by default (Record): nothing to bind or
+            // report. An action with a default falls back to it below.
+            if (configured.empty() && a.default_spec.empty()) continue;
             HotkeyCombo combo;
             std::string spec = configured;
             if (!ParseHotkeySpec(configured, combo)) {
+                if (a.default_spec.empty()) {
+                    Log::Warn("config %s: could not parse \"%s\" — left without a shortcut", a.key.c_str(), configured.c_str());
+                    continue;
+                }
                 Log::Warn("config %s: could not parse \"%s\" — falling back to %s", a.key.c_str(),
                           configured.c_str(), a.default_spec.c_str());
                 spec = a.default_spec;

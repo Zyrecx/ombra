@@ -241,7 +241,8 @@ inline constexpr const char* kUsageSettingsSent[] = {
     "log.level", "ui.font", "ui.density", "ui.toast_position", "ui.toast_style"};
 // Sent only as whether they differ from the default (`<key>.changed`): typed or picked by the user.
 inline constexpr const char* kUsageSettingsChangedOnly[] = {"output.filename", "hotkeys.save_replay",
-                                                            "hotkeys.toggle_buffer", "hotkeys.screenshot",
+                                                            "hotkeys.toggle_buffer", "hotkeys.toggle_record",
+                                                            "hotkeys.screenshot",
                                                             "hotkeys.overlay"};
 // Never sent: paths, window titles, device and app names, user lists; diagnostics.sharing is always
 // "usage" when this is sent at all.

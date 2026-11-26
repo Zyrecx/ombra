@@ -214,6 +214,7 @@ std::map<std::string, std::string> HotkeySpecsFromConfig(const Config& cfg) {
     return {{"hotkeys.save_replay", cfg.hotkeys_save_replay},
             {"hotkeys.screenshot", cfg.hotkeys_screenshot},
             {"hotkeys.toggle_buffer", cfg.hotkeys_toggle_buffer},
+            {"hotkeys.toggle_record", cfg.hotkeys_toggle_record},
             {"hotkeys.overlay", cfg.hotkeys_overlay}};
 }
 
