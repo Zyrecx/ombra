@@ -492,6 +492,24 @@ std::vector<MuxAudioTrack> AudioTrackHub::FinishClip(ClipAudio& clip, int64_t t_
     return result;
 }
 
+void AudioTrackHub::SettleClip(ClipAudio& clip, int64_t t_end_qpc) {
+    EncodeThrough(t_end_qpc, /*hold_idle_cursors=*/true);
+
+    std::lock_guard<std::mutex> lock(encode_mutex_);
+    const int64_t end_frame = FrameAt(t_end_qpc);
+    if (end_frame <= clip.floor_frame) {
+        for (auto& p : clip.parts) p.track.frames.clear();
+        return;
+    }
+    const int64_t end_slot = FloorDiv(end_frame + kFrameSamples - 1, kFrameSamples);
+    DrainClipLocked(clip, end_slot);
+    const size_t keep = static_cast<size_t>(end_slot - clip.first_slot);
+    for (auto& p : clip.parts) {
+        const size_t left = keep > p.taken ? keep - p.taken : 0;
+        if (p.track.frames.size() > left) p.track.frames.resize(left);
+    }
+}
+
 void AudioTrackHub::Resize(Sizing sizing) {
     std::lock_guard<std::mutex> lock(encode_mutex_);
     sizing_ = sizing;

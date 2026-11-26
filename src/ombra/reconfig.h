@@ -42,6 +42,7 @@ int64_t AudioRingMaxAgeQpc(double buffer_seconds);
 
 class ClipSession;
 class EventHub;
+class RecordingSession;
 
 struct SaveContext {
     Ring*                ring = nullptr;
@@ -87,6 +88,8 @@ struct SaveContext {
     // rebuild (the audio hub's Resize would drop what a clip hasn't drained).
     std::mutex                clip_mutex;
     std::vector<ClipSession*> open_clips;
+    // Recordings (recording.h) likewise: they block a reallocation for as long as they run.
+    std::vector<RecordingSession*> open_recordings;
     bool                      clips_blocked = false;
 
     std::mutex           last_save_mutex;

@@ -148,6 +148,7 @@ public:
             MuxAudioTrack track;
             int64_t       next_slot = 0;  // first grid slot not yet taken
             int64_t       first_real = INT64_MAX;  // slot of the first encoded frame, not silence
+            size_t        taken = 0;      // frames a streaming writer moved out of `track.frames`
         };
         int64_t              floor_frame = 0;
         int64_t              first_slot  = 0;
@@ -165,6 +166,12 @@ public:
     // Encodes up to `t_end_qpc`, takes the rest and returns the tracks, cut to end there. A track
     // that never took a real frame is left out.
     std::vector<MuxAudioTrack> FinishClip(ClipAudio& clip, int64_t t_end_qpc);
+    // FinishClip for a writer that streams the audio out (a recording): after each drain it moves
+    // each part's `track.frames` out and counts them in `taken`, so nothing piles up on the heap.
+    // Encodes up to `t_end_qpc` and leaves in each part the frames still to write, cut to end there
+    // (drains never run past the video already written, so nothing taken lies past it). Every part
+    // stays, in BeginClip's order: the writer fixed its tracks when it opened.
+    void SettleClip(ClipAudio& clip, int64_t t_end_qpc);
 
     // Live buffer.seconds change: every track's ring is re-created (encoded audio is dropped, the
     // same as the video ring).

@@ -152,6 +152,7 @@ add_library(ombra_core STATIC
     src/ombra/reconfig.cpp
     src/ombra/save.cpp
     src/ombra/clip.cpp
+    src/ombra/recording.cpp
     src/ombra/update.cpp
     src/ombra/cli.cpp
     src/ombra/engine_pipe.cpp)
@@ -273,6 +274,7 @@ add_executable(ombra-tests
     tests/clip_player_tests.cpp
     tests/save_tests.cpp
     tests/clip_tests.cpp
+    tests/recording_tests.cpp
     tests/mux_tests.cpp
     tests/marker_tests.cpp
     tests/clip_file_tests.cpp

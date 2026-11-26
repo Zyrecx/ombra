@@ -329,6 +329,9 @@ public:
 
     // Any reader holds a pin.
     bool IsPinned() const;
+    // An Init waits for its readers: a tail that saw kClosing waits for this to clear before it
+    // pins again, or it could hold Init off for good.
+    bool Closing() const;
     size_t Capacity() const;
     size_t LiveBytes() const { std::lock_guard<std::mutex> lock(mutex_); return live_bytes_; }
 

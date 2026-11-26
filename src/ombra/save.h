@@ -58,6 +58,9 @@ struct ClipDestination {
     bool                  fell_back = false;
     std::shared_ptr<void> reservation;
 };
+// Moves `full` (ending in `ext`) to the first name neither on disk nor held by another save, clip
+// or recording (`_001` on), and holds it until the returned token is destroyed.
+std::shared_ptr<void> ReserveClipName(std::wstring& full, const std::wstring& ext);
 ClipDestination PickClipPath(SaveContext* ctx, int64_t t_end, const std::wstring* group_folder_name,
                              const std::wstring& title, uint64_t room_needed, const char* log_tag);
 

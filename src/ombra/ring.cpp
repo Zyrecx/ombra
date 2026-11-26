@@ -615,6 +615,11 @@ bool Ring::IsPinned() const {
     return !readers_.empty();
 }
 
+bool Ring::Closing() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return closing_ > 0;
+}
+
 size_t Ring::Capacity() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return capacity_;

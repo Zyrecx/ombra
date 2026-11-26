@@ -307,6 +307,10 @@ std::shared_ptr<void> ReserveFreeName(std::wstring& full, const std::wstring& ex
 
 }  // namespace
 
+std::shared_ptr<void> ReserveClipName(std::wstring& full, const std::wstring& ext) {
+    return ReserveFreeName(full, ext);
+}
+
 std::wstring ClipTitleForName(const std::wstring& title) {
     std::wstring name = SanitizeFileName(title);
     if (name.size() > 64) {

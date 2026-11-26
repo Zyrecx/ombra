@@ -163,14 +163,21 @@ LiveApplyResult ApplyLiveConfig(Config& live_cfg, const JsonValue& patch_json,
             bool expected = false;
             const bool claimed = p.save_ctx.save_in_flight.compare_exchange_strong(expected, true);
             if (claimed) save_slots.held.push_back(&p.save_ctx);
-            bool clip_open = false;
+            bool clip_open = false, recording = false;
             {
                 std::lock_guard<std::mutex> lock(p.save_ctx.clip_mutex);
                 clip_open = !p.save_ctx.open_clips.empty();
-                if (!clip_open && !p.save_ctx.clips_blocked) {
+                recording = !p.save_ctx.open_recordings.empty();
+                if (!clip_open && !recording && !p.save_ctx.clips_blocked) {
                     p.save_ctx.clips_blocked = true;
                     save_slots.clips_blocked.push_back(&p.save_ctx);
                 }
+            }
+            if (recording) {
+                result.ok = false;
+                result.buffer_dropped = false;
+                result.error = "stop the recording first";
+                return result;
             }
             if (clip_open) {
                 result.ok = false;
