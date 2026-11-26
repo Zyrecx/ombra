@@ -3,7 +3,9 @@
 //
 // Tests in the "gpu" suite open real NVENC sessions and are skipped unless `--gpu` is passed or
 // OMBRA_TEST_GPU is set. The "audio-hw" suite opens the real audio
-// device (silent, no GPU) and runs only with `--audio` or OMBRA_TEST_AUDIO.
+// device (silent, no GPU) and runs only with `--audio` or OMBRA_TEST_AUDIO. The "large" suite
+// writes files past 4 GB (about 9 GB in all, deleted after) and runs only with `--large` or
+// OMBRA_TEST_LARGE.
 #define DOCTEST_CONFIG_IMPLEMENT
 #include <doctest/doctest.h>
 
@@ -29,10 +31,12 @@ int main(int argc, char** argv) {
 
     bool                gpu   = GetEnvironmentVariableW(L"OMBRA_TEST_GPU", nullptr, 0) > 0;
     bool                audio = GetEnvironmentVariableW(L"OMBRA_TEST_AUDIO", nullptr, 0) > 0;
+    bool                large = GetEnvironmentVariableW(L"OMBRA_TEST_LARGE", nullptr, 0) > 0;
     std::vector<char*>  args;
     for (int i = 0; i < argc; ++i) {
         if (std::strcmp(argv[i], "--gpu") == 0) gpu = true;
         else if (std::strcmp(argv[i], "--audio") == 0) audio = true;
+        else if (std::strcmp(argv[i], "--large") == 0) large = true;
         else args.push_back(argv[i]);
         // doctest's failures-only mode: engine log lines go only to the output folder's logs.
         if (std::strcmp(argv[i], "--minimal") == 0 || std::strcmp(argv[i], "-m") == 0) ombra::Log::SetEcho(false);
@@ -41,6 +45,7 @@ int main(int argc, char** argv) {
     doctest::Context context;
     if (!gpu) context.addFilter("test-suite-exclude", "gpu");
     if (!audio) context.addFilter("test-suite-exclude", "audio-hw");
+    if (!large) context.addFilter("test-suite-exclude", "large");
     context.applyCommandLine(static_cast<int>(args.size()), args.data());
     return context.run();
 }

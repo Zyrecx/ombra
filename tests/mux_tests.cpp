@@ -17,6 +17,9 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -635,6 +638,203 @@ TEST_CASE("mux: a fragmented recording with no video, or discarded, leaves no fi
     Mp4FragmentedWriter bad;
     CHECK_FALSE(bad.Open(TestOutputPath(L"mux_frag_bad.mp4"), {0, 0, 0, 1}, fx.width, fx.height, fx.fps,
                          VideoCodec::H264, {}, {}));
+}
+
+// --- Past 4 GB ------------------------------------------------------------------------------------
+
+namespace {
+
+constexpr uint64_t kFourGb = uint64_t{1} << 32;
+
+// Deletes the file when the test leaves, a failed REQUIRE included: each is several GB.
+struct DeleteOnExit {
+    std::wstring path;
+    ~DeleteOnExit() { DeleteFileW(path.c_str()); }
+};
+
+uint64_t FileSize(const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA a{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a)) return 0;
+    return (uint64_t{a.nFileSizeHigh} << 32) | a.nFileSizeLow;
+}
+
+std::vector<uint8_t> ReadAt(const std::wstring& path, uint64_t pos, size_t n) {
+    std::vector<uint8_t> bytes(n);
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"rb") != 0 || !f) return {};
+    const bool ok = _fseeki64(f, static_cast<long long>(pos), SEEK_SET) == 0 && fread(bytes.data(), 1, n, f) == n;
+    fclose(f);
+    return ok ? bytes : std::vector<uint8_t>{};
+}
+
+uint32_t Be32(const std::vector<uint8_t>& b, size_t at) {
+    return (uint32_t{b[at]} << 24) | (uint32_t{b[at + 1]} << 16) | (uint32_t{b[at + 2]} << 8) | b[at + 3];
+}
+
+// What a file finished with ftyp, mdat, moov says about its size fields: the mdat's 32-bit size
+// field (1: a 64-bit largesize follows) and how often each chunk offset box type names a moov box.
+struct PlainLayout {
+    uint32_t mdat_size32 = 0;
+    int      stco = 0, co64 = 0;
+};
+PlainLayout ReadPlainLayout(const std::wstring& path) {
+    PlainLayout l;
+    const uint64_t size = FileSize(path);
+    const std::vector<uint8_t> ftyp = ReadAt(path, 0, 8);
+    if (ftyp.empty()) return l;
+    const uint64_t mdat_at = Be32(ftyp, 0);
+    const std::vector<uint8_t> mdat = ReadAt(path, mdat_at, 16);
+    if (mdat.empty()) return l;
+    l.mdat_size32 = Be32(mdat, 0);
+    uint64_t mdat_size = l.mdat_size32;
+    if (mdat_size == 1) {
+        mdat_size = (uint64_t{Be32(mdat, 8)} << 32) | Be32(mdat, 12);
+    }
+    const uint64_t moov_at = mdat_at + mdat_size;
+    if (moov_at >= size || size - moov_at > (64u << 20)) return l;
+    const std::vector<uint8_t> moov = ReadAt(path, moov_at, static_cast<size_t>(size - moov_at));
+    for (size_t p = 0; p + 4 <= moov.size(); ++p) {
+        if (std::memcmp(&moov[p], "stco", 4) == 0) ++l.stco;
+        if (std::memcmp(&moov[p], "co64", 4) == 0) ++l.co64;
+    }
+    return l;
+}
+
+// Video sample `i` past 4 GB in about 2100 frames: the fixture's AU, then a filler NAL (type 12,
+// which decoders skip) of about 2 MiB whose length changes with `i`, so a sample read from the
+// wrong offset or with the wrong size shows in its packet hash.
+constexpr size_t kBigFrames   = 2160;  // 36 s at 60 fps, a fragment past the 4 GB mark
+constexpr size_t kCrashFrame  = 2100;  // a keyframe: the fragment before it ends past 4 GB
+void BigAu(const H264Fixture& fx, size_t i, std::vector<uint8_t>& out) {
+    const auto& au = fx.aus[i % fx.aus.size()].annexb;
+    out.assign(au.begin(), au.end());
+    out.insert(out.end(), {0, 0, 0, 1, 0x0C});
+    out.resize(out.size() + (size_t{2} << 20) + (i % 97) * 13, 0xFF);
+    out.push_back(0x80);  // rbsp_trailing_bits
+}
+
+}  // namespace
+
+// Writes about 9 GB (a recording, then a save, each deleted after): only with --large.
+TEST_CASE("mux: past 4 GB a recording and a save use co64 and a 64-bit mdat, and every sample reads back" *
+          doctest::test_suite("large")) {
+    const H264Fixture& fx = StandardFixture();
+    REQUIRE(fx.aus.size() % fx.gop == 0);
+    REQUIRE(kCrashFrame % fx.gop == 0);
+    ULARGE_INTEGER free_bytes{};
+    REQUIRE(GetDiskFreeSpaceExW(TestOutputPath(L"").c_str(), &free_bytes, nullptr, nullptr));
+    REQUIRE_MESSAGE(free_bytes.QuadPart > (uint64_t{6} << 30), "the test output folder's disk needs 6 GB free");
+
+    MuxMarkers markers;
+    markers.chapters = {{0, "Start"}, {35500, "Late"}};  // the chapter samples land past 4 GB too
+    std::vector<uint8_t> bytes;
+    uint64_t video_bytes = 0;
+
+    // A recording, probed as a crash would leave it once a fragment ends past 4 GB, then finished.
+    std::vector<std::string> video_packets, audio_packets;
+    {
+        const std::wstring path = TestOutputPath(L"mux_large_recording.mp4");
+        DeleteOnExit remove{path};
+        Mp4FragmentedWriter w;
+        REQUIRE(w.Open(path, fx.sps_pps, fx.width, fx.height, fx.fps, VideoCodec::H264, {}, {FakeAacTrack("Game")}));
+        for (size_t i = 0; i < kBigFrames; ++i) {
+            BigAu(fx, i, bytes);
+            REQUIRE(w.AddVideo({fx.aus[i % fx.aus.size()].idr, i}, bytes));
+            if (i == kCrashFrame) {
+                REQUIRE(FileSize(path) > kFourGb);
+                const std::vector<std::string> v = PacketHashes(path, L"v:0");
+                const std::vector<std::string> a = PacketHashes(path, L"a:0");
+                CHECK(v.size() == kCrashFrame);
+                CHECK(a.size() == kCrashFrame / 2);
+                video_packets = v;
+                audio_packets = a;
+            }
+            if (i % 2 == 0) REQUIRE(w.AddAudio(0, FakeAacFrame(i)));
+        }
+        REQUIRE(w.Finish(1, markers));
+
+        REQUIRE(FileSize(path) > kFourGb);
+        CHECK(TopLevelBoxes(path) == std::vector<std::string>{"ftyp", "mdat", "moov"});
+        const PlainLayout layout = ReadPlainLayout(path);
+        CHECK(layout.mdat_size32 == 1);
+        CHECK(layout.co64 == 3);  // video, audio, chapters: each has a chunk past 4 GB
+        CHECK(layout.stco == 0);
+
+        const std::vector<std::string> v = PacketHashes(path, L"v:0");
+        const std::vector<std::string> a = PacketHashes(path, L"a:0");
+        REQUIRE(v.size() == kBigFrames);
+        REQUIRE(a.size() == kBigFrames / 2);
+        // The fragments' own offsets (moof + trun) and the final moov's 64-bit chunk offsets agree.
+        CHECK(std::equal(video_packets.begin(), video_packets.end(), v.begin()));
+        CHECK(std::equal(audio_packets.begin(), audio_packets.end(), a.begin()));
+        video_packets = v;
+        audio_packets = a;
+
+        const VideoFrames frames = ProbeVideoFrames(path);
+        CHECK(frames.count == kBigFrames);
+        CHECK(frames.first_is_key);
+        CHECK(frames.last_pts_s == doctest::Approx(double(kBigFrames - 1) / fx.fps));
+        const ProbeInfo info = Probe(path);
+        REQUIRE_MESSAGE(info.ok, info.error);
+        REQUIRE(info.chapters.size() == 2);
+        CHECK(info.chapters[1].start_s == doctest::Approx(35.5));
+
+        ClipInfo clip;
+        REQUIRE(ReadClipInfo(path, clip));
+        for (size_t i = 0; i < kBigFrames; ++i) {
+            BigAu(fx, i, bytes);
+            std::vector<uint8_t> avcc;
+            ConvertAnnexBSample(bytes, avcc);
+            video_bytes += avcc.size();
+        }
+        CHECK(clip.video_bytes == video_bytes);
+        CHECK(clip.duration_s == doctest::Approx(double(kBigFrames) / fx.fps));
+        CHECK(clip.keyframes_s.size() == kBigFrames / fx.gop);
+    }
+
+    // A save of the same footage: one video chunk at the start (stco), audio and chapters after
+    // more than 4 GB of it (co64), the mdat's size patched to the 64-bit form.
+    {
+        const std::wstring path = TestOutputPath(L"mux_large_save.mp4");
+        DeleteOnExit remove{path};
+        MuxAudioTrack track = FakeAacTrack("Game");
+        for (size_t i = 0; i < kBigFrames; i += 2) track.frames.push_back(FakeAacFrame(i));
+        const std::vector<MuxAudioTrack> audio = {track};
+        size_t next = 0;
+        const bool ok = MuxWriteMp4Stream(
+            path, fx.sps_pps, fx.width, fx.height, fx.fps,
+            [&](MuxVideoSample& sample, std::vector<uint8_t>& out) {
+                if (next == kBigFrames) return MuxPull::kEnd;
+                sample = {fx.aus[next % fx.aus.size()].idr, next};
+                BigAu(fx, next++, out);
+                return MuxPull::kSample;
+            },
+            [&](MuxTail& tail) {
+                tail.audio   = &audio;
+                tail.markers = markers;
+                return true;
+            },
+            VideoCodec::H264);
+        REQUIRE(ok);
+
+        REQUIRE(FileSize(path) > kFourGb);
+        CHECK(TopLevelBoxes(path) == std::vector<std::string>{"ftyp", "mdat", "moov"});
+        const PlainLayout layout = ReadPlainLayout(path);
+        CHECK(layout.mdat_size32 == 1);
+        CHECK(layout.co64 == 2);
+        CHECK(layout.stco == 1);
+        // Laid out differently from the recording, the same samples.
+        CHECK(PacketHashes(path, L"v:0") == video_packets);
+        CHECK(PacketHashes(path, L"a:0") == audio_packets);
+        const ProbeInfo info = Probe(path);
+        REQUIRE_MESSAGE(info.ok, info.error);
+        REQUIRE(info.chapters.size() == 2);
+        CHECK(info.chapters[1].start_s == doctest::Approx(35.5));
+        ClipInfo clip;
+        REQUIRE(ReadClipInfo(path, clip));
+        CHECK(clip.video_bytes == video_bytes);
+        CHECK(clip.duration_s == doctest::Approx(double(kBigFrames) / fx.fps));
+    }
 }
 
 }  // namespace ombra::test
