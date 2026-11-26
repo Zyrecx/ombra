@@ -1693,7 +1693,9 @@ bool Mp4FragmentedWriter::Finish(uint32_t last_sample_ticks, const MuxMarkers& m
     WriteMoov(moov, Mp4Now(), m.width, m.height, m.entry, m.video, params, chapters.empty() ? nullptr : &chapter_t,
               chapters, markers.json);
     sink.Write(moov.Data());
-    sink.Flush();
+    // On the disk before the placeholder turns into the mdat that points at it: a power cut
+    // between the two must not leave a header promising a moov the disk never got.
+    sink.Sync();
     if (!sink.Ok()) {
         // Out of room for the moov: back to the fragmented file, whole up to its last fragment.
         sink.Truncate(fragment_end);
