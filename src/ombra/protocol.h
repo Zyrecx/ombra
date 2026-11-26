@@ -22,7 +22,8 @@
 //
 //   "app" (required, 1-64 bytes of UTF-8, no control characters) names the caller. Every request
 //   after the hello needs an "id"; a line over kMaxApiMessageBytes closes the connection, as does
-//   no hello within kHelloTimeoutMs. At most kMaxApiClients apps connect at once.
+//   no hello within kHelloTimeoutMs. At most kMaxApiClients apps connect at once; Ombra's own
+//   command line has kMaxCommandLineClients places of its own.
 //   Error codes: bad_message, bad_request, unsupported_version, not_allowed, too_many_connections,
 //   unknown_type, plus each command's own.
 //
@@ -178,6 +179,7 @@ inline constexpr int kApiVersionMin   = 1;  // the public API versions this engi
 inline constexpr int kApiVersionMax   = 1;
 inline constexpr size_t kMaxApiMessageBytes = 64 * 1024;
 inline constexpr int    kMaxApiClients      = 16;    // app connections at once; the overlay doesn't count
+inline constexpr int    kMaxCommandLineClients = 16;  // Ombra's own command line's, apart from the apps'
 inline constexpr unsigned kHelloTimeoutMs   = 5000;  // a connection silent this long before its hello closes
 
 enum class PipeSurface { kInternal, kApi };

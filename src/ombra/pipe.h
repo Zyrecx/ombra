@@ -104,6 +104,10 @@ public:
     // Log::Error already named the reason.
     bool Start(HANDLE external_lock = nullptr);
 
+    // Before Start: who counts as Ombra's own command line (default IsCommandLineClient). Tests
+    // run in this process, which the default counts.
+    void SetCommandLineGate(InternalGate gate) { command_line_gate_ = std::move(gate); }
+
     // Signals the accept loop and every client worker to exit, then joins them all. Safe to call
     // from any thread except a client worker thread itself (a Handler must never call Stop()).
     void Stop();
@@ -120,9 +124,11 @@ private:
     Handler                  handler_;
     ApiHandler               api_handler_;
     InternalGate             internal_gate_;
+    InternalGate             command_line_gate_ = IsCommandLineClient;
     EventHub*                events_ = nullptr;
     std::atomic<bool>        running_{false};
     std::atomic<int>         api_clients_{0};  // live API connections, capped at kMaxApiClients
+    std::atomic<int>         command_line_clients_{0};  // Ombra's own command line's, kMaxCommandLineClients
     HANDLE                   instance_mutex_ = nullptr;  // single-instance guard, see pipe.cpp
     HANDLE                   stop_event_ = nullptr;      // manual-reset; every pipe wait includes it
     std::thread              accept_thread_;

@@ -406,13 +406,17 @@ std::optional<PipeSurface> PipeServer::Hello(const JsonValue& req, HANDLE pipe, 
         if (!ValidAppName(caller.app))
             return refuse("bad_request", "\"app\" must name the caller: 1-64 characters, no control characters");
         if (!api_handler_) return refuse("not_allowed", "this engine takes no API connections");
-        if (api_clients_.fetch_add(1) >= kMaxApiClients) {
-            api_clients_.fetch_sub(1);
-            Log::Warn("pipe: refused app \"%s\": %d app connections already open", caller.app.c_str(),
-                      kMaxApiClients);
+        // The user's own scripts (a few `ombra watch`es, say) have places of their own: apps
+        // holding every one can't lock the command line out, nor it them.
+        caller.command_line = command_line_gate_(caller.pid, caller.exe);
+        std::atomic<int>& count = caller.command_line ? command_line_clients_ : api_clients_;
+        const int cap = caller.command_line ? kMaxCommandLineClients : kMaxApiClients;
+        if (count.fetch_add(1) >= cap) {
+            count.fetch_sub(1);
+            Log::Warn("pipe: refused app \"%s\": %d %s connections already open", caller.app.c_str(), cap,
+                      caller.command_line ? "command line" : "app");
             return refuse("too_many_connections", "too many apps are connected to Ombra");
         }
-        caller.command_line = IsCommandLineClient(caller.pid, caller.exe);
         Log::Info("pipe: app \"%s\" connected (pid %lu, %ls%ls)", caller.app.c_str(), caller.pid,
                   caller.exe.empty() ? L"image unknown" : caller.exe.c_str(),
                   caller.command_line ? L", command line" : L"");
@@ -548,7 +552,7 @@ void PipeServer::ServeClient(HANDLE pipe) {
         if (!reply(api_handler_(request, caller))) break;
     }
     subscription.reset();  // before the pipe closes: the hub stops queueing for it
-    if (surface == PipeSurface::kApi) api_clients_.fetch_sub(1);
+    if (surface == PipeSurface::kApi) (caller.command_line ? command_line_clients_ : api_clients_).fetch_sub(1);
 
     // Each client has its own instance, so closing it is the disconnect, and what's written stays
     // readable until the client closes its end. DisconnectNamedPipe would discard that, and the

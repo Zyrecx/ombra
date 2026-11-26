@@ -607,6 +607,8 @@ TEST_CASE("pipe: the internal gate's default passes only ombra-ui.exe beside thi
 
 TEST_CASE("pipe api: app connections are capped; a closed one frees its place") {
     TwoSurfaceServer s;
+    std::atomic<bool> as_command_line{false};  // this process is otherwise Ombra's own command line
+    s.server_.SetCommandLineGate([&](DWORD, const std::wstring&) { return as_command_line.load(); });
     REQUIRE(s.server_.Start());
     std::vector<std::unique_ptr<RawPipeClient>> apps;
     for (int i = 0; i < kMaxApiClients; ++i) {
@@ -623,6 +625,17 @@ TEST_CASE("pipe api: app connections are capped; a closed one frees its place") 
         CHECK(OkIs(resp, false));
         CHECK(StrOf(resp, "error") == "too_many_connections");
         CHECK(extra.ServerClosed());
+    }
+    // Ombra's command line is never locked out by apps holding every place.
+    {
+        as_command_line = true;
+        RawPipeClient cli;
+        REQUIRE(cli.Connected());
+        REQUIRE(cli.Send(ApiHello()));
+        CHECK(OkIs(cli.Receive(), true));
+        cli.Close();
+        Sleep(50);  // its close is seen before the next hello asks for a place
+        as_command_line = false;
     }
     // The internal surface doesn't count against it.
     {
