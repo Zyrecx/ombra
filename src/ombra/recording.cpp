@@ -492,6 +492,14 @@ void RecordingGroup::Stop() {
     for (const auto& s : sessions_) s->StopAt(now);
 }
 
+const wchar_t* RecordEndToast(const RecordingResults& result) {
+    // How it ended first: a recording cut short says why, whatever it kept.
+    if (result.end == RecordEnd::kDiskLow) return L"record_disk_low";
+    if (result.end == RecordEnd::kWriteFailed) return L"record_write_failed";
+    if (result.end == RecordEnd::kNoFootage || result.outcome == SaveOutcome::kNothingNew) return L"record_nothing";
+    return result.outcome == SaveOutcome::kSaved ? L"record_saved" : L"record_failed";
+}
+
 double RecordingGroup::Seconds() const {
     double seconds = 0;
     for (const auto& s : sessions_) seconds = (std::max)(seconds, s->Seconds());
@@ -516,6 +524,7 @@ std::shared_ptr<RecordingGroup> StartRecording(const std::vector<SaveContext*>& 
     std::shared_ptr<RecordingGroup> group(new RecordingGroup());
     group->started_ = op->started.get_future().share();
     group->done_    = op->done.get_future().share();
+    group->id_      = request.id;
     EventHub* events = contexts.empty() || !request.id ? nullptr : contexts.front()->events;
 
     // A monitor's first frame (true) or its end before one (false): Started is true at the first
@@ -629,11 +638,11 @@ std::shared_ptr<RecordingGroup> Recordings::Stop(const std::string& app, uint64_
     return group;
 }
 
-std::vector<Recordings::Running> Recordings::List() {
+std::vector<Recordings::Running> Recordings::List(const std::string& app) {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<Running> out;
     for (const Entry& e : entries_)
-        if (e.group->Done().wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        if ((app.empty() || e.app == app) && e.group->Done().wait_for(std::chrono::seconds(0)) != std::future_status::ready)
             out.push_back({e.id, e.app, e.group->Seconds()});
     return out;
 }

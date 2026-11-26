@@ -410,8 +410,8 @@ std::shared_ptr<SaveToastSignal> SpawnSaveToast(const std::wstring& app) {
 
 // A one-shot toast for an API app's action (`event` as ombra-ui's LookupToastInfo knows it), naming
 // the app through the same inheritable SaveToastInfo mapping a save toast reads: the name is
-// untrusted text, kept off the command line.
-void SpawnAppToast(const wchar_t* event, const std::wstring& app) {
+// untrusted text, kept off the command line. `seconds`: the length the title names, if it names one.
+void SpawnAppToast(const wchar_t* event, const std::wstring& app, double seconds = 0) {
     SECURITY_ATTRIBUTES inheritable{sizeof(inheritable), nullptr, TRUE};
     HANDLE info = CreateFileMappingW(INVALID_HANDLE_VALUE, &inheritable, PAGE_READWRITE, 0,
                                      sizeof(SaveToastInfo), nullptr);
@@ -421,6 +421,7 @@ void SpawnAppToast(const wchar_t* event, const std::wstring& app) {
     }
     if (void* view = MapViewOfFile(info, FILE_MAP_WRITE, 0, 0, sizeof(SaveToastInfo))) {
         SetToastApp(*static_cast<SaveToastInfo*>(view), app);
+        static_cast<SaveToastInfo*>(view)->seconds = static_cast<float>(seconds);
         UnmapViewOfFile(view);
     }
     SpawnToastProcess(std::wstring(event) + L" --info " +
@@ -722,6 +723,22 @@ int RunEngine(int argc, wchar_t** argv) {
     // Before what holds it: app_clips, the pipelines' saves, the controller's game markers.
     MarkerTimeline markers(static_cast<int64_t>(kMarkerTrailSeconds * static_cast<double>(QpcFrequency())));
     AppClips     app_clips;      // the API's clips, likewise
+    Recordings   recordings;     // the API's recordings
+    PipeApi      pipe_api;
+    pipe_api.clips        = &app_clips;
+    pipe_api.recordings   = &recordings;
+    pipe_api.replay_toast = [](const std::string& app, bool on) {
+        SpawnAppToast(on ? L"buffer_on" : L"buffer_off", WideFromUtf8(app));
+    };
+    // A tool's recording is never silent, as its clip isn't: these follow no toast setting.
+    pipe_api.record_feedback = [](const std::string& app) {
+        RecordFeedback feedback;
+        feedback.started = [name = WideFromUtf8(app)] { SpawnAppToast(L"record_started", name); };
+        feedback.ended   = [name = WideFromUtf8(app)](const RecordingResults& r) {
+            SpawnAppToast(RecordEndToast(r), name, r.Seconds());
+        };
+        return feedback;
+    };
     // The pipe's events: before the pipe server, the saves and the controller (whose destructor
     // can still end a game), so every source outlives nothing it publishes into.
     EventHub     events;
@@ -1437,10 +1454,7 @@ int RunEngine(int argc, wchar_t** argv) {
                                       tray.get(), &screenshot_ctx, &autotune_ctx, &pipelines,
                                       &raw_config, &memory_layout, &audio_control,
                                       ReplayFeedback(true, caller ? WideFromUtf8(caller->app) : std::wstring{}),
-                                      surface, &app_clips, caller, [caller](bool on) {
-                                          SpawnAppToast(on ? L"buffer_on" : L"buffer_off",
-                                                        caller ? WideFromUtf8(caller->app) : std::wstring{});
-                                      });
+                                      surface, &pipe_api, caller);
         };
         pipe_server = std::make_unique<PipeServer>(
             [handle](const JsonValue& req) { return handle(req, PipeSurface::kInternal, nullptr); },
@@ -1673,8 +1687,10 @@ int RunEngine(int argc, wchar_t** argv) {
     if (resident) crash_upload::EndRun();
     // Apps' open clips end here with what they took, their files written and feedback given,
     // while the pipe still runs: a client waiting on its clip gets its answer, and the pipe's Stop
-    // below never waits out a clip. No clip opens after this.
+    // below never waits out a clip. No clip opens after this. Recordings likewise: each stops now
+    // and finishes its files before the wait below returns.
     app_clips.Close();
+    recordings.Close();
     for (auto& mp : pipelines) StopClipsAndWait(&mp->save_ctx);
     // Subscribers hear the exit after those clips' clip_saved and a hotkey save already running
     // (its event follows its last file by a moment, so it's best effort), with a short, bounded

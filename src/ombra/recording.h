@@ -149,6 +149,11 @@ struct RecordingResults {
     double Seconds() const;  // the longest monitor's
 };
 
+// The toast for a recording's end, as ombra-ui's LookupToastInfo knows it: record_saved,
+// record_nothing (no footage), record_disk_low or record_write_failed (stopped early, files kept),
+// record_failed (a monitor wrote nothing it should have).
+const wchar_t* RecordEndToast(const RecordingResults& result);
+
 // What the engine tells the user about a recording. Both run on a recording thread.
 struct RecordFeedback {
     std::function<void()>                        started;  // once, when the first file opens
@@ -163,10 +168,12 @@ public:
     // True once a monitor wrote its first frame; false when every one ended before that.
     std::shared_future<bool>             Started() const { return started_; }
     std::shared_future<RecordingResults> Done() const { return done_; }
+    uint64_t Id() const { return id_; }  // RecordRequest::id
 
 private:
     friend std::shared_ptr<RecordingGroup> StartRecording(const std::vector<SaveContext*>&, const RecordRequest&,
                                                           std::shared_ptr<void>, RecordFeedback);
+    uint64_t                                       id_ = 0;
     std::vector<std::shared_ptr<RecordingSession>> sessions_;
     std::shared_future<bool>                       started_;
     std::shared_future<RecordingResults>           done_;
@@ -203,7 +210,8 @@ public:
         std::string app;
         double      seconds = 0;
     };
-    std::vector<Running> List();
+    // The recordings running now: `app`'s, or with no app every one.
+    std::vector<Running> List(const std::string& app = {});
     // Engine exit, before StopClipsAndWait: refuses every start and stops every recording.
     void Close();
 

@@ -33,6 +33,7 @@
 #include "ombra/ring.h"
 #include "ombra/supervisor.h"
 #include "ombra/reconfig.h"
+#include "ombra/recording.h"
 #include "ombra/save.h"
 #include "ombra/util.h"
 #include "ombra/telemetry.h"
@@ -417,9 +418,8 @@ struct PipeRequest {
     MemoryLayout*                                        memory;
     AudioSourceControl*                                  audio_sources;
     const StartSaveFeedback&                             save_feedback;
-    AppClips*                                            app_clips;
+    const PipeApi*                                       api;
     const PipeCaller*                                    caller;
-    const std::function<void(bool)>&                     replay_toast;
     // Held already when the command's table entry says so; save_now releases it before waiting.
     std::unique_lock<std::mutex>&                        config_lock;
 
@@ -432,6 +432,9 @@ struct PipeRequest {
     JsonValue OnApiStatus();
     JsonValue OnApiClip();
     JsonValue OnApiMarker();
+    JsonValue OnApiRecordStart();
+    JsonValue OnApiRecordStop();
+    std::vector<SaveContext*> Contexts() const;  // every monitor's, as a save takes them
     JsonValue OnApiReplay();
     JsonValue OnSaveNow();
     JsonValue OnScreenshot();
@@ -813,6 +816,24 @@ JsonValue PipeRequest::OnSetConfig() {
     return resp;
 }
 
+namespace {
+
+// The one app every script using Ombra's command line is to the clip and recording registries
+// and the marker cap: "--as" only names its toasts.
+constexpr const char* kCommandLineApp = "command line";
+
+}  // namespace
+
+std::vector<SaveContext*> PipeRequest::Contexts() const {
+    std::vector<SaveContext*> contexts;
+    if (all_pipelines) {
+        for (const auto& pipeline : *all_pipelines) contexts.push_back(&pipeline->save_ctx);
+    } else {
+        contexts.push_back(&save_ctx);
+    }
+    return contexts;
+}
+
 // The public API's status: a small, stable subset of get_status (protocol.h).
 JsonValue PipeRequest::OnApiStatus() {
     const std::wstring game = controller.CurrentGamePid() ? controller.CurrentGameFolder() : std::wstring{};
@@ -821,6 +842,17 @@ JsonValue PipeRequest::OnApiStatus() {
     resp.Set("buffering", JsonValue::MakeBool(supervisor.Armed()));
     resp.Set("game", game.empty() ? JsonValue{} : JsonValue::MakeStr(NarrowUtf8(game)));
     resp.Set("buffer_seconds", JsonValue::MakeNum(cfg.buffer_seconds));
+    // The caller's own recordings running now; another app's aren't its business.
+    JsonValue recordings = JsonValue::MakeArray();
+    if (api && api->recordings && caller && caller->command_line) {
+        for (const Recordings::Running& running : api->recordings->List(kCommandLineApp)) {
+            JsonValue entry = JsonValue::MakeObject();
+            entry.Set("recording", JsonValue::MakeNum(static_cast<double>(running.id)));
+            entry.Set("seconds", JsonValue::MakeNum(std::round(running.seconds * 100) / 100));
+            recordings.arr.push_back(std::move(entry));
+        }
+    }
+    resp.Set("recordings", std::move(recordings));
     return resp;
 }
 
@@ -861,7 +893,7 @@ JsonValue PipeRequest::OnApiClip() {
     const JsonValue* wait_v = req.Find("wait");
     if (wait_v && wait_v->type != JsonValue::Type::Bool)
         return ApiError("bad_request", "\"wait\" must be true or false");
-    if (!app_clips) return ApiError("not_allowed", "this engine takes no clips");
+    if (!api || !api->clips) return ApiError("not_allowed", "this engine takes no clips");
     if (!controller.UserEnabled())
         return ApiError("replay_off", "Instant Replay is off: there is no footage to clip");
 
@@ -871,15 +903,10 @@ JsonValue PipeRequest::OnApiClip() {
     request.after_seconds  = *after;
     if (title_v) request.title = WideFromUtf8(title_v->str);
     request.app = caller->app;
-    std::vector<SaveContext*> contexts;
-    if (all_pipelines) {
-        for (const auto& pipeline : *all_pipelines) contexts.push_back(&pipeline->save_ctx);
-    } else {
-        contexts.push_back(&save_ctx);
-    }
+    const std::vector<SaveContext*> contexts = Contexts();
     // A tool's clip is never silent: its toast doesn't follow the user's save-toast setting. Every
     // script using the command line is one app ("--as" only names it), so they share one open clip.
-    const auto started = app_clips->Request("command line", contexts, request, save_feedback);
+    const auto started = api->clips->Request(kCommandLineApp, contexts, request, save_feedback);
     if (!started) return ApiError("failed", "Ombra is exiting");
 
     JsonValue resp = JsonValue::MakeObject();
@@ -921,6 +948,129 @@ JsonValue PipeRequest::OnApiClip() {
             : outcome == SaveOutcome::kBusy     ? "the buffer is being resized; try again in a moment"
                                                 : "one or more monitors couldn't write the clip; see the log"));
     }
+    return resp;
+}
+
+namespace {
+
+// Why a recording ended without a file, as the API's error.
+JsonValue RecordFailure(const RecordingResults& result) {
+    bool busy = false, failed = false;
+    for (const RecordingSession::Result& monitor : result.monitors) {
+        busy |= monitor.outcome == SaveOutcome::kBusy;
+        failed |= monitor.outcome == SaveOutcome::kFailed;
+    }
+    if (busy && !failed) return ApiError("busy", "the buffer is being resized; try again in a moment");
+    if (result.outcome == SaveOutcome::kNothingNew || result.end == RecordEnd::kNoFootage)
+        return ApiError("nothing_new", "nothing to record: no footage arrived within " +
+                                           std::to_string(static_cast<int>(kRecordStartSeconds)) +
+                                           " s (every display off, or the recorded window is gone)");
+    return ApiError("failed", "one or more monitors couldn't write the recording; see the log");
+}
+
+}  // namespace
+
+// The public API's recording (protocol.h, recording.h): only Ombra's command line until consent
+// exists. Answers once the first file opens, or with why none did (at most kRecordStartSeconds).
+// It runs with Instant Replay off too: then it starts now, and the ring keeps only its tail.
+JsonValue PipeRequest::OnApiRecordStart() {
+    const int64_t start_qpc = QpcNow();
+    if (!caller || !caller->command_line)
+        return ApiError("not_allowed", "apps need the user's approval to record, which this Ombra "
+                                       "can't ask for yet; only Ombra's command line can");
+    const std::optional<double> before = SecondsField(req, "before", 0);
+    if (!before) return ApiError("bad_request", "\"before\" is seconds: a number, 0 or more");
+    const JsonValue* title_v = req.Find("title");
+    if (title_v && title_v->type != JsonValue::Type::String)
+        return ApiError("bad_request", "\"title\" must be a string");
+    if (!api || !api->recordings) return ApiError("not_allowed", "this engine takes no recordings");
+
+    RecordRequest request;
+    request.start_qpc      = start_qpc;
+    request.before_seconds = *before;
+    if (title_v) request.title = WideFromUtf8(title_v->str);
+    request.app = caller->app;
+    const std::vector<SaveContext*> contexts = Contexts();
+    // The hold first: with it, switching Instant Replay off no longer ends capture, so the switch
+    // read after it decides how far back the recording may reach.
+    const auto arm = [this, &contexts](RecordRequest& r) {
+        std::shared_ptr<void> hold = controller.HoldRecording();
+        if (!controller.UserEnabled()) {
+            r.floor_qpc = r.start_qpc;  // what the ring holds is a recording's, not this one's
+        } else {
+            for (const SaveContext* ctx : contexts)
+                r.floor_qpc = (std::max)(r.floor_qpc, ctx->replay_floor_qpc.load(std::memory_order_acquire));
+        }
+        return hold;
+    };
+    // Every script using the command line is one app ("--as" only names it), so `record stop`
+    // from another process finds what `record start` began.
+    const Recordings::Started started = api->recordings->Start(
+        kCommandLineApp, contexts, std::move(request), arm,
+        api->record_feedback ? api->record_feedback(caller->app) : RecordFeedback{});
+    if (started.refusal == Recordings::Refusal::kClosed) return ApiError("failed", "Ombra is exiting");
+    if (started.refusal == Recordings::Refusal::kAlreadyRecording) {
+        JsonValue resp = ApiError("already_recording", "this app is recording already; stop that one first");
+        resp.Set("recording", JsonValue::MakeNum(static_cast<double>(started.id)));
+        return resp;
+    }
+    // Outside the registry's lock: another app's start or stop doesn't wait out this one's footage.
+    if (!started.group->Started().get()) {
+        // Answered here, so forgotten here: a later record_stop says not_recording, not this again.
+        api->recordings->Stop(kCommandLineApp, started.id);
+        JsonValue resp = RecordFailure(started.group->Done().get());
+        resp.Set("recording", JsonValue::MakeNum(static_cast<double>(started.id)));
+        return resp;
+    }
+    JsonValue resp = JsonValue::MakeObject();
+    resp.Set("recording", JsonValue::MakeNum(static_cast<double>(started.id)));
+    return resp;
+}
+
+// Stops the app's recording and answers once every file is finished.
+JsonValue PipeRequest::OnApiRecordStop() {
+    if (!caller || !caller->command_line)
+        return ApiError("not_allowed", "apps need the user's approval to record, which this Ombra "
+                                       "can't ask for yet; only Ombra's command line can");
+    uint64_t id = 0;
+    if (const JsonValue* id_v = req.Find("recording")) {
+        if (id_v->type != JsonValue::Type::Number || !std::isfinite(id_v->num) || id_v->num < 1 ||
+            id_v->num != std::floor(id_v->num) || id_v->num > 9007199254740991.0)
+            return ApiError("bad_request", "\"recording\" is a recording's id: a whole number, 1 or more");
+        id = static_cast<uint64_t>(id_v->num);
+    }
+    if (!api || !api->recordings) return ApiError("not_allowed", "this engine takes no recordings");
+    const std::shared_ptr<RecordingGroup> group = api->recordings->Stop(kCommandLineApp, id);
+    if (!group)
+        return ApiError("not_recording", id ? "this app has no recording with that id"
+                                            : "this app isn't recording");
+
+    const RecordingResults& result = group->Done().get();
+    const std::vector<SaveContext*> contexts = Contexts();
+    JsonValue resp = result.outcome == SaveOutcome::kSaved ? JsonValue::MakeObject() : RecordFailure(result);
+    resp.Set("recording", JsonValue::MakeNum(static_cast<double>(group->Id())));
+    resp.Set("end", JsonValue::MakeStr(RecordEndName(result.end)));
+    resp.Set("seconds", JsonValue::MakeNum(std::round(result.Seconds() * 100) / 100));
+    JsonValue monitors = JsonValue::MakeArray();
+    JsonValue all_paths = JsonValue::MakeArray();
+    for (size_t i = 0; i < result.monitors.size(); ++i) {
+        const RecordingSession::Result& monitor = result.monitors[i];
+        JsonValue entry = JsonValue::MakeObject();
+        entry.Set("monitor", JsonValue::MakeStr(i < contexts.size() ? contexts[i]->monitor_device : ""));
+        entry.Set("reason", JsonValue::MakeStr(SaveOutcomeName(monitor.outcome)));
+        entry.Set("end", JsonValue::MakeStr(RecordEndName(monitor.end)));
+        JsonValue paths = JsonValue::MakeArray();
+        for (const std::wstring& path : monitor.paths) {
+            paths.arr.push_back(JsonValue::MakeStr(NarrowUtf8(path)));
+            all_paths.arr.push_back(JsonValue::MakeStr(NarrowUtf8(path)));
+        }
+        entry.Set("paths", std::move(paths));
+        entry.Set("fell_back", JsonValue::MakeBool(monitor.fell_back));
+        entry.Set("seconds", JsonValue::MakeNum(std::round(monitor.seconds * 100) / 100));
+        monitors.arr.push_back(std::move(entry));
+    }
+    resp.Set("paths", std::move(all_paths));
+    resp.Set("monitors", std::move(monitors));
     return resp;
 }
 
@@ -967,12 +1117,7 @@ JsonValue PipeRequest::OnApiMarker() {
         return ApiError("replay_off", "Instant Replay is off: there is no footage to mark");
 
     const int64_t qpc = now + std::llround(at * static_cast<double>(QpcFrequency()));
-    std::vector<SaveContext*> contexts;
-    if (all_pipelines) {
-        for (const auto& pipeline : *all_pipelines) contexts.push_back(&pipeline->save_ctx);
-    } else {
-        contexts.push_back(&save_ctx);
-    }
+    const std::vector<SaveContext*> contexts = Contexts();
     // Footage must cover the moment, or no file could ever show the marker. A disarmed ring keeps
     // stale footage until it's freed; that covers only its own past.
     const MarkerReach reach = MarkerReachAt(contexts, qpc);
@@ -985,7 +1130,7 @@ JsonValue PipeRequest::OnApiMarker() {
     marker.owner     = caller->app;
     marker.important = important_v && important_v->b;
     // Every script using the command line is one app ("--as" only names it), so they share a cap.
-    const MarkerTimeline::AddResult added = save_ctx.markers->Add(marker, "command line", reach.oldest_qpc);
+    const MarkerTimeline::AddResult added = save_ctx.markers->Add(marker, kCommandLineApp, reach.oldest_qpc);
     if (added != MarkerTimeline::AddResult::kAdded)
         return ApiError("too_many_markers",
                         (added == MarkerTimeline::AddResult::kAppFull
@@ -1011,7 +1156,7 @@ JsonValue PipeRequest::OnApiReplay() {
     const bool changed = controller.UserEnabled() != on;
     controller.SetUserEnabled(on);
     if (tray) tray->SetTooltip(TrayTooltip(on));
-    if (changed && replay_toast) replay_toast(on);
+    if (changed && api && api->replay_toast) api->replay_toast(caller->app, on);
     JsonValue resp = JsonValue::MakeObject();
     resp.Set("replay", JsonValue::MakeBool(on));
     resp.Set("changed", JsonValue::MakeBool(changed));
@@ -1192,12 +1337,7 @@ JsonValue PipeRequest::OnGetStatus() {
 JsonValue PipeRequest::OnSaveNow() {
     const StartSaveFeedback feedback = cfg.ui_toast_enabled && cfg.ui_toast_on_save ? save_feedback : StartSaveFeedback{};
     config_lock.unlock();
-    std::vector<SaveContext*> contexts;
-    if (all_pipelines) {
-        for (const auto& pipeline : *all_pipelines) contexts.push_back(&pipeline->save_ctx);
-    } else {
-        contexts.push_back(&save_ctx);
-    }
+    const std::vector<SaveContext*> contexts = Contexts();
     // Wait only on this pipe worker. Hotkeys dispatch the same operation without waiting.
     const auto result = SaveReplay(contexts, feedback).get();
     JsonValue resp = JsonValue::MakeObject();
@@ -1623,6 +1763,8 @@ constexpr PipeCommand kApiCommands[] = {
     {"status", true, &PipeRequest::OnApiStatus},
     {"clip",   false, &PipeRequest::OnApiClip},  // not the pipe's lock: a rebuild would delay the event
     {"marker", false, &PipeRequest::OnApiMarker},  // likewise: it marks the moment asked
+    {"record_start", false, &PipeRequest::OnApiRecordStart},  // waits for footage, up to kRecordStartSeconds
+    {"record_stop",  false, &PipeRequest::OnApiRecordStop},   // waits for the files
     {"replay", false, &PipeRequest::OnApiReplay},  // as set_armed: the controller serializes it
 };
 
@@ -1635,8 +1777,7 @@ JsonValue HandlePipeRequest(const JsonValue& req, Config& cfg, PipelineSuperviso
                              const std::vector<std::unique_ptr<MonitorPipeline>>* all_pipelines,
                              RawConfigMap* raw_store, MemoryLayout* memory,
                              AudioSourceControl* audio_sources, const StartSaveFeedback& save_feedback,
-                             PipeSurface surface, AppClips* app_clips, const PipeCaller* caller,
-                             const std::function<void(bool)>& replay_toast) {
+                             PipeSurface surface, const PipeApi* api, const PipeCaller* caller) {
     const JsonValue* type_v = req.Find("type");
     const std::string type  = (type_v && type_v->type == JsonValue::Type::String)
                                    ? type_v->str : "";
@@ -1657,9 +1798,9 @@ JsonValue HandlePipeRequest(const JsonValue& req, Config& cfg, PipelineSuperviso
     std::unique_lock<std::mutex> config_lock(config_mutex, std::defer_lock);
     PipeRequest request{req, cfg, supervisor, controller, save_ctx, gpu_summary, tray, screenshot_ctx,
                         autotune_ctx, all_pipelines, raw_store, memory, audio_sources, save_feedback,
-                        app_clips, caller, replay_toast, config_lock};
-    const bool api = surface == PipeSurface::kApi;
-    for (const PipeCommand& command : api ? std::span<const PipeCommand>(kApiCommands)
+                        api, caller, config_lock};
+    const bool public_api = surface == PipeSurface::kApi;
+    for (const PipeCommand& command : public_api ? std::span<const PipeCommand>(kApiCommands)
                                           : std::span<const PipeCommand>(kPipeCommands)) {
         if (type != command.type) continue;
         if (command.config_lock) config_lock.lock();
@@ -1668,7 +1809,7 @@ JsonValue HandlePipeRequest(const JsonValue& req, Config& cfg, PipelineSuperviso
 
     JsonValue resp = JsonValue::MakeObject();
     resp.Set("ok", JsonValue::MakeBool(false));
-    if (api) {
+    if (public_api) {
         resp.Set("error", JsonValue::MakeStr("unknown_type"));
         resp.Set("message", JsonValue::MakeStr("no command named \"" + type + "\""));
     } else {

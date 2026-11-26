@@ -12,6 +12,7 @@
 #include "ombra/json.h"
 #include "ombra/protocol.h"
 #include "ombra/reconfig.h"
+#include "ombra/recording.h"
 #include "ombra/ring.h"
 #include "ombra/save.h"
 #include "ombra/supervisor.h"
@@ -34,6 +35,16 @@ namespace ombra {
 
 class AppClips;
 struct PipeCaller;
+
+// What the public API (protocol.h) acts through, one per engine: the engine's, or a test's.
+struct PipeApi {
+    AppClips*   clips      = nullptr;  // clip.h; nullptr refuses `clip`
+    Recordings* recordings = nullptr;  // recording.h; nullptr refuses `record_start`
+    // An app turned Instant Replay on (true) or off: its toast, naming the app. Empty shows nothing.
+    std::function<void(const std::string& app, bool on)> replay_toast;
+    // A recording's toasts, naming the app that started it. Empty shows nothing.
+    std::function<RecordFeedback(const std::string& app)> record_feedback;
+};
 
 // Defined in engine_pipe.cpp, set by RunEngine (engine.cpp); null/zero outside the resident engine.
 extern std::atomic<HotkeyRegistry*> g_hotkeys_for_engine;
@@ -178,12 +189,9 @@ JsonValue HandlePipeRequest(const JsonValue& req, Config& cfg, PipelineSuperviso
                              const StartSaveFeedback& save_feedback = {},
                              // kApi answers only kApiCommands (protocol.h's public API).
                              PipeSurface surface = PipeSurface::kInternal,
-                             // The API's clips (clip.h); nullptr refuses `clip`.
-                             AppClips* app_clips = nullptr,
+                             // What the public API acts through; nullptr refuses clip.
+                             const PipeApi* api = nullptr,
                              // Who sent an API request; nullptr is an app with no rights.
-                             const PipeCaller* caller = nullptr,
-                             // An app turned Instant Replay on (true) or off: its toast, naming
-                             // the app. Empty shows nothing (tests).
-                             const std::function<void(bool)>& replay_toast = {});
+                             const PipeCaller* caller = nullptr);
 
 }  // namespace ombra

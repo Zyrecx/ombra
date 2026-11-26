@@ -562,6 +562,23 @@ TEST_CASE("recording group: no monitor opens: it reports at once and drops the h
     CHECK(r.monitors.at(0).outcome == SaveOutcome::kBusy);
 }
 
+TEST_CASE("RecordEndToast: an early end outranks the outcome; a monitor that wrote nothing it should have fails it") {
+    RecordingResults r;
+    r.outcome = SaveOutcome::kSaved;
+    CHECK(std::wstring(RecordEndToast(r)) == L"record_saved");
+    r.end = RecordEnd::kDiskLow;
+    CHECK(std::wstring(RecordEndToast(r)) == L"record_disk_low");
+    r.outcome = SaveOutcome::kFailed;
+    r.end     = RecordEnd::kWriteFailed;
+    CHECK(std::wstring(RecordEndToast(r)) == L"record_write_failed");
+    r.end = RecordEnd::kNoFootage;
+    CHECK(std::wstring(RecordEndToast(r)) == L"record_nothing");
+    r.end = RecordEnd::kStopped;
+    CHECK(std::wstring(RecordEndToast(r)) == L"record_failed");
+    r.outcome = SaveOutcome::kNothingNew;
+    CHECK(std::wstring(RecordEndToast(r)) == L"record_nothing");
+}
+
 TEST_CASE("recordings: one per app; a second start is refused before it arms; only its app stops it") {
     RecordRig rig(L"registry");
     rig.ctx.out_path    = L"out\\ombra.mp4";

@@ -29,7 +29,9 @@
 //
 //   status          -> {}
 //                   <- {"replay":bool (the Instant Replay switch), "buffering":bool (footage is
-//                       being kept right now), "game":string|null, "buffer_seconds":number}
+//                       being kept right now), "game":string|null, "buffer_seconds":number,
+//                       "recordings":[{"recording":number, "seconds":number}] (the caller's own
+//                       running recordings; only Ombra's command line has any until consent exists)}
 //
 //   clip            -> {"before"?:number (seconds before now; default buffer_seconds, capped at it),
 //                       "after"?:number (seconds after now; default 0, capped at 120),
@@ -64,6 +66,25 @@
 //                      naming the app. Errors: bad_request, not_allowed (only Ombra's command line:
 //                      no app may switch it until consent exists).
 //
+//   record_start    -> {"before"?:number (seconds before now; default 0, capped at buffer_seconds),
+//                       "title"?:string (in the file or folder name)}
+//                   <- {"recording":number (this engine run's id)}
+//                      Records every monitor until record_stop (or the disk runs low), a file each
+//                      (a new "part" after a resolution change); answered once the first file
+//                      opens. Runs with Instant Replay off too: then nothing before the start.
+//                      Errors: bad_request, not_allowed (only Ombra's command line until consent
+//                      exists), already_recording (one per app; "recording" names it),
+//                      nothing_new (no footage within 10 s), busy, failed.
+//   record_stop     -> {"recording"?:number (default: the app's latest)}
+//                   <- {"recording":number, "end":"stopped"|"disk_low"|"write_failed"|"no_footage",
+//                       "seconds":number, "paths":[string], "monitors":[{"monitor":string,
+//                       "reason":string, "end":string, "paths":[string], "fell_back":bool,
+//                       "seconds":number}]}
+//                      Answered once every file is finished; also for one that already ended
+//                      (disk low), which it then forgets. An app stops only its own. Errors:
+//                      bad_request, not_recording, and the ended recording's nothing_new or
+//                      failed (with the fields above: what was written is kept).
+//
 //   subscribe       -> {"events"?:[string] (default: every event)}
 //                   <- {"events":[string] (the names this engine raises, in the order below;
 //                       unknown names are left out, not refused)}
@@ -77,6 +98,9 @@
 //                        clip_saved  {"app":string|null (null: the user's own save), "clip"?:number
 //                                     (an app's clip id), "seconds":number, "paths"?:[string]
 //                                     (only for Ombra's command line until consent exists)}
+//                        recording_started {"app":string, "recording":number}
+//                        recording_stopped {"app":string, "recording":number, "reason":string,
+//                                     "end":string, "seconds":number, "paths"?:[string] (as clip_saved)}
 //                        exiting     {}                    the engine is shutting down
 //                      A connection more than kMaxQueuedEvents behind, or one whose events can't
 //                      be written within 5 s, is closed (catch up with status after reconnecting).

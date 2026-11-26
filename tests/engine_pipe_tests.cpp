@@ -40,6 +40,7 @@ public:
         save_ctx.supervisor = &supervisor;
         save_ctx.controller = &controller;
         save_ctx.markers    = &markers;
+        api.clips           = &app_clips;
     }
 
     JsonValue Request(const std::string& type, JsonValue fields = JsonValue::MakeObject()) {
@@ -49,11 +50,11 @@ public:
     }
 
     JsonValue ApiRequest(const std::string& type, JsonValue fields = JsonValue::MakeObject(),
-                         const PipeCaller* caller = nullptr, const std::function<void(bool)>& replay_toast = {}) {
+                         const PipeCaller* caller = nullptr) {
         fields.Set("type", JsonValue::MakeStr(type));
         return HandlePipeRequest(fields, cfg, supervisor, controller, save_ctx, StartupGpuSummary{},
                                  nullptr, nullptr, nullptr, nullptr, &raw_store, nullptr, nullptr, {},
-                                 PipeSurface::kApi, &app_clips, caller, replay_toast);
+                                 PipeSurface::kApi, &api, caller);
     }
 
     JsonValue SetConfig(JsonValue patch) {
@@ -70,6 +71,7 @@ public:
     MarkerTimeline     markers;
     SaveContext        save_ctx;
     AppClips           app_clips;
+    PipeApi            api;
 };
 
 bool IsBool(const JsonValue* v, bool want) {
@@ -258,16 +260,97 @@ TEST_CASE("engine pipe api: clip answers only Ombra's command line until consent
     CHECK_FALSE(IsCommandLineClient(0, L"C:\\Windows\\System32\\notepad.exe"));
 }
 
+// A real start waits up to kRecordStartSeconds for footage the rig never makes, so the pipe is
+// exercised around a recording started straight through the registry (recording_tests cover the files).
+TEST_CASE("engine pipe api: record_start and record_stop: the gate, fields, one per app, the stop's answer") {
+    HandlerRig rig;
+    rig.save_ctx.out_path    = L"out\\ombra.mp4";
+    rig.save_ctx.output_root = NarrowUtf8(TestOutputPath(L"engine-pipe\\record"));
+    PipeCaller app;
+    app.app = "Command line";  // the name alone grants nothing
+    PipeCaller cli = app;
+    cli.command_line = true;
+    const auto with = [](const char* key, JsonValue value) {
+        JsonValue fields = JsonValue::MakeObject();
+        fields.Set(key, std::move(value));
+        return fields;
+    };
+    for (const char* type : {"record_start", "record_stop"}) {
+        CHECK(ErrorOf(rig.ApiRequest(type)) == "not_allowed");
+        CHECK(ErrorOf(rig.ApiRequest(type, JsonValue::MakeObject(), &app)) == "not_allowed");
+    }
+    CHECK(ErrorOf(rig.ApiRequest("record_start", with("before", JsonValue::MakeNum(-1)), &cli)) == "bad_request");
+    CHECK(ErrorOf(rig.ApiRequest("record_start", with("title", JsonValue::MakeNum(1)), &cli)) == "bad_request");
+    for (double bad : {0.0, 1.5, -2.0})
+        CHECK(ErrorOf(rig.ApiRequest("record_stop", with("recording", JsonValue::MakeNum(bad)), &cli)) == "bad_request");
+    CHECK(ErrorOf(rig.ApiRequest("record_stop", with("recording", JsonValue::MakeStr("1")), &cli)) == "bad_request");
+    CHECK(ErrorOf(rig.ApiRequest("record_stop", JsonValue::MakeObject(), &cli)) == "not_allowed");  // no registry
+
+    Recordings recordings;
+    rig.api.recordings = &recordings;
+    // Its thread reads the rig: stopped and waited for even when a REQUIRE ends the test early.
+    struct Finish {
+        Recordings& r;
+        SaveContext& ctx;
+        ~Finish() { r.Close(); StopClipsAndWait(&ctx); }
+    } finish{recordings, rig.save_ctx};
+    CHECK(ErrorOf(rig.ApiRequest("record_stop", JsonValue::MakeObject(), &cli)) == "not_recording");
+    const auto listed = [&](const PipeCaller* caller) {
+        const JsonValue  status = rig.ApiRequest("status", JsonValue::MakeObject(), caller);
+        const JsonValue* list   = status.Find("recordings");
+        REQUIRE((list && list->type == JsonValue::Type::Array));
+        return list->arr;
+    };
+    CHECK(listed(&cli).empty());
+
+    RecordRequest req;
+    req.start_qpc = QpcNow();
+    const auto running = recordings.Start("command line", {&rig.save_ctx}, req, {});
+    REQUIRE(running.group);
+    // Another app's view stays empty; the command line sees its own.
+    CHECK(listed(&app).empty());
+    const std::vector<JsonValue> mine = listed(&cli);
+    REQUIRE(mine.size() == 1);
+    const JsonValue* id = mine[0].Find("recording");
+    CHECK((id && id->type == JsonValue::Type::Number && id->num == static_cast<double>(running.id)));
+    CHECK(mine[0].Find("seconds"));
+
+    // A second start is refused with the running one's id.
+    const JsonValue again = rig.ApiRequest("record_start", JsonValue::MakeObject(), &cli);
+    CHECK(ErrorOf(again) == "already_recording");
+    const JsonValue* again_id = again.Find("recording");
+    CHECK((again_id && again_id->num == static_cast<double>(running.id)));
+
+    CHECK(ErrorOf(rig.ApiRequest("record_stop", with("recording", JsonValue::MakeNum(static_cast<double>(running.id + 1))),
+                                 &cli)) == "not_recording");
+    // Stopped before any footage: nothing written, answered with every field all the same.
+    const JsonValue stop = rig.ApiRequest("record_stop", JsonValue::MakeObject(), &cli);
+    CHECK(ErrorOf(stop) == "nothing_new");
+    const JsonValue* stop_id = stop.Find("recording");
+    CHECK((stop_id && stop_id->num == static_cast<double>(running.id)));
+    const JsonValue* end = stop.Find("end");
+    CHECK((end && end->type == JsonValue::Type::String && end->str == "stopped"));
+    const JsonValue* paths = stop.Find("paths");
+    CHECK((paths && paths->type == JsonValue::Type::Array && paths->arr.empty()));
+    const JsonValue* monitors = stop.Find("monitors");
+    CHECK((monitors && monitors->type == JsonValue::Type::Array && monitors->arr.size() == 1));
+    CHECK(ErrorOf(rig.ApiRequest("record_stop", JsonValue::MakeObject(), &cli)) == "not_recording");  // forgotten
+    CHECK(listed(&cli).empty());
+}
+
 // Turning replay off discards the user's buffer: only Ombra's command line may, and every change
 // shows a toast naming who did it (an unchanged switch shows none).
 TEST_CASE("engine pipe api: replay switches Instant Replay for the command line only, with a toast") {
     HandlerRig rig;
     std::vector<bool> toasts;
-    const auto toast = [&](bool on) { toasts.push_back(on); };
+    rig.api.replay_toast = [&](const std::string& app, bool on) {
+        CHECK(app == "Script");
+        toasts.push_back(on);
+    };
     const auto replay = [&](JsonValue value, const PipeCaller* caller) {
         JsonValue fields = JsonValue::MakeObject();
         fields.Set("replay", std::move(value));
-        return rig.ApiRequest("replay", std::move(fields), caller, toast);
+        return rig.ApiRequest("replay", std::move(fields), caller);
     };
     const bool before = rig.controller.UserEnabled();
     CHECK(ErrorOf(replay(JsonValue::MakeBool(!before), nullptr)) == "not_allowed");
@@ -280,7 +363,7 @@ TEST_CASE("engine pipe api: replay switches Instant Replay for the command line 
     cli.app          = "Script";
     cli.command_line = true;
     CHECK(ErrorOf(replay(JsonValue::MakeStr("off"), &cli)) == "bad_request");
-    CHECK(ErrorOf(rig.ApiRequest("replay", JsonValue::MakeObject(), &cli, toast)) == "bad_request");
+    CHECK(ErrorOf(rig.ApiRequest("replay", JsonValue::MakeObject(), &cli)) == "bad_request");
     CHECK(toasts.empty());
 
     JsonValue off = replay(JsonValue::MakeBool(false), &cli);
