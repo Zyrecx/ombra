@@ -752,7 +752,7 @@ int RunEngine(int argc, wchar_t** argv) {
         std::vector<LeftRecording> left = ListLeftRecordings(OpenRecordingsDir());
         if (!left.empty()) {
             Log::Info("recording: %zu left by an earlier run", left.size());
-            recover_left = std::jthread([left = std::move(left), &events](std::stop_token stop) {
+            recover_left = std::jthread([left = std::move(left), &events, &cfg](std::stop_token stop) {
                 const std::vector<RecoveredRecording> done = RecoverLeftRecordings(left, stop);
                 double   seconds = 0;
                 std::string app  = done.empty() ? std::string{} : done.front().app;
@@ -767,7 +767,7 @@ int RunEngine(int argc, wchar_t** argv) {
                         private_fields.Set("paths", std::move(paths));
                     });
                 }
-                if (!done.empty())
+                if (!done.empty() && ReadLiveConfig(cfg, [](const Config& c) { return c.ui_toast_enabled; }))
                     SpawnAppToast(L"record_recovered", WideFromUtf8(app), seconds, static_cast<uint32_t>(done.size()));
             });
         }
