@@ -135,8 +135,11 @@ public:
     }
     // Called on the worker thread when the game being recorded changes: its exe's full path, or empty
     // when recording stops being for a game (it closed, the buffer disarmed, Stop). Same exe in a new
-    // window is the same game; the settle after a game leaves still counts as its time. Set before Start.
-    void SetGameSessionSink(std::function<void(const std::wstring& exe_path)> sink) { game_sink_ = std::move(sink); }
+    // window is the same game; the settle after a game leaves still counts as its time. Also its name
+    // (empty with the exe) and the qpc it changed at: when the game was last seen, not the settle's end.
+    // Set before Start.
+    using GameSessionSink = std::function<void(const std::wstring& exe_path, const std::wstring& name, int64_t qpc)>;
+    void SetGameSessionSink(GameSessionSink sink) { game_sink_ = std::move(sink); }
     // Test seam: a settle a test can wait out. Set before Start.
     void SetDisarmSettleForTest(int64_t ms) { settle_ms_ = ms; }
     bool ToggleUserEnabled();  // returns the new value
@@ -193,7 +196,7 @@ private:
     std::unique_ptr<GpuLoadWatcher> gpu_watcher_;  // only while Only in games
     ArmState               arm_;
     uint64_t               game_window_ = 0;  // the game window last named
-    std::function<void(const std::wstring&)> game_sink_;
+    GameSessionSink        game_sink_;
     std::wstring           session_exe_;  // what game_sink_ was last told
     HWND                   scored_window_ = nullptr;  // focused, unknown, not armed: scored again for a while
     int64_t                scored_at_ms_ = 0;

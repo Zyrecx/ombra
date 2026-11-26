@@ -4,6 +4,7 @@
 #include "ombra/controller.h"
 #include "ombra/crash_upload.h"
 #include "ombra/log.h"
+#include "ombra/marker.h"
 #include "ombra/mux.h"
 #include "ombra/ring.h"
 #include "ombra/supervisor.h"
@@ -14,6 +15,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -192,7 +194,7 @@ SaveOutcome DoSaveImpl(SaveContext* ctx, int64_t t_end, const std::wstring* grou
     if (timing) timing->codec = VideoCodecName(segment->codec);
     // Taken while the pin still holds the window's footage, so the timeline still has its markers.
     const MuxMarkers markers =
-        ctx->markers ? MarkersForFile(ctx->markers->Between(video_floor_qpc, t_end), clock) : MuxMarkers{};
+        ctx->markers ? MarkersForFile(ctx->markers->ForFile(video_floor_qpc, t_end), clock) : MuxMarkers{};
     const bool ok = MuxWriteMp4(path, segment->codec_header, segment->width, segment->height, fps,
                                 samples, read, audio_tracks, segment->codec, 1,
                                 {segment->picture_width, segment->picture_height}, markers);
@@ -459,10 +461,12 @@ std::future<ReplaySaveResults> SaveReplay(const std::vector<SaveContext*>& conte
         ReplaySaveResults result{SaveOutcome::kBusy, {}};
         std::atomic<size_t> remaining{0};
         SaveFeedback feedback;
+        std::vector<SaveContext*> contexts;  // the engine's: they outlive every save
     };
     auto op = std::make_shared<Operation>();
     auto future = op->promise.get_future();
     const int64_t t_end = QpcNow();
+    op->contexts = contexts;
     std::wstring folder;
     if (contexts.size() > 1) {
         const auto* controller = contexts.front()->controller;
@@ -495,11 +499,39 @@ std::future<ReplaySaveResults> SaveReplay(const std::vector<SaveContext*>& conte
             }
             op->result.outcome = incomplete ? SaveOutcome::kFailed
                                  : saved ? SaveOutcome::kSaved : SaveOutcome::kNothingNew;
+            if (saved) PlaceClipSavedMarker(op->contexts, t_end, {});
             if (op->feedback) op->feedback(op->result);
             op->promise.set_value(std::move(op->result));
         }).detach();
     }
     return future;
+}
+
+MarkerReach MarkerReachAt(const std::vector<SaveContext*>& contexts, int64_t qpc) {
+    MarkerReach reach{(std::numeric_limits<int64_t>::max)(), false};
+    const int64_t freq = QpcFrequency();
+    for (const SaveContext* ctx : contexts) {
+        const std::optional<Ring::Span> span = ctx->ring ? ctx->ring->HeldSpan() : std::nullopt;
+        if (!span) continue;
+        reach.oldest_qpc = (std::min)(reach.oldest_qpc, span->oldest_qpc);
+        const int64_t frame = freq / (std::max)(1u, ctx->fps.load());
+        const bool    live  = ctx->supervisor && ctx->supervisor->Armed();
+        const int64_t trail = live ? static_cast<int64_t>(kMarkerTrailSeconds * static_cast<double>(freq)) : frame;
+        reach.covered |= span->oldest_qpc <= qpc && qpc <= span->newest_qpc + trail;
+    }
+    return reach;
+}
+
+void PlaceClipSavedMarker(const std::vector<SaveContext*>& contexts, int64_t qpc, const std::string& app) {
+    if (contexts.empty() || !contexts.front()->markers) return;
+    Marker m;
+    m.qpc   = qpc;
+    m.type  = MarkerType::kClipSaved;
+    m.label = app;
+    m.owner = kOmbraMarkerOwner;
+    if (contexts.front()->markers->Add(m, kOmbraMarkerOwner, MarkerReachAt(contexts, qpc).oldest_qpc) !=
+        MarkerTimeline::AddResult::kAdded)
+        Log::Info("markers: no room for Ombra's clip-saved marker");
 }
 
 }  // namespace ombra

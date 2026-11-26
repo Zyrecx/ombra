@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <utility>
 
 namespace ombra {
@@ -21,6 +22,8 @@ constexpr TypeInfo kTypes[] = {
     {MarkerType::kWin, "win", "Win"},                  {MarkerType::kLoss, "loss", "Loss"},
     {MarkerType::kObjective, "objective", "Objective"}, {MarkerType::kHighlight, "highlight", "Highlight"},
     {MarkerType::kRoundStart, "round_start", "Round start"}, {MarkerType::kRoundEnd, "round_end", "Round end"},
+    {MarkerType::kClipSaved, "clip_saved", "Clip saved"},   {MarkerType::kGameStart, "game_start", "Game start"},
+    {MarkerType::kGameEnd, "game_end", "Game end"},
 };
 
 const TypeInfo& InfoOf(MarkerType type) {
@@ -35,7 +38,7 @@ const char* MarkerTypeName(MarkerType type) { return InfoOf(type).name; }
 
 std::optional<MarkerType> ParseMarkerType(std::string_view name) {
     for (const TypeInfo& t : kTypes)
-        if (name == t.name) return t.type;
+        if (name == t.name && !IsOmbraMarkerType(t.type)) return t.type;
     return std::nullopt;
 }
 
@@ -65,6 +68,11 @@ std::optional<std::string> CleanMarkerLabel(std::string_view label) {
 }
 
 std::string MarkerChapterTitle(const Marker& marker) {
+    if (IsOmbraMarkerType(marker.type)) {
+        std::string title = InfoOf(marker.type).title;
+        if (!marker.label.empty()) title += " \xC2\xB7 " + marker.label;
+        return title;
+    }
     std::string title = marker.label.empty() ? InfoOf(marker.type).title : marker.label;
     if (!marker.owner.empty()) title += " \xC2\xB7 " + marker.owner;  // " · "
     return title;
@@ -102,11 +110,18 @@ std::optional<uint64_t> FileClock::MsAt(int64_t qpc) const {
     return (tick - anchors_.front().tick) * 1000 / fps_;
 }
 
+std::optional<uint64_t> FileClock::MsAtOrFirst(int64_t qpc) const {
+    if (!anchors_.empty() && qpc < anchors_.front().qpc &&
+        anchors_.front().qpc - qpc <= static_cast<int64_t>(kMarkerTrailSeconds * static_cast<double>(qpc_freq_)))
+        return 0;
+    return MsAt(qpc);
+}
+
 MuxMarkers MarkersForFile(const std::vector<Marker>& markers, const FileClock& clock) {
     MuxMarkers out;
     JsonValue list = JsonValue::MakeArray();
     for (const Marker& m : markers) {
-        const std::optional<uint64_t> ms = clock.MsAt(m.qpc);
+        const std::optional<uint64_t> ms = m.type == MarkerType::kGameStart ? clock.MsAtOrFirst(m.qpc) : clock.MsAt(m.qpc);
         if (!ms) continue;
         out.chapters.push_back({*ms, MarkerChapterTitle(m)});
         JsonValue item = JsonValue::MakeObject();
@@ -146,6 +161,8 @@ MarkerTimeline::AddResult MarkerTimeline::Add(Marker& marker, const std::string&
     std::lock_guard<std::mutex> lock(mutex_);
     int64_t keep_from = oldest_qpc;
     for (const HoldRec& h : holds_) keep_from = (std::min)(keep_from, h.from_qpc);
+    // The lead too: a file from that first frame on may still collect a marker just before it.
+    if (keep_from > (std::numeric_limits<int64_t>::min)() + lead_qpc_) keep_from -= lead_qpc_;
     std::erase_if(entries_, [&](const Entry& e) { return e.marker.qpc < keep_from; });
 
     const auto mine = std::count_if(entries_.begin(), entries_.end(),
@@ -182,9 +199,57 @@ std::vector<Marker> MarkerTimeline::Between(int64_t from_qpc, int64_t to_qpc) co
     return out;
 }
 
+bool MarkerTimeline::Remove(uint64_t id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return std::erase_if(entries_, [&](const Entry& e) { return e.marker.id == id; }) > 0;
+}
+
 size_t MarkerTimeline::Size() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return entries_.size();
+}
+
+// --- GameMarkers ---------------------------------------------------------------------------------
+
+uint64_t GameMarkers::Place(MarkerType type, int64_t qpc, int64_t oldest_qpc) {
+    Marker m;
+    m.qpc   = qpc;
+    m.type  = type;
+    m.label = game_;
+    m.owner = kOmbraMarkerOwner;
+    return timeline_.Add(m, kOmbraMarkerOwner, oldest_qpc) == MarkerTimeline::AddResult::kAdded ? m.id : 0;
+}
+
+void GameMarkers::End(int64_t qpc, int64_t oldest_qpc) {
+    if (qpc - start_qpc_ < Seconds(kGameMarkerMinSeconds)) {
+        // Too short to be a session: take its start back, and nothing for it to rejoin.
+        if (start_id_) timeline_.Remove(start_id_);
+        game_.clear();
+        start_id_ = 0;
+        return;
+    }
+    end_id_  = Place(MarkerType::kGameEnd, qpc, oldest_qpc);
+    end_qpc_ = qpc;
+    ended_   = true;
+}
+
+void GameMarkers::Update(const std::string& name, int64_t qpc, int64_t oldest_qpc) {
+    if (!game_.empty() && !ended_) {
+        if (name == game_) return;  // the same game under another exe (client to match)
+        End(qpc, oldest_qpc);
+    }
+    if (name.empty()) return;
+    if (ended_ && name == game_ && qpc - end_qpc_ <= Seconds(kGameMarkerJoinSeconds)) {
+        if (end_id_) timeline_.Remove(end_id_);
+        ended_  = false;
+        end_id_ = 0;
+        return;
+    }
+    game_      = name;
+    ended_     = false;
+    end_id_    = 0;
+    start_qpc_ = qpc;
+    start_id_  = Place(MarkerType::kGameStart, qpc, oldest_qpc);
 }
 
 }  // namespace ombra

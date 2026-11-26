@@ -718,7 +718,8 @@ int RunEngine(int argc, wchar_t** argv) {
         PruneThumbs();
     }
     MemoryLayout memory_layout;  // declared before pipe_server so it outlives the handler reading it
-    MarkerTimeline markers;      // before what holds it: app_clips, the pipelines' saves
+    // Before what holds it: app_clips, the pipelines' saves, the controller's game markers.
+    MarkerTimeline markers(static_cast<int64_t>(kMarkerTrailSeconds * static_cast<double>(QpcFrequency())));
     AppClips     app_clips;      // the API's clips, likewise
     std::unique_ptr<PipeServer> pipe_server;
     LogRssStage("process start");
@@ -1118,10 +1119,19 @@ int RunEngine(int argc, wchar_t** argv) {
         for (const auto& mp : pipelines) n += mp->save_ctx.save_count.load();
         return n;
     };
+    // Ombra's game start and end markers, from the same changes. Before the controller, likewise.
+    GameMarkers game_markers(markers, QpcFrequency());
+    std::vector<SaveContext*> marker_ctxs;
+    for (auto& mp : pipelines) marker_ctxs.push_back(&mp->save_ctx);
     BufferController controller(cfg.capture_mode, cfg.capture_target, cfg.capture_target_window,
                                 all_supervisors, &games);
-    if (resident)
-        controller.SetGameSessionSink([&, total_saves](const std::wstring& exe_path) {
+    controller.SetGameSessionSink(
+        [&, total_saves](const std::wstring& exe_path, const std::wstring& game_name, int64_t at) {
+            // An empty name means "no game", so a game whose name cleans to nothing still gets one.
+            const std::string label =
+                exe_path.empty() ? std::string() : CleanMarkerLabel(NarrowUtf8(game_name)).value_or("Game");
+            game_markers.Update(label, at, MarkerReachAt(marker_ctxs, at).oldest_qpc);
+            if (!resident) return;
             const int64_t now = static_cast<int64_t>(std::time(nullptr));
             if (!open_game.exe.empty()) {
                 crash_upload::GameSession s;

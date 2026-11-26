@@ -37,6 +37,7 @@ struct ClipRequest {
     double       before_seconds = 0;  // capped at buffer.seconds: the ring holds no more
     double       after_seconds  = 0;  // capped at kClipMaxAfterSeconds
     std::wstring title;               // optional; sanitized into the file (or group folder) name
+    std::string  app;                 // who asked, as its toast names it: the "clip saved" marker's label
 };
 
 // Why a clip stopped taking footage.

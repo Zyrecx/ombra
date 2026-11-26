@@ -542,7 +542,7 @@ TEST_CASE("Always + displays still names the game it's recording") {
             return windows;
         });
         std::vector<std::wstring> sessions;  // what the usage sink was told
-        controller.SetGameSessionSink([&](const std::wstring& path) {
+        controller.SetGameSessionSink([&](const std::wstring& path, const std::wstring&, int64_t) {
             std::lock_guard<std::mutex> lock(mutex);
             sessions.push_back(path);
         });

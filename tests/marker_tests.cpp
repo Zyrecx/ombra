@@ -33,8 +33,14 @@ TEST_CASE("marker: types round-trip by wire name, unknown names refuse") {
     for (MarkerType t : {MarkerType::kGeneric, MarkerType::kKill, MarkerType::kRoundStart, MarkerType::kRoundEnd})
         CHECK(ParseMarkerType(MarkerTypeName(t)) == t);
     CHECK(!ParseMarkerType("Kill"));
-    CHECK(!ParseMarkerType("clip_saved"));
     CHECK(!ParseMarkerType(""));
+    // Ombra's own have wire names (the file's tag) but no app may pick them.
+    for (MarkerType t : {MarkerType::kClipSaved, MarkerType::kGameStart, MarkerType::kGameEnd}) {
+        CHECK(IsOmbraMarkerType(t));
+        CHECK(!ParseMarkerType(MarkerTypeName(t)));
+    }
+    CHECK(std::string(MarkerTypeName(MarkerType::kGameStart)) == "game_start");
+    CHECK(!IsOmbraMarkerType(kLastAppType));
 }
 
 TEST_CASE("marker: labels count code points, drop control characters, trim spaces") {
@@ -58,6 +64,13 @@ TEST_CASE("marker: chapter title names the label or the type, then the app") {
     Marker anonymous = At(0, MarkerType::kRoundStart);
     anonymous.owner.clear();
     CHECK(MarkerChapterTitle(anonymous) == "Round start");
+    // Ombra's own: the type, then the detail (the game, the asking app), never the owner.
+    Marker game = At(0, MarkerType::kGameStart, "VALORANT");
+    game.owner = kOmbraMarkerOwner;
+    CHECK(MarkerChapterTitle(game) == "Game start \xC2\xB7 VALORANT");
+    Marker saved = At(0, MarkerType::kClipSaved);
+    saved.owner = kOmbraMarkerOwner;
+    CHECK(MarkerChapterTitle(saved) == "Clip saved");
 }
 
 TEST_CASE("marker: 256 per app within the held footage, then too many") {
@@ -171,4 +184,83 @@ TEST_CASE("marker: a file's markers become chapters and the tag's JSON") {
     CHECK(!list->arr[1].Find("important"));
 
     CHECK(MarkersForFile({At(base - kFreq)}, clock).json.empty());
+}
+
+TEST_CASE("marker: a game start just before a file's first frame lands on it") {
+    const int64_t base = 50'000'000;
+    FileClock clock(kFreq, kFps);
+    for (uint64_t t = 0; t < 600; ++t) clock.Add(base + static_cast<int64_t>(t) * kFrame, t);
+    // The game armed the buffer; footage began 0.4 s later. An app's marker there isn't the file's.
+    const std::vector<Marker> markers = {At(base - kFreq * 4 / 10, MarkerType::kGameStart, "VALORANT"),
+                                         At(base - kFreq * 4 / 10, MarkerType::kKill)};
+    const MuxMarkers out = MarkersForFile(markers, clock);
+    REQUIRE(out.chapters.size() == 1);
+    CHECK(out.chapters[0].ms == 0);
+    // Further back than the lead, the game started before this file's footage: not its start.
+    CHECK(MarkersForFile({At(base - kFreq * 21 / 10, MarkerType::kGameStart)}, clock).chapters.empty());
+    CHECK(clock.MsAtOrFirst(base + 30 * kFrame) == 500u);
+}
+
+TEST_CASE("marker: the timeline keeps and hands a file the lead before its first frame") {
+    MarkerTimeline timeline(100);
+    Marker before = At(950, MarkerType::kGameStart);
+    REQUIRE(timeline.Add(before, "ombra", 0) == MarkerTimeline::AddResult::kAdded);
+    // The buffer's oldest frame is at 1000: 950 is within the lead, kept; 850 isn't.
+    Marker old = At(850);
+    REQUIRE(timeline.Add(old, "a", 1000) == MarkerTimeline::AddResult::kAdded);
+    Marker now = At(1500);
+    REQUIRE(timeline.Add(now, "a", 1000) == MarkerTimeline::AddResult::kAdded);
+    CHECK(timeline.Size() == 2);
+    CHECK(timeline.Between(1000, 2000).size() == 1);
+    CHECK(timeline.ForFile(1000, 2000).size() == 2);
+    CHECK(timeline.Remove(before.id));
+    CHECK(!timeline.Remove(before.id));
+    CHECK(timeline.ForFile(1000, 2000).size() == 1);
+}
+
+TEST_CASE("marker: game sessions become start and end markers, debounced") {
+    MarkerTimeline timeline;
+    GameMarkers games(timeline, kFreq);
+    const auto s = [](double seconds) { return static_cast<int64_t>(seconds * kFreq); };
+    const auto kinds = [&] {
+        std::string out;
+        for (const Marker& m : timeline.Between(0, s(100000))) {
+            out += std::string(out.empty() ? "" : " ") + MarkerTypeName(m.type);
+            if (!m.label.empty()) out += ":" + m.label;
+            CHECK(m.owner == kOmbraMarkerOwner);
+        }
+        return out;
+    };
+
+    // A client flashing past (under kGameMarkerMinSeconds) leaves nothing, twice over.
+    games.Update("League", s(100), 0);
+    games.Update("", s(110), 0);
+    games.Update("League", s(200), 0);
+    games.Update("", s(216), 0);
+    CHECK(kinds().empty());
+
+    // A real session: start and end, labelled with the game.
+    games.Update("League", s(300), 0);
+    games.Update("League", s(400), 0);  // another exe of the same game (client to match): no change
+    games.Update("", s(1000), 0);
+    CHECK(kinds() == "game_start:League game_end:League");
+    // Back within kGameMarkerJoinSeconds: the session goes on, its end taken back.
+    games.Update("League", s(1068), 0);
+    CHECK(kinds() == "game_start:League");
+    games.Update("", s(2000), 0);
+    // Back later than that: a new session.
+    games.Update("League", s(2000 + kGameMarkerJoinSeconds + 1), 0);
+    CHECK(kinds() == "game_start:League game_end:League game_start:League");
+
+    // Straight to another game: this one ends where the other starts.
+    games.Update("VALORANT", s(3000), 0);
+    CHECK(kinds() == "game_start:League game_end:League game_start:League game_end:League game_start:VALORANT");
+    const std::vector<Marker> all = timeline.Between(0, s(100000));
+    CHECK(all[3].qpc == s(3000));
+    CHECK(all[4].qpc == s(3000));
+    // Another game ending its session doesn't rejoin the earlier one.
+    games.Update("", s(3100), 0);
+    games.Update("League", s(3110), 0);
+    CHECK(kinds() == "game_start:League game_end:League game_start:League game_end:League game_start:VALORANT "
+                     "game_end:VALORANT game_start:League");
 }

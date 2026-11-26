@@ -240,7 +240,7 @@ ClipSession::Result ClipSession::Run(const std::function<int64_t()>& now, const 
         audio_.reset();
         pin_.Unpin();  // the last AU is written: the mux's finalize must not hold back eviction
         tail.audio = &audio_tracks_;
-        if (ctx_->markers) tail.markers = MarkersForFile(ctx_->markers->Between(first_qpc_, end_qpc_), *clock_);
+        if (ctx_->markers) tail.markers = MarkersForFile(ctx_->markers->ForFile(first_qpc_, end_qpc_), *clock_);
         marker_hold_.Reset();
         return true;
     };
@@ -306,8 +306,11 @@ std::shared_ptr<ClipGroup> StartClip(const std::vector<SaveContext*>& contexts, 
     op->feedback = std::move(feedback);
     std::shared_ptr<ClipGroup> group(new ClipGroup());
     group->done_ = op->promise.get_future().share();
-    const auto finish = [op] {
+    const auto finish = [op, contexts, at = request.event_qpc, app = request.app] {
         op->result.outcome = FoldOutcome(op->result.monitors);
+        const bool saved = std::any_of(op->result.monitors.begin(), op->result.monitors.end(),
+                                       [](const ReplaySaveResult& m) { return m.outcome == SaveOutcome::kSaved; });
+        if (saved) PlaceClipSavedMarker(contexts, at, app);
         if (op->feedback) op->feedback(op->result);
         op->promise.set_value(std::move(op->result));
     };

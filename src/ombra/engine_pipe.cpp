@@ -870,6 +870,7 @@ JsonValue PipeRequest::OnApiClip() {
     request.before_seconds = *before;
     request.after_seconds  = *after;
     if (title_v) request.title = WideFromUtf8(title_v->str);
+    request.app = caller->app;
     std::vector<SaveContext*> contexts;
     if (all_pipelines) {
         for (const auto& pipeline : *all_pipelines) contexts.push_back(&pipeline->save_ctx);
@@ -945,7 +946,7 @@ JsonValue PipeRequest::OnApiMarker() {
             type_v->type == JsonValue::Type::String ? ParseMarkerType(type_v->str) : std::nullopt;
         if (!parsed) {
             std::string names;
-            for (int t = 0; t <= static_cast<int>(MarkerType::kRoundEnd); ++t)
+            for (int t = 0; t <= static_cast<int>(kLastAppType); ++t)
                 names += std::string(names.empty() ? "" : ", ") + MarkerTypeName(static_cast<MarkerType>(t));
             return ApiError("bad_request", "\"kind\" must be one of: " + names);
         }
@@ -972,21 +973,10 @@ JsonValue PipeRequest::OnApiMarker() {
     } else {
         contexts.push_back(&save_ctx);
     }
-    // Footage must cover the moment, or no file could ever show the marker: held frames reaching
-    // it, give or take a frame. A recording ring also covers kMarkerTrailSeconds more (its newest frame trails
-    // "now" by the encode, and the frames after it are on their way); a stalled one doesn't. A
-    // disarmed ring keeps stale footage until it's freed; that covers only its own past.
-    bool    covered = false;
-    int64_t oldest  = (std::numeric_limits<int64_t>::max)();
-    for (SaveContext* ctx : contexts) {
-        const std::optional<Ring::Span> span = ctx->ring ? ctx->ring->HeldSpan() : std::nullopt;
-        if (!span) continue;
-        oldest = (std::min)(oldest, span->oldest_qpc);
-        const int64_t frame = QpcFrequency() / (std::max)(1u, ctx->fps.load());
-        const bool    live  = ctx->supervisor && ctx->supervisor->Armed();
-        covered |= span->oldest_qpc <= qpc && qpc <= span->newest_qpc + (live ? static_cast<int64_t>(kMarkerTrailSeconds * double(QpcFrequency())) : frame);
-    }
-    if (!covered) return ApiError("replay_off", "no footage covers that moment: Ombra isn't recording");
+    // Footage must cover the moment, or no file could ever show the marker. A disarmed ring keeps
+    // stale footage until it's freed; that covers only its own past.
+    const MarkerReach reach = MarkerReachAt(contexts, qpc);
+    if (!reach.covered) return ApiError("replay_off", "no footage covers that moment: Ombra isn't recording");
 
     Marker marker;
     marker.qpc       = qpc;
@@ -995,7 +985,7 @@ JsonValue PipeRequest::OnApiMarker() {
     marker.owner     = caller->app;
     marker.important = important_v && important_v->b;
     // Every script using the command line is one app ("--as" only names it), so they share a cap.
-    const MarkerTimeline::AddResult added = save_ctx.markers->Add(marker, "command line", oldest);
+    const MarkerTimeline::AddResult added = save_ctx.markers->Add(marker, "command line", reach.oldest_qpc);
     if (added != MarkerTimeline::AddResult::kAdded)
         return ApiError("too_many_markers",
                         (added == MarkerTimeline::AddResult::kAppFull

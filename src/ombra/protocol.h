@@ -53,7 +53,8 @@
 //                   <- {"marker":number (this engine run's id)}
 //                      Every clip covering the moment gets it: an MP4 chapter ("label · app",
 //                      or the type's name without a label) and an entry in the file's "markers"
-//                      tag. Errors: bad_request, not_allowed (as clip), replay_off (no footage
+//                      tag, beside Ombra's own (kinds clip_saved, game_start, game_end; app
+//                      "Ombra"), which apps can't place. Errors: bad_request, not_allowed (as clip), replay_off (no footage
 //                      covers the moment), too_many_markers (256 per app in the footage held).
 //
 //   replay          -> {"replay":bool}

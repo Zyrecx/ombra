@@ -91,4 +91,20 @@ using StartSaveFeedback = std::function<SaveFeedback()>;
 std::future<ReplaySaveResults> SaveReplay(const std::vector<SaveContext*>& contexts,
                                         const StartSaveFeedback& feedback = {});
 
+// Where a marker at `qpc` stands against the footage the rings hold. `oldest_qpc`: the oldest held
+// frame, MarkerTimeline::Add's reach (INT64_MAX when nothing is held). `covered`: held frames reach
+// `qpc`, give or take a frame; a recording ring also kMarkerTrailSeconds past its newest frame (it
+// trails "now" by the encode, and the frames after it are on their way); a stalled or disarmed one
+// doesn't. An app's marker needs `covered`.
+struct MarkerReach {
+    int64_t oldest_qpc;
+    bool    covered;
+};
+MarkerReach MarkerReachAt(const std::vector<SaveContext*>& contexts, int64_t qpc);
+
+// Ombra's "clip saved" marker at `qpc` (the moment saved), labelled with the app that asked for the
+// clip (empty: the user). Called once per action, after its files collected their markers: a clip
+// doesn't carry its own.
+void PlaceClipSavedMarker(const std::vector<SaveContext*>& contexts, int64_t qpc, const std::string& app);
+
 }  // namespace ombra

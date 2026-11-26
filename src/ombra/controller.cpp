@@ -258,7 +258,7 @@ void BufferController::Stop() {
     gpu_watcher_.reset();
     if (!session_exe_.empty()) {
         session_exe_.clear();
-        if (game_sink_) game_sink_(session_exe_);
+        if (game_sink_) game_sink_(session_exe_, L"", QpcNow());
     }
 }
 
@@ -492,7 +492,11 @@ void BufferController::Evaluate(const Settings& s) {
     const std::wstring exe = armed && game ? game->image_path : armed && arm_.leaving ? session_exe_ : L"";
     if (exe != session_exe_) {
         session_exe_ = exe;
-        if (game_sink_) game_sink_(exe);
+        int64_t at = QpcNow();
+        // A disarm once the settle ran out: the game went when the settle began.
+        if (exe.empty() && was_leaving && !arm_.leaving)
+            at -= (SteadyMs() - arm_.leaving_since) * QpcFrequency() / 1000;
+        if (game_sink_) game_sink_(exe, exe.empty() ? std::wstring() : ResolveGameName(exe), at);
     }
 }
 

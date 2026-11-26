@@ -755,6 +755,25 @@ TEST_CASE("save: markers in the window become chapters and the markers tag, plac
     CHECK(late.format_tags.at("markers").find(R"("kind":"loss")") == std::string::npos);
 }
 
+TEST_CASE("save: an earlier clip's save is a chapter in a later file covering it") {
+    MarkerTimeline timeline;
+    SaveRig rig(L"clip-saved-marker");
+    rig.ctx.markers = &timeline;
+    rig.FeedVideo(0, 240);
+    PlaceClipSavedMarker({&rig.ctx}, rig.timeline.At(2.0), "Tool");
+    PlaceClipSavedMarker({&rig.ctx}, rig.timeline.At(3.0), "");
+
+    REQUIRE(rig.Save(4.0));
+    const ProbeInfo info = Probe(rig.SavedPath());
+    REQUIRE_MESSAGE(info.ok, info.error);
+    REQUIRE(info.chapters.size() == 3);
+    CHECK(info.chapters[1].title == "Clip saved \xC2\xB7 Tool");
+    CHECK(info.chapters[1].start_s == doctest::Approx(1.0).epsilon(0.002));
+    CHECK(info.chapters[2].title == "Clip saved");
+    const std::string& tag = info.format_tags.at("markers");
+    CHECK(tag.find(R"("kind":"clip_saved","label":"Tool","app":"Ombra")") != std::string::npos);
+}
+
 TEST_CASE("save: frames the pacer dropped keep their time, so video stays as long as its audio") {
     SaveRig rig(L"dropped-ticks");
     const size_t game = rig.AddSource("Game", "game");

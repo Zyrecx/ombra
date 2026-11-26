@@ -14,13 +14,18 @@
 
 namespace ombra {
 
-// What an app may mark (fixed: each type has a themed icon). Ombra's own types come later.
+// What a marker marks (fixed: each type has a themed icon). Apps pick from kGeneric..kLastAppType;
+// the rest only Ombra places.
 enum class MarkerType : uint8_t {
     kGeneric, kKill, kDeath, kAssist, kWin, kLoss, kObjective, kHighlight, kRoundStart, kRoundEnd,
+    kClipSaved, kGameStart, kGameEnd,
 };
-// The wire name ("round_start"), and back; nullopt for an unknown name.
+inline constexpr MarkerType kLastAppType = MarkerType::kRoundEnd;
+// The wire name ("round_start"), and back for the types an app may pick; nullopt for any other name.
 const char* MarkerTypeName(MarkerType type);
 std::optional<MarkerType> ParseMarkerType(std::string_view name);
+inline bool IsOmbraMarkerType(MarkerType type) { return type > kLastAppType; }
+inline constexpr const char* kOmbraMarkerOwner = "Ombra";
 
 inline constexpr size_t kMarkerLabelMaxChars = 64;  // code points, not bytes
 inline constexpr size_t kMarkersPerApp       = 256;  // within the footage still held
@@ -43,6 +48,7 @@ struct Marker {
 };
 
 // The chapter a marker becomes: "Pentakill · LeagueTool", or "Kill · LeagueTool" without a label.
+// Ombra's own read type then detail, without the owner: "Game start · VALORANT", "Clip saved".
 std::string MarkerChapterTitle(const Marker& marker);
 
 // Where a file's frames sit on the qpc timeline, so a marker lands on the frame at or before it.
@@ -57,6 +63,9 @@ public:
     // is the last frame: a marker placed "now" runs ahead of the newest frame by the encode, while
     // a file whose footage stopped long before (a paused or disarmed ring) mustn't collect it.
     std::optional<uint64_t> MsAt(int64_t qpc) const;
+    // MsAt, but up to kMarkerTrailSeconds before the first frame is the first frame: a game start
+    // that armed the buffer comes a moment before the footage it started.
+    std::optional<uint64_t> MsAtOrFirst(int64_t qpc) const;
     bool Empty() const { return anchors_.empty(); }
 
 private:
@@ -79,6 +88,11 @@ MuxMarkers MarkersForFile(const std::vector<Marker>& markers, const FileClock& c
 // file being written (a Hold) still covers it. Thread-safe.
 class MarkerTimeline {
 public:
+    // `lead_qpc`: how far before a file's first frame a marker can still land on it (MsAtOrFirst),
+    // and so how much longer than the buffer's reach markers are kept. The engine's is
+    // kMarkerTrailSeconds.
+    explicit MarkerTimeline(int64_t lead_qpc = 0) : lead_qpc_(lead_qpc) {}
+
     // Keeps markers from `from_qpc` on while alive: a save or open clip, from its first frame,
     // since a writer releases the ring behind itself before it collects its markers.
     class Hold {
@@ -100,8 +114,16 @@ public:
     // calls itself). `oldest_qpc`: the buffer's reach now; anything older and unheld is dropped first.
     AddResult Add(Marker& marker, const std::string& app_key, int64_t oldest_qpc);
     Hold HoldFrom(int64_t from_qpc);
+    // Takes back a marker that turned out wrong (a game that came back); false if it's gone.
+    bool Remove(uint64_t id);
     // Markers with `from_qpc` <= qpc <= `to_qpc`, oldest first.
     std::vector<Marker> Between(int64_t from_qpc, int64_t to_qpc) const;
+    // What a file from `first_qpc` (its first frame) to `end_qpc` may get: Between, reaching back
+    // the lead. MarkersForFile decides which land.
+    std::vector<Marker> ForFile(int64_t first_qpc, int64_t end_qpc) const {
+        return Between(first_qpc - lead_qpc_, end_qpc);
+    }
+    int64_t LeadQpc() const { return lead_qpc_; }
     size_t Size() const;
 
 private:
@@ -109,11 +131,42 @@ private:
     struct HoldRec { uint64_t id; int64_t from_qpc; };
     void Release(uint64_t hold_id);
 
+    const int64_t        lead_qpc_;
     mutable std::mutex   mutex_;
     std::vector<Entry>   entries_;  // ascending qpc
     std::vector<HoldRec> holds_;
     uint64_t             next_id_ = 1;
     uint64_t             next_hold_ = 1;
+};
+
+// A game session shorter than this leaves no markers: a launcher or client window flashing past
+// (League's client shows for 10-16 s at a time while it starts).
+inline constexpr double kGameMarkerMinSeconds  = 30.0;
+// The same game back within this of its end continues the session: its end marker is taken back
+// and no new start placed (a client handing over to the match, a window the game recreates).
+inline constexpr double kGameMarkerJoinSeconds = 120.0;
+
+// Turns the buffer controller's game changes into Ombra's game start and end markers, labelled
+// with the game's name. Not thread-safe: one caller at a time (the controller's sink).
+class GameMarkers {
+public:
+    GameMarkers(MarkerTimeline& timeline, int64_t qpc_freq) : timeline_(timeline), qpc_freq_(qpc_freq) {}
+    // The game is now `name` (empty: none) since `qpc`. `oldest_qpc` as MarkerTimeline::Add's.
+    void Update(const std::string& name, int64_t qpc, int64_t oldest_qpc);
+
+private:
+    void End(int64_t qpc, int64_t oldest_qpc);
+    uint64_t Place(MarkerType type, int64_t qpc, int64_t oldest_qpc);
+    int64_t Seconds(double s) const { return static_cast<int64_t>(s * static_cast<double>(qpc_freq_)); }
+
+    MarkerTimeline& timeline_;
+    int64_t         qpc_freq_;
+    std::string     game_;            // the session's game; empty: none since the last forgotten one
+    bool            ended_    = false;  // game_ ended at end_qpc_ and may yet come back
+    int64_t         start_qpc_ = 0;
+    int64_t         end_qpc_   = 0;
+    uint64_t        start_id_  = 0;   // 0: not placed (the timeline was full)
+    uint64_t        end_id_    = 0;
 };
 
 }  // namespace ombra
