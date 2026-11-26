@@ -1,6 +1,7 @@
 #include "ombra/clip.h"
 
 #include "ombra/controller.h"
+#include "ombra/crash_upload.h"
 #include "ombra/log.h"
 #include "ombra/mux.h"
 #include "ombra/supervisor.h"
@@ -105,7 +106,10 @@ std::shared_ptr<ClipSession> ClipSession::Open(SaveContext* ctx, const ClipReque
     const double seconds = static_cast<double>(s->until_ - s->pin_.front().qpc) / s->qpc_freq_;
     const uint64_t estimate = (std::max)(pinned_bytes, static_cast<uint64_t>(rate * seconds));
     s->dest_ = PickClipPath(ctx, request.event_qpc, group_folder_name, request.title, ClipRoomNeeded(estimate), "clip");
-    if (s->dest_.path.empty()) return refuse(SaveOutcome::kFailed);
+    if (s->dest_.path.empty()) {
+        crash_upload::ReportError(crash_upload::ErrorKind::Save, "clip_no_room", "", "clip folder can't take the clip");
+        return refuse(SaveOutcome::kFailed);
+    }
 
     s->queue_       = s->pin_.Aus();
     s->clock_.emplace(s->qpc_freq_, s->fps_);
@@ -264,10 +268,13 @@ ClipSession::Result ClipSession::Run(const std::function<int64_t()>& now, const 
         result.outcome = ok ? SaveOutcome::kSaved : SaveOutcome::kFailed;
         if (ok) result.seconds = static_cast<double>(ticks) / fps_;
     }
-    if (!ok)
+    if (!ok) {
         Log::Error("clip: \"%ls\" not written (%s)", dest_.path.c_str(),
                    broken_ ? "the disk fell behind the encoder by more than the ring's headroom"
                            : "couldn't write the file");
+        crash_upload::ReportError(crash_upload::ErrorKind::Save, broken_ ? "clip_footage_evicted" : "clip_write_failed",
+                                  "", broken_ ? "footage gone before the clip was written" : "couldn't write the clip");
+    }
     if (Telemetry::Enabled()) {
         WIN32_FILE_ATTRIBUTE_DATA info{};
         const bool have_size = result.outcome == SaveOutcome::kSaved &&
