@@ -1671,11 +1671,15 @@ int RunEngine(int argc, wchar_t** argv) {
     for (auto& mp : pipelines) StopClipsAndWait(&mp->save_ctx);
     // Subscribers hear the exit after those clips' clip_saved and a hotkey save already running
     // (its event follows its last file by a moment, so it's best effort), with a short, bounded
-    // chance to read it: the pipe's Stop cancels any write still pending.
-    if (events.Active())
+    // chance to read it: the pipe's Stop cancels any write still pending. Bounded: the pump has
+    // stopped, and a save's feedback may want it; the join after teardown below is the real one.
+    if (events.Active()) {
+        const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         for (auto& mp : pipelines)
-            while (mp->save_ctx.save_in_flight.load(std::memory_order_acquire))
+            while (mp->save_ctx.save_in_flight.load(std::memory_order_acquire) &&
+                   std::chrono::steady_clock::now() < give_up)
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     events.PublishIfActive("exiting", [](JsonValue&, JsonValue&) {});
     events.Close();
     events.WaitDrained(500);
