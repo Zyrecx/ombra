@@ -68,6 +68,7 @@ enum class RecordEnd {
     kDiskLow,      // the disk can't take kRecordDiskReserveSeconds more
     kWriteFailed,  // a write failed: the file keeps what was written
     kNoFootage,    // nothing to record within kRecordStartSeconds
+    kUser,         // the user stopped an app's recording from the overlay (RecordingGroup::StopByUser)
 };
 const char* RecordEndName(RecordEnd end);
 
@@ -87,8 +88,12 @@ public:
     // the encoder hasn't delivered yet, then finishes the file.
     // A later call never moves the end later.
     void StopAt(int64_t at_qpc);
+    bool Stopping() const { return stop_qpc_.load(std::memory_order_acquire) != (std::numeric_limits<int64_t>::max)(); }
     // Seconds written so far, every part together.
     double Seconds() const { return seconds_.load(std::memory_order_relaxed); }
+    // How long the disk lasts at the rate this records, as of the last disk check; negative before
+    // one or when it failed, infinity once this ended.
+    double SecondsLeft() const { return seconds_left_.load(std::memory_order_relaxed); }
 
     struct Result {
         SaveOutcome               outcome = SaveOutcome::kFailed;  // kSaved: at least one part written
@@ -143,6 +148,7 @@ private:
 
     std::atomic<int64_t> stop_qpc_{(std::numeric_limits<int64_t>::max)()};  // max: not stopped
     std::atomic<double> seconds_{0};
+    mutable std::atomic<double> seconds_left_{-1};  // DiskLow's
     bool listed_ = false;  // in ctx_->open_recordings
 };
 
@@ -172,7 +178,11 @@ struct RecordFeedback {
 class RecordingGroup {
 public:
     void   Stop();  // every monitor's StopAt now
+    // Stop, by the user for the app that started it: the recording then ends kUser.
+    void   StopByUser();
     double Seconds() const;  // the longest monitor's so far
+    // How long the disk lasts with every monitor writing to it (one volume assumed); negative unknown.
+    double SecondsLeft() const;
     // True once a monitor wrote its first frame; false when every one ended before that.
     std::shared_future<bool>             Started() const { return started_; }
     std::shared_future<RecordingResults> Done() const { return done_; }
@@ -182,6 +192,7 @@ private:
     friend std::shared_ptr<RecordingGroup> StartRecording(const std::vector<SaveContext*>&, const RecordRequest&,
                                                           std::shared_ptr<void>, RecordFeedback);
     uint64_t                                       id_ = 0;
+    std::shared_ptr<std::atomic<bool>>             by_user_ = std::make_shared<std::atomic<bool>>(false);
     std::vector<std::shared_ptr<RecordingSession>> sessions_;
     std::shared_future<bool>                       started_;
     std::shared_future<RecordingResults>           done_;
@@ -193,8 +204,17 @@ private:
 std::shared_ptr<RecordingGroup> StartRecording(const std::vector<SaveContext*>& contexts, const RecordRequest& request,
                                                std::shared_ptr<void> hold, RecordFeedback feedback = {});
 
-// The recordings apps asked for: one per app at a time (a second start is refused while its own
-// runs), each stopped only by the app that started it. Thread-safe: one per engine, every pipe client.
+// How long one disk lasts with every monitor writing at its own rate, from each one's time alone
+// (negative: unknown, when any is).
+double CombineSecondsLeft(const std::vector<double>& each);
+
+// The user's own recordings' key in Recordings (the overlay's Record and its hotkey): never an app's
+// (apps are keyed by kCommandLineApp until consent exists), so its files take every app's markers.
+inline constexpr const char* kUserRecordingApp = ":user";
+
+// The recordings apps and the user asked for: one per app at a time (a second start is refused while
+// its own runs), each stopped by whoever started it, an app's also by the user (StopByUser).
+// Thread-safe: one per engine, every pipe client.
 class Recordings {
 public:
     enum class Refusal { kNone, kAlreadyRecording, kClosed };
@@ -208,15 +228,22 @@ public:
     // When no monitor opens, `feedback.ended` runs inside this call, under the registry's lock: it
     // must not call back into Recordings.
     Started Start(const std::string& app, const std::vector<SaveContext*>& contexts, RecordRequest request,
-                  const std::function<std::shared_ptr<void>(RecordRequest&)>& arm, RecordFeedback feedback = {});
+                  const std::function<std::shared_ptr<void>(RecordRequest&)>& arm, RecordFeedback feedback = {},
+                  const std::wstring& exe = {});  // the asking process's image (Running::exe)
     // Stops `app`'s recording `id` (0: its latest, running or ended) and forgets it: the caller waits
     // on Done. Null when the app has none by that id.
     std::shared_ptr<RecordingGroup> Stop(const std::string& app, uint64_t id);
+    // The user stops an app's running recording `id`. It stays listed until the app stops it, which
+    // then answers with the files. False when no app's recording by that id runs.
+    bool StopByUser(uint64_t id);
 
     struct Running {
-        uint64_t    id = 0;
-        std::string app;
-        double      seconds = 0;
+        uint64_t     id = 0;
+        std::string  app;   // the registry key
+        std::string  name;  // as its toasts name it (RecordRequest::app)
+        std::wstring exe;   // Start's
+        double       seconds = 0;
+        double       seconds_left = -1;  // RecordingGroup::SecondsLeft
     };
     // The recordings running now: `app`'s, or with no app every one.
     std::vector<Running> List(const std::string& app = {});
@@ -228,8 +255,10 @@ private:
         std::string                     app;
         uint64_t                        id = 0;
         std::shared_ptr<RecordingGroup> group;
+        std::string                     name;
+        std::wstring                    exe;
     };
-    std::mutex         mutex_;  // held across StartRecording: an app can't start two at once
+    std::mutex        mutex_;  // held across StartRecording: an app can't start two at once
     std::vector<Entry> entries_;  // the latest per app, kept after it ends until stopped or replaced
     uint64_t           next_id_ = 1;
     bool               closed_  = false;

@@ -679,6 +679,66 @@ TEST_CASE("recordings: one per app; a second start is refused before it arms; on
     CHECK(arms == 2);
 }
 
+TEST_CASE("recordings: the space left with several monitors on one disk") {
+    CHECK(CombineSecondsLeft({}) < 0);
+    CHECK(CombineSecondsLeft({600}) == doctest::Approx(600));
+    CHECK(CombineSecondsLeft({600, 600}) == doctest::Approx(300));  // twice the rate, half the time
+    CHECK(CombineSecondsLeft({300, 600}) == doctest::Approx(200));
+    CHECK(CombineSecondsLeft({600, 0}) == 0);
+    CHECK(CombineSecondsLeft({600, -1}) == doctest::Approx(600));  // one not checked yet: the other decides
+    CHECK(CombineSecondsLeft({-1, -1}) < 0);
+    const double ended = std::numeric_limits<double>::infinity();
+    CHECK(CombineSecondsLeft({600, ended}) == doctest::Approx(600));  // an ended monitor spends nothing
+    CHECK(CombineSecondsLeft({ended}) < 0);
+}
+
+TEST_CASE("recordings: the user's takes every app's markers; the user stops an app's, which ends kUser") {
+    RecordRig rig(L"registry-user");
+    rig.ctx.out_path    = L"out\\ombra.mp4";
+    rig.ctx.output_root = NarrowUtf8(TestOutputPath(L"recording\\registry-user"));
+    rig.EndNow(3.0);
+    rig.FeedTo(180);
+    Recordings recordings;
+    std::vector<std::string> marker_apps;
+    const auto arm = [&](RecordRequest& r) -> std::shared_ptr<void> {
+        marker_apps.push_back(r.marker_app);
+        return nullptr;
+    };
+    RecordRequest req;
+    req.start_qpc      = QpcNow();
+    req.before_seconds = 2.0;
+    req.app            = "Tool";
+    const auto app = recordings.Start("tool", {&rig.ctx}, req, arm, {}, L"C:\\Tools\\tool.exe");
+    req.app = "";
+    const auto user = recordings.Start(kUserRecordingApp, {&rig.ctx}, req, arm);
+    REQUIRE(app.group);
+    REQUIRE(user.group);
+    CHECK(marker_apps == std::vector<std::string>{"tool", ""});
+
+    const auto listed = recordings.List();
+    REQUIRE(listed.size() == 2);
+    CHECK(listed[0].name == "Tool");
+    CHECK(listed[0].exe == L"C:\\Tools\\tool.exe");
+
+    CHECK_FALSE(recordings.StopByUser(user.id));  // the user's own stops with Record, not here
+    CHECK_FALSE(recordings.StopByUser(12345));
+    REQUIRE(recordings.StopByUser(app.id));
+    REQUIRE(app.group->Done().wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    CHECK(app.group->Done().get().end == RecordEnd::kUser);
+    CHECK_FALSE(recordings.StopByUser(app.id));  // already ended
+    // Still the app's to collect: its own stop answers with the result.
+    const auto collected = recordings.Stop("tool", app.id);
+    REQUIRE(collected);
+    CHECK(collected->Done().get().end == RecordEnd::kUser);
+
+    const auto mine = recordings.Stop(kUserRecordingApp, user.id);
+    REQUIRE(mine);
+    REQUIRE(mine->Done().wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    CHECK(mine->Done().get().end == RecordEnd::kStopped);
+    recordings.Close();
+    StopClipsAndWait(&rig.ctx);
+}
+
 TEST_CASE("recordings: an ended recording is stopped by id 0 and replaced by the app's next start") {
     RecordRig rig(L"registry-ended");
     rig.ctx.out_path    = L"out\\ombra.mp4";

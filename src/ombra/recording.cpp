@@ -82,6 +82,7 @@ const char* RecordEndName(RecordEnd end) {
         case RecordEnd::kDiskLow:     return "disk_low";
         case RecordEnd::kWriteFailed: return "write_failed";
         case RecordEnd::kNoFootage:   return "no_footage";
+        case RecordEnd::kUser:        return "user";
     }
     return "stopped";
 }
@@ -159,8 +160,10 @@ void RecordingSession::Close() {
 
 bool RecordingSession::DiskLow(const Part& part) const {
     ULARGE_INTEGER free_bytes{};
-    if (!GetDiskFreeSpaceExW((FolderOf(paths_.back()) + L"\\").c_str(), &free_bytes, nullptr, nullptr))
+    if (!GetDiskFreeSpaceExW((FolderOf(paths_.back()) + L"\\").c_str(), &free_bytes, nullptr, nullptr)) {
+        seconds_left_.store(-1, std::memory_order_relaxed);  // unknown now, not the last look's
         return false;  // a failed look isn't a full disk; a failed write ends the recording
+    }
     // The rate this part has written at, the configured one as a floor: a quiet start mustn't
     // promise room for a busy scene.
     double rate = ctx_->bitrate_kbps.load() * 1000.0 / 8.0;
@@ -168,7 +171,12 @@ bool RecordingSession::DiskLow(const Part& part) const {
         const double seconds = static_cast<double>(part.written->index - part.first_index + 1) / part.fps;
         if (seconds >= 1.0) rate = (std::max)(rate, static_cast<double>(part.writer.FileBytes()) / seconds);
     }
-    return free_bytes.QuadPart < ClipRoomNeeded(static_cast<uint64_t>(rate * kRecordDiskReserveSeconds));
+    const uint64_t reserve = ClipRoomNeeded(static_cast<uint64_t>(rate * kRecordDiskReserveSeconds));
+    // Until this recording would stop for the disk, as the overlay shows it.
+    if (rate > 0)
+        seconds_left_.store(free_bytes.QuadPart > reserve ? static_cast<double>(free_bytes.QuadPart - reserve) / rate : 0.0,
+                            std::memory_order_relaxed);
+    return free_bytes.QuadPart < reserve;
 }
 
 std::wstring RecordingSession::NextPartPath() {
@@ -482,6 +490,8 @@ RecordingSession::Result RecordingSession::Run(const std::function<int64_t()>& n
     if (part && !FinishPart(*part)) end = RecordEnd::kWriteFailed;
     part.reset();
     tell(!paths_.empty());
+    // Ended: this monitor no longer spends the disk (CombineSecondsLeft takes infinity as nothing).
+    seconds_left_.store(std::numeric_limits<double>::infinity(), std::memory_order_relaxed);
 
     Result result;
     result.paths     = paths_;
@@ -521,6 +531,36 @@ void RecordingSession::StopAt(int64_t at_qpc) {
 void RecordingGroup::Stop() {
     const int64_t now = QpcNow();
     for (const auto& s : sessions_) s->StopAt(now);
+}
+
+void RecordingGroup::StopByUser() {
+    // Already stopping (its app, the engine): the user didn't end it.
+    for (const auto& s : sessions_)
+        if (s->Stopping()) return Stop();
+    by_user_->store(true);
+    Stop();
+}
+
+double CombineSecondsLeft(const std::vector<double>& each) {
+    // Every monitor writes to the same disk: their rates add up, so the times combine as 1 / sum(1 / t).
+    // Not checked yet (negative): no answer from it, the others decide. Ended (infinity): adds nothing.
+    double inverse = 0;
+    bool known = false;
+    for (const double left : each) {
+        if (left < 0) continue;
+        if (left == 0) return 0;
+        known = true;
+        inverse += 1.0 / left;
+    }
+    if (!known) return -1;
+    return inverse > 0 ? 1.0 / inverse : -1;
+}
+
+double RecordingGroup::SecondsLeft() const {
+    std::vector<double> each;
+    each.reserve(sessions_.size());
+    for (const auto& s : sessions_) each.push_back(s->SecondsLeft());
+    return CombineSecondsLeft(each);
 }
 
 const wchar_t* RecordEndToast(const RecordingResults& result) {
@@ -566,7 +606,7 @@ std::shared_ptr<RecordingGroup> StartRecording(const std::vector<SaveContext*>& 
             op->started.set_value(true);
             if (events)
                 events->PublishIfActive("recording_started", [&](JsonValue& f, JsonValue&) {
-                    f.Set("app", JsonValue::MakeStr(app));
+                    f.Set("app", app.empty() ? JsonValue{} : JsonValue::MakeStr(app));  // null: the user's own
                     f.Set("recording", JsonValue::MakeNum(static_cast<double>(id)));
                 });
             if (op->feedback.started) op->feedback.started();
@@ -574,7 +614,7 @@ std::shared_ptr<RecordingGroup> StartRecording(const std::vector<SaveContext*>& 
             op->started.set_value(false);
         }
     };
-    const auto finish = [op, events, app = request.app, id = request.id] {
+    const auto finish = [op, events, app = request.app, id = request.id, by_user = group->by_user_] {
         RecordingResults& r = op->result;
         bool any_saved = false, any_failed = false;
         for (const RecordingSession::Result& m : r.monitors) {
@@ -582,13 +622,14 @@ std::shared_ptr<RecordingGroup> StartRecording(const std::vector<SaveContext*>& 
             any_failed |= m.outcome == SaveOutcome::kFailed || m.outcome == SaveOutcome::kBusy;
             if (r.end == RecordEnd::kStopped) r.end = m.end;
         }
+        if (r.end == RecordEnd::kStopped && by_user->load()) r.end = RecordEnd::kUser;
         r.outcome = any_failed ? SaveOutcome::kFailed : any_saved ? SaveOutcome::kSaved : SaveOutcome::kNothingNew;
         if (events)
             events->PublishIfActive("recording_stopped", [&](JsonValue& f, JsonValue& private_fields) {
                 JsonValue paths = JsonValue::MakeArray();
                 for (const RecordingSession::Result& m : r.monitors)
                     for (const std::wstring& p : m.paths) paths.arr.push_back(JsonValue::MakeStr(NarrowUtf8(p)));
-                f.Set("app", JsonValue::MakeStr(app));
+                f.Set("app", app.empty() ? JsonValue{} : JsonValue::MakeStr(app));
                 f.Set("recording", JsonValue::MakeNum(static_cast<double>(id)));
                 f.Set("reason", JsonValue::MakeStr(SaveOutcomeName(r.outcome)));
                 f.Set("end", JsonValue::MakeStr(RecordEndName(r.end)));
@@ -642,7 +683,7 @@ std::shared_ptr<RecordingGroup> StartRecording(const std::vector<SaveContext*>& 
 Recordings::Started Recordings::Start(const std::string& app, const std::vector<SaveContext*>& contexts,
                                       RecordRequest request,
                                       const std::function<std::shared_ptr<void>(RecordRequest&)>& arm,
-                                      RecordFeedback feedback) {
+                                      RecordFeedback feedback, const std::wstring& exe) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (closed_) return {Refusal::kClosed, 0, nullptr};
     const auto it = std::find_if(entries_.begin(), entries_.end(), [&](const Entry& e) { return e.app == app; });
@@ -652,11 +693,23 @@ Recordings::Started Recordings::Start(const std::string& app, const std::vector<
         entries_.erase(it);  // an ended one the app never stopped: this start replaces it
     }
     request.id = next_id_++;
-    request.marker_app = app;  // its markers are this app's, not another app's
+    // An app's file takes its own markers, not another app's; the user's takes every app's.
+    request.marker_app = app == kUserRecordingApp ? std::string() : app;
     std::shared_ptr<void> hold = arm ? arm(request) : nullptr;
     auto group = StartRecording(contexts, request, std::move(hold), std::move(feedback));
-    entries_.push_back({app, request.id, group});
+    entries_.push_back({app, request.id, group, request.app, exe});
     return {Refusal::kNone, request.id, std::move(group)};
+}
+
+bool Recordings::StopByUser(uint64_t id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const Entry& e : entries_) {
+        if (e.id != id || e.app == kUserRecordingApp) continue;
+        if (e.group->Done().wait_for(std::chrono::seconds(0)) == std::future_status::ready) return false;
+        e.group->StopByUser();
+        return true;
+    }
+    return false;
 }
 
 std::shared_ptr<RecordingGroup> Recordings::Stop(const std::string& app, uint64_t id) {
@@ -675,7 +728,7 @@ std::vector<Recordings::Running> Recordings::List(const std::string& app) {
     std::vector<Running> out;
     for (const Entry& e : entries_)
         if ((app.empty() || e.app == app) && e.group->Done().wait_for(std::chrono::seconds(0)) != std::future_status::ready)
-            out.push_back({e.id, e.app, e.group->Seconds()});
+            out.push_back({e.id, e.app, e.name, e.exe, e.group->Seconds(), e.group->SecondsLeft()});
     return out;
 }
 
