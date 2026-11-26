@@ -9,6 +9,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <utility>
 
@@ -20,6 +22,8 @@ constexpr DWORD kBufferSize = 8192;
 // A request is a small JSON line. A client that never sends a newline is dropped here rather than
 // growing the engine's memory until an allocation fails on a worker thread.
 constexpr size_t kMaxMessageBytes = 16 * 1024 * 1024;
+// A subscriber whose pipe stays full this long has stopped reading: it's dropped, never waited on.
+constexpr DWORD kEventWriteTimeoutMs = 5000;
 
 // Only the creating user and Local System get access — PIPE_REJECT_REMOTE_CLIENTS already blocks
 // other machines, but a per-user DACL is what keeps another *local* account on the same machine
@@ -54,17 +58,27 @@ struct PipeIo {
 };
 
 // Completes the overlapped call that returned `started`, or abandons it once `stop` is set or
-// `timeout_ms` passes. Returns false on failure, stop or timeout.
-bool FinishIo(HANDLE pipe, PipeIo& io, BOOL started, HANDLE stop, DWORD& n, DWORD timeout_ms = INFINITE) {
+// `timeout_ms` passes. While it waits, `wake` (optional) runs `on_wake` without disturbing the call;
+// `on_wake` returning false abandons it too. Returns false on failure, stop, timeout or that.
+bool FinishIo(HANDLE pipe, PipeIo& io, BOOL started, HANDLE stop, DWORD& n, DWORD timeout_ms = INFINITE,
+              HANDLE wake = nullptr, const std::function<bool()>* on_wake = nullptr) {
     n = 0;
     if (!started && GetLastError() != ERROR_IO_PENDING) return false;
-    const HANDLE waits[2] = {io.ov.hEvent, stop};
-    if (WaitForMultipleObjects(2, waits, FALSE, timeout_ms) != WAIT_OBJECT_0) {
+    const ULONGLONG deadline = timeout_ms == INFINITE ? 0 : GetTickCount64() + timeout_ms;
+    const HANDLE waits[3] = {io.ov.hEvent, stop, wake};
+    for (;;) {
+        DWORD wait_ms = INFINITE;
+        if (deadline) {
+            const ULONGLONG now = GetTickCount64();
+            wait_ms = now >= deadline ? 0 : static_cast<DWORD>(deadline - now);
+        }
+        const DWORD r = WaitForMultipleObjects(wake ? 3 : 2, waits, FALSE, wait_ms);
+        if (r == WAIT_OBJECT_0) return GetOverlappedResult(pipe, &io.ov, &n, FALSE) != FALSE;
+        if (r == WAIT_OBJECT_0 + 2 && (*on_wake)()) continue;
         CancelIoEx(pipe, &io.ov);
         GetOverlappedResult(pipe, &io.ov, &n, TRUE);  // the kernel owns `ov` until the cancel lands
         return false;
     }
-    return GetOverlappedResult(pipe, &io.ov, &n, FALSE) != FALSE;
 }
 
 // Reads one newline-delimited message, using `pending` to carry bytes already read off the pipe
@@ -73,9 +87,10 @@ bool FinishIo(HANDLE pipe, PipeIo& io, BOOL started, HANDLE stop, DWORD& n, DWOR
 // together — so `pending` must live with the connection (ServeClient's loop), not this call, or
 // everything after the first '\n' in a chunk is silently lost. Returns false on disconnect, error,
 // or stop.
-// `deadline` (GetTickCount64, 0 for none) bounds the whole line.
+// `deadline` (GetTickCount64, 0 for none) bounds the whole line. `wake`/`on_wake` as FinishIo's.
 bool ReadLine(HANDLE pipe, PipeIo& io, HANDLE stop, std::string& pending, std::string& out,
-              size_t max_bytes, ULONGLONG deadline) {
+              size_t max_bytes, ULONGLONG deadline, HANDLE wake = nullptr,
+              const std::function<bool()>* on_wake = nullptr) {
     size_t searched = 0;  // only new bytes: rescanning all of `pending` per read is quadratic
     for (;;) {
         const size_t nl  = pending.find('\n', searched);
@@ -99,7 +114,7 @@ bool ReadLine(HANDLE pipe, PipeIo& io, HANDLE stop, std::string& pending, std::s
             timeout = static_cast<DWORD>(deadline - now);
         }
         const BOOL ok = ReadFile(pipe, buf, sizeof(buf), nullptr, io.Next());
-        if (!FinishIo(pipe, io, ok, stop, n, timeout) || n == 0) return false;
+        if (!FinishIo(pipe, io, ok, stop, n, timeout, wake, on_wake) || n == 0) return false;
         pending.append(buf, n);
     }
 }
@@ -156,13 +171,14 @@ bool ValidAppName(const std::string& app) {
                         [](char c) { return static_cast<unsigned char>(c) < 0x20 || c == 0x7f; });
 }
 
-bool WriteAll(HANDLE pipe, PipeIo& io, HANDLE stop, const std::string& data) {
+// `timeout_ms` bounds each write call: a client that stops reading fills the pipe's buffer.
+bool WriteAll(HANDLE pipe, PipeIo& io, HANDLE stop, const std::string& data, DWORD timeout_ms = INFINITE) {
     size_t written = 0;
     while (written < data.size()) {
         DWORD n = 0;
         const BOOL ok = WriteFile(pipe, data.data() + written,
                                   static_cast<DWORD>(data.size() - written), nullptr, io.Next());
-        if (!FinishIo(pipe, io, ok, stop, n) || n == 0) return false;
+        if (!FinishIo(pipe, io, ok, stop, n, timeout_ms) || n == 0) return false;
         written += n;
     }
     return true;
@@ -211,12 +227,13 @@ bool IsCommandLineClient(DWORD pid, const std::wstring& exe) {
            IsSiblingImage(exe, L"ombra.exe");
 }
 
-PipeServer::PipeServer(Handler internal, ApiHandler api, InternalGate gate)
+PipeServer::PipeServer(Handler internal, ApiHandler api, InternalGate gate, EventHub* events)
     : handler_(std::move(internal)),
       api_handler_(std::move(api)),
       internal_gate_(gate ? std::move(gate) : InternalGate([](DWORD pid, const std::wstring& exe) {
           return pid == GetCurrentProcessId() || IsSiblingOverlay(exe);
       })),
+      events_(events),
       stop_event_(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {}
 
 PipeServer::~PipeServer() {
@@ -421,15 +438,52 @@ std::optional<PipeSurface> PipeServer::Hello(const JsonValue& req, HANDLE pipe, 
     return refuse("bad_request", "hello needs \"api\" (the API version the client speaks)");
 }
 
+JsonValue PipeServer::Subscribe(const JsonValue& req, const PipeCaller& caller,
+                                 std::unique_ptr<Subscription>& subscription) {
+    std::vector<std::string> names;
+    if (const JsonValue* list = req.Find("events")) {
+        if (list->type != JsonValue::Type::Array)
+            return ErrorReply("subscribe", "bad_request", "\"events\" must be a list of event names");
+        for (const JsonValue& name : list->arr) {
+            if (name.type != JsonValue::Type::String)
+                return ErrorReply("subscribe", "bad_request", "\"events\" must be a list of event names");
+            names.push_back(name.str);
+        }
+    } else {
+        names.assign(std::begin(kEventNames), std::end(kEventNames));
+    }
+    // The paths of the user's clips are Ombra's own command line's to see until consent exists.
+    if (!subscription) subscription = std::make_unique<Subscription>(*events_, caller.command_line);
+    JsonValue taken = JsonValue::MakeArray();
+    for (std::string& name : subscription->Set(names)) taken.arr.push_back(JsonValue::MakeStr(std::move(name)));
+    JsonValue resp = JsonValue::MakeObject();
+    resp.Set("events", std::move(taken));
+    return resp;
+}
+
 void PipeServer::ServeClient(HANDLE pipe) {
     // The hello is the transport's job (protocol.h), not the Handler's: it picks the surface, and
     // nothing reaches a Handler before it.
     std::optional<PipeSurface> surface;
     PipeCaller  caller;
     std::string pending;  // bytes read off the pipe past the last message's '\n' — see ReadLine
-    PipeIo io;
+    // Apart, because events are written while a read is pending.
+    PipeIo read_io, write_io;
     auto write = [&](const JsonValue& resp) {
-        return WriteAll(pipe, io, stop_event_, WriteJsonCompact(resp) + "\n");
+        return WriteAll(pipe, write_io, stop_event_, WriteJsonCompact(resp) + "\n");
+    };
+    // Made by the first `subscribe`; its lines go out while the next request is awaited.
+    std::unique_ptr<Subscription> subscription;
+    const std::function<bool()> send_events = [&] {
+        std::vector<std::string> lines;
+        const bool kept = subscription->Take(lines);
+        std::string data;
+        for (const std::string& line : lines) data += line + "\n";
+        const bool wrote = data.empty() || WriteAll(pipe, write_io, stop_event_, data, kEventWriteTimeoutMs);
+        subscription->Sent(lines.size());
+        if (!kept || !wrote)
+            Log::Warn("pipe: app \"%s\" stopped reading its events; disconnecting", caller.app.c_str());
+        return kept && wrote;
     };
 
     while (running_.load()) {
@@ -438,7 +492,9 @@ void PipeServer::ServeClient(HANDLE pipe) {
         std::string line;
         // A client that never says hello would hold this thread and its pipe instance forever.
         const ULONGLONG deadline = surface ? 0 : GetTickCount64() + kHelloTimeoutMs;
-        if (!ReadLine(pipe, io, stop_event_, pending, line, max_bytes, deadline)) break;
+        if (!ReadLine(pipe, read_io, stop_event_, pending, line, max_bytes, deadline,
+                      subscription ? subscription->Wake() : nullptr, &send_events))
+            break;
         if (line.empty()) continue;
 
         JsonValue request;
@@ -485,8 +541,13 @@ void PipeServer::ServeClient(HANDLE pipe) {
                 break;
             continue;
         }
+        if (type == "subscribe" && events_) {
+            if (!reply(Subscribe(request, caller, subscription))) break;
+            continue;
+        }
         if (!reply(api_handler_(request, caller))) break;
     }
+    subscription.reset();  // before the pipe closes: the hub stops queueing for it
     if (surface == PipeSurface::kApi) api_clients_.fetch_sub(1);
 
     // Each client has its own instance, so closing it is the disconnect, and what's written stays

@@ -111,6 +111,7 @@ add_library(ombra_core STATIC
     src/ombra/telemetry.cpp
     src/ombra/json.cpp
     src/ombra/pipe.cpp
+    src/ombra/events.cpp
     src/ombra/tray.cpp
     src/ombra/config.cpp
     src/ombra/setup_plan.cpp
@@ -257,6 +258,7 @@ add_executable(ombra-tests
     tests/support/media_probe.cpp
     tests/support/synthetic_capture.cpp
     tests/instance_tests.cpp
+    tests/events_tests.cpp
     tests/log_tests.cpp
     tests/crash_tests.cpp
     tests/cli_tests.cpp

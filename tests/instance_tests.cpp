@@ -710,4 +710,136 @@ TEST_CASE("pipe: Stop() returns promptly with an idle client still connected") {
     CHECK(client.ServerClosed());
 }
 
+namespace {
+
+// An API server with an event hub; status answers {"ok":true}.
+class EventServer {
+public:
+    EventServer()
+        : server_([](const JsonValue&) { return JsonValue::MakeObject(); },
+                  [](const JsonValue&, const PipeCaller&) { return JsonValue::MakeObject(); }, nullptr, &hub) {}
+
+    EventHub   hub;  // declared first: outlives the server's connections
+    PipeServer server_;
+};
+
+JsonValue Subscribe(std::initializer_list<const char*> names, bool all = false) {
+    JsonValue r = Request("subscribe", 2);
+    if (!all) {
+        JsonValue list = JsonValue::MakeArray();
+        for (const char* n : names) list.arr.push_back(JsonValue::MakeStr(n));
+        r.Set("events", std::move(list));
+    }
+    return r;
+}
+
+// Polls until the hub hears someone: the subscribe reply is written after the subscription is set.
+bool WaitActive(const EventHub& hub) {
+    for (int i = 0; i < 200 && !hub.Active(); ++i) Sleep(5);
+    return hub.Active();
+}
+
+}  // namespace
+
+TEST_CASE("pipe events: subscribe answers with the names taken, then events arrive unasked") {
+    EventServer s;
+    REQUIRE(s.server_.Start());
+    RawPipeClient client;
+    REQUIRE(client.Connected());
+    REQUIRE(client.Send(ApiHello()));
+    REQUIRE(OkIs(client.Receive(), true));
+
+    REQUIRE(client.Send(Subscribe({"replay", "made_up"})));
+    const JsonValue reply = client.Receive();
+    CHECK(OkIs(reply, true));
+    CHECK(StrOf(reply, "type") == "subscribe");
+    const JsonValue* taken = reply.Find("events");
+    REQUIRE(taken);
+    REQUIRE(taken->arr.size() == 1);
+    CHECK(taken->arr[0].str == "replay");
+    REQUIRE(WaitActive(s.hub));
+
+    // The connection's thread sits in a read: the event must still go out at once.
+    Sleep(50);
+    s.hub.Publish("buffering", JsonValue::MakeObject());  // not asked for
+    JsonValue fields = JsonValue::MakeObject();
+    fields.Set("replay", JsonValue::MakeBool(false));
+    s.hub.Publish("replay", fields);
+    const JsonValue ev = client.Receive();
+    CHECK(StrOf(ev, "type") == "event");
+    CHECK(StrOf(ev, "event") == "replay");
+    const JsonValue* on = ev.Find("replay");
+    CHECK((on && on->type == JsonValue::Type::Bool && !on->b));
+
+    // Requests still work on a subscribed connection.
+    REQUIRE(client.Send(Request("status", 3)));
+    const JsonValue status = client.Receive();
+    CHECK(OkIs(status, true));
+    CHECK(NumOf(status, "id") == 3);
+}
+
+TEST_CASE("pipe events: a bad events list is refused, and omitting it takes every event") {
+    EventServer s;
+    REQUIRE(s.server_.Start());
+    RawPipeClient client;
+    REQUIRE(client.Connected());
+    REQUIRE(client.Send(ApiHello()));
+    REQUIRE(OkIs(client.Receive(), true));
+
+    JsonValue bad = Request("subscribe", 2);
+    bad.Set("events", JsonValue::MakeStr("replay"));
+    REQUIRE(client.Send(bad));
+    const JsonValue refused = client.Receive();
+    CHECK(OkIs(refused, false));
+    CHECK(StrOf(refused, "error") == "bad_request");
+    CHECK(!s.hub.Active());
+
+    REQUIRE(client.Send(Subscribe({}, true)));
+    const JsonValue reply = client.Receive();
+    CHECK(OkIs(reply, true));
+    const JsonValue* taken = reply.Find("events");
+    REQUIRE(taken);
+    CHECK(taken->arr.size() == std::size(kEventNames));
+}
+
+TEST_CASE("pipe events: the exit event is flushed before Stop, and a closed client stops listening") {
+    EventServer s;
+    REQUIRE(s.server_.Start());
+    {
+        RawPipeClient client;
+        REQUIRE(client.Connected());
+        REQUIRE(client.Send(ApiHello()));
+        REQUIRE(OkIs(client.Receive(), true));
+        REQUIRE(client.Send(Subscribe({"exiting"})));
+        REQUIRE(OkIs(client.Receive(), true));
+        REQUIRE(WaitActive(s.hub));
+
+        s.hub.Publish("exiting", JsonValue::MakeObject());
+        s.hub.Close();
+        CHECK(s.hub.WaitDrained(2000));
+        CHECK(StrOf(client.Receive(), "event") == "exiting");
+
+        auto stopped = std::async(std::launch::async, [&] { s.server_.Stop(); });
+        CHECK(stopped.wait_for(std::chrono::seconds(5)) == std::future_status::ready);
+        CHECK(client.ServerClosed());
+    }
+    CHECK(!s.hub.Active());
+}
+
+TEST_CASE("pipe events: a client that disconnects unsubscribes") {
+    EventServer s;
+    REQUIRE(s.server_.Start());
+    {
+        RawPipeClient client;
+        REQUIRE(client.Connected());
+        REQUIRE(client.Send(ApiHello()));
+        REQUIRE(OkIs(client.Receive(), true));
+        REQUIRE(client.Send(Subscribe({"replay"})));
+        REQUIRE(OkIs(client.Receive(), true));
+        REQUIRE(WaitActive(s.hub));
+    }
+    for (int i = 0; i < 200 && s.hub.Active(); ++i) Sleep(5);
+    CHECK(!s.hub.Active());
+}
+
 }  // namespace ombra::test

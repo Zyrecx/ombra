@@ -63,6 +63,23 @@
 //                      naming the app. Errors: bad_request, not_allowed (only Ombra's command line:
 //                      no app may switch it until consent exists).
 //
+//   subscribe       -> {"events"?:[string] (default: every event)}
+//                   <- {"events":[string] (the names this engine raises, in the order below;
+//                       unknown names are left out, not refused)}
+//                      Replaces what this connection hears; [] hears nothing. Answered by the
+//                      transport (PipeServer), not the API handler. Events then arrive between
+//                      responses, unasked, as {"type":"event","event":name, ...fields}:
+//                        replay      {"replay":bool}       the Instant Replay switch changed
+//                        buffering   {"buffering":bool}    footage started or stopped being kept
+//                        game_start  {"game":string}       a game began (no debounce)
+//                        game_end    {"game":string}       that game ended
+//                        clip_saved  {"app":string|null (null: the user's own save), "clip"?:number
+//                                     (an app's clip id), "seconds":number, "paths"?:[string]
+//                                     (only for Ombra's command line until consent exists)}
+//                        exiting     {}                    the engine is shutting down
+//                      A connection more than kMaxQueuedEvents behind, or one whose events can't
+//                      be written within 5 s, is closed (catch up with status after reconnecting).
+//
 // Internal (ombra-ui only): {"type":"hello","id":1,"v":kProtocolVersion}, accepted only from
 // ombra-ui.exe beside the engine (PipeServer's internal gate), so apps can't reach set_config,
 // shutdown or update_install around the public API. Exact version match: both ship together.
