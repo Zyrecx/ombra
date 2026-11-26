@@ -45,6 +45,16 @@ inline std::wstring FormatClipLength(double seconds) {
     return std::to_wstring(m) + L" min" + (s ? L" " + std::to_wstring(s) + L" s" : L"");
 }
 
+// A saved recording's toast title: "Recording saved, 12 min 5 s", "..., 1 h 20 min"; without a
+// length, "Recording saved".
+inline std::wstring RecordingSavedTitle(double seconds) {
+    if (seconds <= 0) return L"Recording saved";
+    const long long total = std::llround(seconds);
+    if (total < 3600) return L"Recording saved, " + FormatClipLength(seconds);
+    const long long h = total / 3600, m = total % 3600 / 60;
+    return L"Recording saved, " + std::to_wstring(h) + L" h" + (m ? L" " + std::to_wstring(m) + L" min" : L"");
+}
+
 // The toast's title for a saved action: "Saved last 30 s", "Saved 2 clips, last 30 s".
 inline std::wstring SavedToastTitle(const SaveToastInfo& info) {
     if (info.seconds <= 0) return info.clips > 1 ? L"Saved " + std::to_wstring(info.clips) + L" clips" : L"Clip saved";

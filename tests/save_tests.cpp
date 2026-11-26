@@ -237,6 +237,13 @@ TEST_CASE("save: the toast's title names the clip's real length") {
     CHECK(SavedToastTitle({1, 0.0f}) == L"Clip saved");  // length unknown
 }
 
+TEST_CASE("save: a recording's toast names its length, in hours past one") {
+    CHECK(RecordingSavedTitle(0) == L"Recording saved");
+    CHECK(RecordingSavedTitle(725) == L"Recording saved, 12 min 5 s");
+    CHECK(RecordingSavedTitle(3599.6) == L"Recording saved, 1 h");
+    CHECK(RecordingSavedTitle(4830) == L"Recording saved, 1 h 20 min");
+}
+
 TEST_CASE("save: the toast carries the asking app's name, bounded") {
     SaveToastInfo info;
     CHECK(ToastApp(info).empty());  // the user's own save
