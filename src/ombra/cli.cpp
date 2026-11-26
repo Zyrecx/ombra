@@ -36,6 +36,10 @@ constexpr DWORD  kConnectTimeoutMs = 30000;
 constexpr DWORD  kRequestTimeoutMs = 15000;
 constexpr double kClipMaxAfterS    = 120;    // the engine's cap on "after" (protocol.h)
 constexpr double kClipWaitMarginS  = 120;    // past "after": the clip's tail, then writing the file
+// record start waits for the first footage (the engine gives up after 10 s, kRecordStartSeconds);
+// record stop for the last of it, then each file's index.
+constexpr DWORD  kRecordStartTimeoutMs = 30000;
+constexpr DWORD  kRecordStopTimeoutMs  = 300000;
 
 constexpr const char* kDefaultApp = "Command line";
 
@@ -444,6 +448,85 @@ int RunMarker(int argc, wchar_t** argv) {
     return kExitOk;
 }
 
+// Ctrl+C while a recording's stop is being waited for: the engine finishes its files anyway.
+BOOL WINAPI RecordStopCtrlHandler(DWORD event) {
+    if (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT)
+        Err(L"stopped waiting; the recording still stops and saves to " OMBRA_PRODUCT_NAME "'s clips folder");
+    return FALSE;  // the default handler ends the process
+}
+
+int RunRecordStart(const Args& args) {
+    if (args.positional.size() != 1) return UsageError(L"record start takes no arguments, only options");
+    JsonValue req = Request("record_start");
+    if (const std::wstring* before = args.Value(L"--before")) {
+        const std::optional<double> seconds = ParseSeconds(*before);
+        if (!seconds || *seconds < 0) return UsageError(L"--before is seconds: a number, 0 or more");
+        req.Set("before", JsonValue::MakeNum(*seconds));
+    }
+    if (const std::wstring* title = args.Value(L"--title")) req.Set("title", JsonValue::MakeStr(Utf8(*title)));
+    const Answer answer = Ask(args, std::move(req), kRecordStartTimeoutMs);
+    if (!answer.resp) return answer.exit_code;
+    const JsonValue& resp = *answer.resp;
+    if (args.Has(L"--json")) {
+        PrintJson(WithoutId(resp));
+        return IsOk(resp) ? kExitOk : ExitCodeFor(StrField(resp, "error"));
+    }
+    const JsonValue* id = resp.Find("recording");
+    const long long  id_n = id && id->type == JsonValue::Type::Number ? static_cast<long long>(id->num) : 0;
+    if (!IsOk(resp)) {
+        const int exit_code = EngineFailure(false, resp);
+        if (StrField(resp, "error") == "already_recording" && id_n)
+            Err(L"recording " + std::to_wstring(id_n) + L" is running: \"" OMBRA_CLI_NAME " record stop " +
+                std::to_wstring(id_n) + L"\" ends it");
+        return exit_code;
+    }
+    Out(std::to_wstring(id_n));
+    return kExitOk;
+}
+
+int RunRecordStop(const Args& args) {
+    if (args.positional.size() > 2) return UsageError(L"record stop takes at most one recording id");
+    JsonValue req = Request("record_stop");
+    if (args.positional.size() == 2) {
+        const std::wstring& text = args.positional[1];
+        wchar_t* end = nullptr;
+        const unsigned long long id = std::wcstoull(text.c_str(), &end, 10);
+        if (text.empty() || end != text.c_str() + text.size() || id == 0 || text[0] == L'-')
+            return UsageError(L"a recording id is a whole number, 1 or more, as record start printed it");
+        req.Set("recording", JsonValue::MakeNum(static_cast<double>(id)));
+    }
+    SetConsoleCtrlHandler(RecordStopCtrlHandler, TRUE);
+    const Answer answer = Ask(args, std::move(req), kRecordStopTimeoutMs);
+    SetConsoleCtrlHandler(RecordStopCtrlHandler, FALSE);
+    if (!answer.resp) return answer.exit_code;
+    const JsonValue& resp = *answer.resp;
+    if (args.Has(L"--json")) {
+        PrintJson(WithoutId(resp));
+        return IsOk(resp) ? kExitOk : ExitCodeFor(StrField(resp, "error"));
+    }
+    // Every file written, one per line, even when another monitor failed: a script keeps what saved.
+    if (const JsonValue* paths = resp.Find("paths"); paths && paths->type == JsonValue::Type::Array)
+        for (const JsonValue& path : paths->arr)
+            if (path.type == JsonValue::Type::String) Out(Wide(path.str));
+    if (!IsOk(resp)) return EngineFailure(false, resp);
+    const std::string end = StrField(resp, "end");
+    if (end == "disk_low") Err(L"the recording stopped early: the disk is nearly full");
+    if (end == "write_failed") Err(L"the recording stopped early: a write failed (see " OMBRA_PRODUCT_NAME "'s log)");
+    return kExitOk;
+}
+
+int RunRecord(int argc, wchar_t** argv) {
+    int code = kExitOk;
+    const auto args = ParseArgs(argc, argv, {L"--before", L"--title"}, {}, &code);
+    if (!args) return code;
+    const std::wstring action = args->positional.empty() ? std::wstring() : args->positional[0];
+    if (action == L"start") return RunRecordStart(*args);
+    if (action != L"stop") return UsageError(L"record takes start or stop");
+    if (args->Value(L"--before") || args->Value(L"--title"))
+        return UsageError(L"--before and --title are for record start");
+    return RunRecordStop(*args);
+}
+
 int RunStatus(int argc, wchar_t** argv) {
     int code = kExitOk;
     const auto args = ParseArgs(argc, argv, {}, {}, &code);
@@ -514,6 +597,20 @@ std::wstring DescribeEvent(const JsonValue& ev) {
         if (const JsonValue* paths = ev.Find("paths"); paths && paths->type == JsonValue::Type::Array)
             for (const JsonValue& p : paths->arr)
                 if (p.type == JsonValue::Type::String) text += L"\n          " + Wide(p.str);
+        return text;
+    }
+    if (name == "recording_started" || name == "recording_stopped") {
+        const std::string app = StrField(ev, "app");
+        const JsonValue*  id = ev.Find("recording");
+        text += name == "recording_started" ? L"Recording started" : L"Recording stopped";
+        if (id && id->type == JsonValue::Type::Number)
+            text += L" (" + std::to_wstring(static_cast<long long>(id->num)) + L")";
+        if (!app.empty()) text += L" for " + Wide(app);
+        if (const JsonValue* s = ev.Find("seconds"); s && s->type == JsonValue::Type::Number) {
+            wchar_t secs[32];
+            swprintf(secs, 32, L", %.1f s", s->num);
+            text += secs;
+        }
         return text;
     }
     return text + Wide(name);
@@ -620,7 +717,7 @@ int RunStart(int argc) {
 
 bool IsCliCommand(const wchar_t* arg) {
     if (!arg) return false;
-    for (const wchar_t* command : {L"clip", L"marker", L"status", L"replay", L"watch", L"start", L"help"})
+    for (const wchar_t* command : {L"clip", L"marker", L"record", L"status", L"replay", L"watch", L"start", L"help"})
         if (std::wcscmp(arg, command) == 0) return true;
     return false;
 }
@@ -636,13 +733,19 @@ int PrintCliUsage(bool error) {
         L"  marker [LABEL] [--at -S] [--kind K] [--important]\n"
         L"        Mark this moment, or S seconds ago, in every clip that covers it. K is one of\n"
         L"        generic, kill, death, assist, win, loss, objective, highlight, round_start, round_end.\n"
+        L"  record start [--before S] [--title T]\n"
+        L"        Record until \"record stop\", starting S seconds back (default 0), and print the\n"
+        L"        recording's id. One recording at a time.\n"
+        L"  record stop [ID]\n"
+        L"        Stop the recording (default: the latest) and print each file's path.\n"
         L"  status\n"
         L"        Whether Instant Replay is on and recording, the game, the buffer length.\n"
         L"  replay on|off\n"
         L"        Turn Instant Replay on or off.\n"
         L"  watch [EVENT...]\n"
         L"        Print what happens as it happens until " OMBRA_PRODUCT_NAME " exits: replay, buffering,\n"
-        L"        game_start, game_end, clip_saved, exiting (default: all of them).\n"
+        L"        game_start, game_end, clip_saved, recording_started, recording_stopped, exiting\n"
+        L"        (default: all of them).\n"
         L"  start\n"
         L"        Start " OMBRA_PRODUCT_NAME " in the background if it isn't running.\n"
         L"\n"
@@ -662,6 +765,7 @@ int RunCli(int argc, wchar_t** argv) {
     if (command == L"help" || command == L"--help" || command == L"-h" || command == L"/?") return PrintCliUsage(false);
     if (command == L"clip") return RunClip(argc, argv);
     if (command == L"marker") return RunMarker(argc, argv);
+    if (command == L"record") return RunRecord(argc, argv);
     if (command == L"status") return RunStatus(argc, argv);
     if (command == L"replay") return RunReplay(argc, argv);
     if (command == L"watch") return RunWatch(argc, argv);
