@@ -412,7 +412,7 @@ std::shared_ptr<SaveToastSignal> SpawnSaveToast(const std::wstring& app) {
 // A one-shot toast for an API app's action (`event` as ombra-ui's LookupToastInfo knows it), naming
 // the app through the same inheritable SaveToastInfo mapping a save toast reads: the name is
 // untrusted text, kept off the command line. `seconds`: the length the title names, if it names one.
-void SpawnAppToast(const wchar_t* event, const std::wstring& app, double seconds = 0) {
+void SpawnAppToast(const wchar_t* event, const std::wstring& app, double seconds = 0, uint32_t count = 0) {
     SECURITY_ATTRIBUTES inheritable{sizeof(inheritable), nullptr, TRUE};
     HANDLE info = CreateFileMappingW(INVALID_HANDLE_VALUE, &inheritable, PAGE_READWRITE, 0,
                                      sizeof(SaveToastInfo), nullptr);
@@ -423,6 +423,7 @@ void SpawnAppToast(const wchar_t* event, const std::wstring& app, double seconds
     if (void* view = MapViewOfFile(info, FILE_MAP_WRITE, 0, 0, sizeof(SaveToastInfo))) {
         SetToastApp(*static_cast<SaveToastInfo*>(view), app);
         static_cast<SaveToastInfo*>(view)->seconds = static_cast<float>(seconds);
+        static_cast<SaveToastInfo*>(view)->clips   = count;
         UnmapViewOfFile(view);
     }
     SpawnToastProcess(std::wstring(event) + L" --info " +
@@ -743,6 +744,34 @@ int RunEngine(int argc, wchar_t** argv) {
     // The pipe's events: before the pipe server, the saves and the controller (whose destructor
     // can still end a game), so every source outlives nothing it publishes into.
     EventHub     events;
+    // Recordings a crash or a power cut left fragmented become plain (open_recording.h). Listed
+    // here, before anything can start a recording whose record would join the list; recovered on
+    // their own thread, which the exit joins.
+    std::jthread recover_left;
+    if (resident) {
+        std::vector<LeftRecording> left = ListLeftRecordings(OpenRecordingsDir());
+        if (!left.empty()) {
+            Log::Info("recording: %zu left by an earlier run", left.size());
+            recover_left = std::jthread([left = std::move(left), &events](std::stop_token stop) {
+                const std::vector<RecoveredRecording> done = RecoverLeftRecordings(left, stop);
+                double   seconds = 0;
+                std::string app  = done.empty() ? std::string{} : done.front().app;
+                for (const RecoveredRecording& r : done) {
+                    seconds += r.seconds;
+                    if (r.app != app) app.clear();  // apps differ: the toast names none
+                    events.PublishIfActive("recording_recovered", [&](JsonValue& f, JsonValue& private_fields) {
+                        f.Set("app", JsonValue::MakeStr(r.app));
+                        f.Set("seconds", JsonValue::MakeNum(std::round(r.seconds * 100) / 100));
+                        JsonValue paths = JsonValue::MakeArray();
+                        paths.arr.push_back(JsonValue::MakeStr(NarrowUtf8(r.path)));
+                        private_fields.Set("paths", std::move(paths));
+                    });
+                }
+                if (!done.empty())
+                    SpawnAppToast(L"record_recovered", WideFromUtf8(app), seconds, static_cast<uint32_t>(done.size()));
+            });
+        }
+    }
     std::unique_ptr<PipeServer> pipe_server;
     LogRssStage("process start");
 

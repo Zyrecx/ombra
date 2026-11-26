@@ -101,6 +101,9 @@
 //                        recording_started {"app":string, "recording":number}
 //                        recording_stopped {"app":string, "recording":number, "reason":string,
 //                                     "end":string, "seconds":number, "paths"?:[string] (as clip_saved)}
+//                        recording_recovered {"app":string, "seconds":number, "paths"?:[string]}
+//                                     a recording an earlier run left unfinished (a crash, a
+//                                     power cut), made playable at this engine's start
 //                        exiting     {}                    the engine is shutting down
 //                      A connection more than kMaxQueuedEvents behind, or one whose events can't
 //                      be written within 5 s, is closed (catch up with status after reconnecting).

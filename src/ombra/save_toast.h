@@ -55,6 +55,14 @@ inline std::wstring RecordingSavedTitle(double seconds) {
     return L"Recording saved, " + std::to_wstring(h) + L" h" + (m ? L" " + std::to_wstring(m) + L" min" : L"");
 }
 
+// Recordings a crash left fragmented, made plain at engine start: "Recording recovered, 12 min 5 s",
+// or "3 recordings recovered".
+inline std::wstring RecordingRecoveredTitle(double seconds, uint32_t count) {
+    if (count > 1) return std::to_wstring(count) + L" recordings recovered";
+    const std::wstring saved = RecordingSavedTitle(seconds);  // "Recording saved[, length]"
+    return L"Recording recovered" + saved.substr(std::wstring_view(L"Recording saved").size());
+}
+
 // The toast's title for a saved action: "Saved last 30 s", "Saved 2 clips, last 30 s".
 inline std::wstring SavedToastTitle(const SaveToastInfo& info) {
     if (info.seconds <= 0) return info.clips > 1 ? L"Saved " + std::to_wstring(info.clips) + L" clips" : L"Clip saved";

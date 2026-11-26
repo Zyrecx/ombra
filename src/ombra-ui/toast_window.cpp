@@ -122,6 +122,8 @@ bool LookupToastInfo(const std::wstring& event, ToastInfo* out) {
     if (event == L"record_nothing") { *out = {IconType::Alert, L"Nothing to record", ToastTone::Warning}; return true; }
     if (event == L"record_disk_low") { *out = {IconType::Alert, L"Disk nearly full — recording saved", ToastTone::Warning}; return true; }
     if (event == L"record_write_failed") { *out = {IconType::Alert, L"Recording cut short — see log", ToastTone::Danger}; return true; }
+    // Recordings a crash left fragmented, made plain at engine start (open_recording.h).
+    if (event == L"record_recovered") { *out = {IconType::Record, L"Recording recovered", ToastTone::Success}; return true; }
     if (event == L"record_failed")  { *out = {IconType::Alert, L"Recording not saved — see log", ToastTone::Danger}; return true; }
     // The engine fell back to x264 because no GPU encoder would open (supervisor.h).
     if (event == L"cpu_encoder") { *out = {IconType::Alert, L"GPU encoder failed \u2014 recording on the CPU", ToastTone::Warning}; return true; }
@@ -242,12 +244,14 @@ public:
             if (const void* view = MapViewOfFile(info_, FILE_MAP_READ, 0, 0, sizeof(ombra::SaveToastInfo))) {
                 app = ombra::ToastApp(*static_cast<const ombra::SaveToastInfo*>(view));
                 info_seconds = static_cast<const ombra::SaveToastInfo*>(view)->seconds;
+                info_count   = static_cast<const ombra::SaveToastInfo*>(view)->clips;
                 UnmapViewOfFile(view);
             }
         }
     }
     std::wstring app;     // the API app whose action this is; empty for the user's own
     float info_seconds = 0;  // the length a one-shot toast's mapping names (a recording's); 0: none
+    uint32_t info_count = 0;  // and how many files it covers (recovered recordings)
     void SetCompact(bool compact) { compact_ = compact; }
 
 private:
@@ -765,6 +769,8 @@ int RunToast(const std::wstring& event, std::vector<HANDLE> save_waits, HANDLE s
     toast.info = info;
     toast.SetSaveWaits(std::move(save_waits), save_info);
     if (event == L"record_saved") toast.info.title = ombra::RecordingSavedTitle(toast.info_seconds);
+    if (event == L"record_recovered")
+        toast.info.title = ombra::RecordingRecoveredTitle(toast.info_seconds, toast.info_count);
     toast.SetSlideFromRight(from_right);
     toast.SetCompact(cfg.ui_toast_style == "compact");
     if (!toast.InitGraphics(/*warp=*/false, mon)) return 1;
@@ -828,6 +834,7 @@ int RunToastTest(const std::wstring& out_png_path, const std::wstring& event, bo
         info.title = ombra::SavedToastTitle(saved);
     }
     if (event == L"record_saved") info.title = ombra::RecordingSavedTitle(seconds);
+    if (event == L"record_recovered") info.title = ombra::RecordingRecoveredTitle(seconds, clips);
     ToastWindow toast;
     toast.info = info;
     toast.app = app;

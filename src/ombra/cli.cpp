@@ -599,10 +599,12 @@ std::wstring DescribeEvent(const JsonValue& ev) {
                 if (p.type == JsonValue::Type::String) text += L"\n          " + Wide(p.str);
         return text;
     }
-    if (name == "recording_started" || name == "recording_stopped") {
+    if (name == "recording_started" || name == "recording_stopped" || name == "recording_recovered") {
         const std::string app = StrField(ev, "app");
         const JsonValue*  id = ev.Find("recording");
-        text += name == "recording_started" ? L"Recording started" : L"Recording stopped";
+        text += name == "recording_started"   ? L"Recording started"
+                : name == "recording_stopped" ? L"Recording stopped"
+                                              : L"Recording recovered";
         if (id && id->type == JsonValue::Type::Number)
             text += L" (" + std::to_wstring(static_cast<long long>(id->num)) + L")";
         if (!app.empty()) text += L" for " + Wide(app);
@@ -744,8 +746,8 @@ int PrintCliUsage(bool error) {
         L"        Turn Instant Replay on or off.\n"
         L"  watch [EVENT...]\n"
         L"        Print what happens as it happens until " OMBRA_PRODUCT_NAME " exits: replay, buffering,\n"
-        L"        game_start, game_end, clip_saved, recording_started, recording_stopped, exiting\n"
-        L"        (default: all of them).\n"
+        L"        game_start, game_end, clip_saved, recording_started, recording_stopped,\n"
+        L"        recording_recovered, exiting (default: all of them).\n"
         L"  start\n"
         L"        Start " OMBRA_PRODUCT_NAME " in the background if it isn't running.\n"
         L"\n"
