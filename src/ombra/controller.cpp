@@ -178,8 +178,11 @@ GameArmDecision DecideGameArm(GameVerdict verdict, double confidence) {
 }
 
 bool WantArmed(const ArmInputs& in) {
-    if (!in.user_enabled || in.display_off) return false;
-    if (in.window_target) return in.target_present;
+    if (in.display_off) return false;
+    // A recording overrides the switch and When, not What: One window still waits for its window.
+    if (in.window_target) return (in.user_enabled || in.recording) && in.target_present;
+    if (in.recording) return true;
+    if (!in.user_enabled) return false;
     return !in.only_in_games || in.target_present;
 }
 
@@ -193,7 +196,7 @@ bool StepArm(ArmState& state, const ArmInputs& in, int64_t now_ms, int64_t settl
         state.leaving = false;
         return true;
     }
-    if (!in.user_enabled) {
+    if (!in.user_enabled && !in.recording) {
         state.armed   = false;
         state.leaving = false;
         return false;
@@ -220,7 +223,7 @@ BufferController::BufferController(std::string mode, std::string capture_target,
     : supervisors_(std::move(supervisors)), games_(games) {
     settings_ = {std::move(mode), std::move(capture_target), std::move(target_window)};
     arm_.armed = InitialArmed(settings_.mode, settings_.target);
-    for (PipelineSupervisor* s : supervisors_) s->SetGameFallbackToDisplay(settings_.mode != "game");
+    ApplyGameFallback();
 }
 
 BufferController::BufferController(PipelineSupervisor* supervisor)
@@ -268,7 +271,10 @@ void BufferController::SetMode(const std::string& mode) {
         if (settings_.mode == mode) return;
         settings_.mode = mode;
     }
-    for (PipelineSupervisor* s : supervisors_) s->SetGameFallbackToDisplay(mode != "game");
+    {
+        std::lock_guard<std::mutex> lock(replay_mutex_);
+        ApplyGameFallback();
+    }
     Log::Info("buffer controller  when -> %s", mode.c_str());
     Wake(nullptr);
 }
@@ -285,20 +291,54 @@ void BufferController::SetTarget(const std::string& capture_target, const std::s
 
 void BufferController::SetUserEnabled(bool enabled) {
     {
+        // Held through the apply below, so a recording starting meanwhile can't be disarmed by it.
         std::lock_guard<std::mutex> lock(replay_mutex_);
-        if (user_enabled_.exchange(enabled, std::memory_order_acq_rel) == enabled) return;
+        if (user_enabled_.load(std::memory_order_acquire) == enabled) return;
+        const bool recording = recordings_.load(std::memory_order_acquire) > 0;
+        if (reach_sink_) reach_sink_(enabled, recording);
+        user_enabled_.store(enabled, std::memory_order_release);
         Log::Info("buffer controller  recording switched %s", enabled ? "on" : "off");
         if (replay_sink_) replay_sink_(enabled);
+        // Applied here when the answer needs no look at the screen, not on the worker's next pass,
+        // so the switch reads right the moment the pipe command returns. A recording keeps it armed.
+        bool always = false;
+        {
+            std::lock_guard<std::mutex> settings_lock(settings_mutex_);
+            always = !NeedsWindowPoll(settings_.mode, settings_.target) && !display_off_.load(std::memory_order_acquire);
+        }
+        if (!enabled && !recording) ApplyArmed(false);
+        else if (enabled && always) ApplyArmed(true);
     }
-    // Applied here when the answer needs no look at the screen, not on the worker's next pass, so
-    // the switch reads right the moment the pipe command returns.
-    bool always = false;
+    Wake(nullptr);
+}
+
+std::shared_ptr<void> BufferController::HoldRecording() {
+    ChangeRecordings(+1);
+    return std::shared_ptr<void>(this, [](BufferController* self) { self->ChangeRecordings(-1); });
+}
+
+void BufferController::ChangeRecordings(int delta) {
+    {
+        std::lock_guard<std::mutex> lock(replay_mutex_);
+        const int before = recordings_.fetch_add(delta, std::memory_order_acq_rel);
+        const bool was = before > 0, now = before + delta > 0;
+        if (was != now) {
+            Log::Info("buffer controller  recording %s", now ? "started" : "stopped");
+            if (reach_sink_) reach_sink_(UserEnabled(), now);
+            ApplyGameFallback();
+        }
+    }
+    Wake(nullptr);
+}
+
+void BufferController::ApplyGameFallback() {
+    bool game_mode = false;
     {
         std::lock_guard<std::mutex> lock(settings_mutex_);
-        always = !NeedsWindowPoll(settings_.mode, settings_.target) && !display_off_.load(std::memory_order_acquire);
+        game_mode = settings_.mode == "game";
     }
-    if (!enabled || always) ApplyArmed(enabled);
-    Wake(nullptr);
+    const bool fallback = !game_mode || recordings_.load(std::memory_order_acquire) > 0;
+    for (PipelineSupervisor* s : supervisors_) s->SetGameFallbackToDisplay(fallback);
 }
 
 void BufferController::SetDisplayOff(bool off) {
@@ -422,6 +462,7 @@ void BufferController::Evaluate(const Settings& s) {
     in.only_in_games = s.mode == "game";
     in.window_target = s.target == "window";
     in.display_off   = display_off_.load(std::memory_order_acquire);
+    in.recording     = recordings_.load(std::memory_order_acquire) > 0;
 
     const WindowCandidate* game = nullptr;
     std::vector<WindowCandidate> windows;
@@ -469,9 +510,12 @@ void BufferController::Evaluate(const Settings& s) {
     const bool out_of_step = std::any_of(supervisors_.begin(), supervisors_.end(),
                                          [&](const PipelineSupervisor* sup) { return sup->Armed() != armed; });
     if (armed != was) {
+        ArmInputs rule = in;  // what would arm with no recording
+        rule.recording = false;
         Log::Info("buffer controller  %s  (%s)", armed ? "arming" : "disarming",
-                  !in.user_enabled          ? "switched off"
-                  : in.display_off          ? "display off"
+                  in.display_off            ? "display off"
+                  : armed && !WantArmed(rule) ? "recording"
+                  : !in.user_enabled && !in.recording ? "switched off"
                   : in.window_target       ? (armed ? "target window open" : "target window closed")
                   : in.only_in_games        ? (armed ? "a game is open" : "no game open")
                                             : "always");

@@ -7,8 +7,9 @@
 //   - what's on screen: a 1 s poll of the top-level windows (SnapshotTargetWindows).
 //   - the display state: SetDisplayOff, from the engine window's power notification.
 //
-// The rule (WantArmed): switched off never records, and nor does a PC with every display off
-// (Modern Standby would otherwise encode duplicates all night). One window records while its program has a
+// The rule (WantArmed): nothing records on a PC with every display off (Modern Standby would
+// otherwise encode duplicates all night). A recording (HoldRecording) records whatever the switch and
+// When say, and switched off records nothing else. One window records while its program has a
 // window, whatever When says. Otherwise Always records all the time and Only in games while a
 // window the Games list calls a game exists -- foreground or not, so alt-tabbing never stops it
 // (replacing foreground arming and its 30 s grace period). Losing the
@@ -80,6 +81,7 @@ struct ArmInputs {
     bool window_target  = false;  // capture.target == "window"
     bool target_present = false;  // One window: its program has a window. Otherwise: a game window exists.
     bool display_off    = false;  // Windows reports every display off
+    bool recording      = false;  // a recording is running (BufferController::HoldRecording)
 };
 bool WantArmed(const ArmInputs& in);
 // Whether these settings need the screen polled: for the arm decision, or to follow the game "The
@@ -87,8 +89,8 @@ bool WantArmed(const ArmInputs& in);
 bool NeedsWindowPoll(const std::string& mode, const std::string& capture_target);
 
 // Arming is immediate. A disarm because the target went away waits until it has been missing for
-// `settle_ms` (its return cancels it); a disarm because the user switched recording off is
-// immediate. Returns the armed state to apply.
+// `settle_ms` (its return cancels it); a disarm because the user switched recording off, with no
+// recording running, is immediate. Returns the armed state to apply.
 struct ArmState {
     bool    armed         = false;
     bool    leaving       = false;
@@ -122,8 +124,14 @@ public:
     void SetMode(const std::string& mode);
     void SetTarget(const std::string& capture_target, const std::string& target_window);
 
-    // The Instant Replay switch. Off disarms at once; on lets the rule decide.
+    // The Instant Replay switch. Off disarms at once, unless a recording runs; on lets the rule decide.
     void SetUserEnabled(bool enabled);
+
+    // Keeps capture armed for a recording until the returned hold is dropped, whatever the switch
+    // and When say (only every display off still disarms). While one is held "The game" records the
+    // display when no game is open, as Always does; One window still waits for its window. The
+    // controller must outlive the hold.
+    std::shared_ptr<void> HoldRecording();
 
     // Every display off: disarms after kDisarmSettleMs, so a brief blank costs no barrier. Arming
     // again on the way back is immediate. Called on the pump thread: only latches and wakes.
@@ -145,6 +153,10 @@ public:
     using ChangeSink = std::function<void(bool on)>;
     void SetReplaySink(ChangeSink sink) { replay_sink_ = std::move(sink); }
     void SetBufferingSink(ChangeSink sink) { buffering_sink_ = std::move(sink); }
+    // Called with the switch and whether a recording runs whenever either changes, before the switch
+    // reads the new value (so no save sees it on with the old reach): ApplyReplayReach. Set before Start.
+    using ReachSink = std::function<void(bool replay_on, bool recording)>;
+    void SetReachSink(ReachSink sink) { reach_sink_ = std::move(sink); }
     // Test seam: a settle a test can wait out. Set before Start.
     void SetDisarmSettleForTest(int64_t ms) { settle_ms_ = ms; }
     bool ToggleUserEnabled();  // returns the new value
@@ -173,6 +185,8 @@ private:
     void Evaluate(const Settings& s);
     std::function<std::vector<WindowCandidate>()> window_snapshot_;  // SetWindowSnapshotForTest
     void ApplyArmed(bool armed);
+    void ApplyGameFallback();  // under replay_mutex_ (but in the constructor), so no stale value lands last
+    void ChangeRecordings(int delta);
     std::wstring ResolveGameName(const std::wstring& exe_path);
     void UpdateGameGpu(const WindowCandidate* game);
     double ComputeGameConfidence(DWORD pid, bool covers_monitor) const;
@@ -181,6 +195,7 @@ private:
     GameLibrary*      games_ = nullptr;  // thread-safe itself
     std::atomic<bool> user_enabled_{true};
     std::atomic<bool> display_off_{false};
+    std::atomic<int>  recordings_{0};  // HoldRecording's holds; changed under replay_mutex_
     int64_t           settle_ms_ = kDisarmSettleMs;
 
     mutable std::mutex settings_mutex_;
@@ -204,9 +219,10 @@ private:
     GameSessionSink        game_sink_;
     ChangeSink             replay_sink_;
     ChangeSink             buffering_sink_;
+    ReachSink              reach_sink_;
     // The pipe's thread and the worker both switch: a change and what its sink is told happen
     // together, so the last event told is the state now.
-    std::mutex             replay_mutex_;  // user_enabled_'s changes with replay_sink_
+    std::mutex             replay_mutex_;  // user_enabled_'s and recordings_' changes with their sinks
     std::mutex             armed_mutex_;   // SetArmed, applied_armed_ and buffering_sink_
     int                    applied_armed_ = -1;  // what buffering_sink_ was last told; -1: nothing yet
     std::wstring           session_exe_;  // what game_sink_ was last told

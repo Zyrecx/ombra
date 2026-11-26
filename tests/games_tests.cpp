@@ -501,6 +501,26 @@ TEST_CASE("arming: When x What x the switch") {
     CHECK_FALSE(WantArmed(Inputs(false, false, false, true)));
     CHECK_FALSE(WantArmed(Inputs(false, true, true, true)));
 
+    // A recording overrides the switch and When, not What, nor every display off.
+    const auto recording = [](ArmInputs in, bool display_off = false) {
+        in.recording   = true;
+        in.display_off = display_off;
+        return in;
+    };
+    CHECK(WantArmed(recording(Inputs(false, false, false, false))));
+    CHECK(WantArmed(recording(Inputs(false, true, false, false))));  // Only in games, no game
+    CHECK(WantArmed(recording(Inputs(false, false, true, true))));
+    CHECK_FALSE(WantArmed(recording(Inputs(false, false, true, false))));  // One window, gone
+    CHECK_FALSE(WantArmed(recording(Inputs(true, false, false, false), true)));
+
+    // Switched off, a recording's display blank still settles; its end disarms at once.
+    ArmState s;
+    ArmInputs blank = recording(Inputs(false, false, false, false), true);
+    CHECK(StepArm(s, recording(Inputs(false, false, false, false)), 0, 10'000));
+    CHECK(StepArm(s, blank, 1'000, 10'000));
+    CHECK(StepArm(s, recording(Inputs(false, false, false, false)), 2'000, 10'000));
+    CHECK_FALSE(StepArm(s, Inputs(false, false, false, false), 3'000, 10'000));
+
     CHECK_FALSE(NeedsWindowPoll("desktop", "monitor"));
     CHECK(NeedsWindowPoll("desktop", "game"));  // to name the game it records
     CHECK(NeedsWindowPoll("desktop", "window"));
@@ -615,6 +635,37 @@ TEST_CASE("controller: Always + a display disarms with the display off and re-ar
     controller.SetDisplayOff(false);
     CHECK(wait_for(true));
     controller.Stop();
+}
+
+TEST_CASE("controller: a recording keeps capture armed with the switch off, and its end disarms") {
+    Ring ring;
+    ring.Init(1024 * 1024, 64 * 1024);
+    PipelineSupervisor sup(60, 10000, 2, &ring);
+    sup.SetArmed(true);
+    BufferController controller("desktop", "monitor", "", {&sup});
+    controller.SetWindowSnapshotForTest([] { return std::vector<WindowCandidate>{}; });
+    std::vector<std::pair<bool, bool>> reach;  // under the controller's lock
+    controller.SetReachSink([&](bool replay_on, bool recording) { reach.emplace_back(replay_on, recording); });
+    controller.Start();
+    const auto wait_for = [&](bool armed) {
+        for (int i = 0; i < 300 && sup.Armed() != armed; ++i) Sleep(10);
+        return sup.Armed() == armed;
+    };
+    std::shared_ptr<void> hold = controller.HoldRecording();
+    std::shared_ptr<void> second = controller.HoldRecording();  // a second monitor's: no change
+    controller.SetUserEnabled(false);
+    CHECK(sup.Armed());  // no immediate disarm
+    Sleep(50);
+    CHECK(sup.Armed());  // nor on the worker's pass
+    second.reset();
+    Sleep(50);
+    CHECK(sup.Armed());
+    hold.reset();
+    CHECK(wait_for(false));
+    controller.SetUserEnabled(true);
+    CHECK(sup.Armed());
+    controller.Stop();
+    CHECK(reach == std::vector<std::pair<bool, bool>>{{true, true}, {false, true}, {false, false}, {true, false}});
 }
 
 // Two games open while a display records: the one in front is the one on screen.
