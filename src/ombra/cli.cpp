@@ -1,6 +1,7 @@
 #include "ombra/cli.h"
 
 #include "ombra/brand.h"
+#include "ombra/events.h"
 #include "ombra/json.h"
 #include "ombra/paths.h"
 #include "ombra/protocol.h"
@@ -161,7 +162,13 @@ public:
         if (!Io(true, const_cast<char*>(line.data()), static_cast<DWORD>(line.size()), &done, timeout_ms) ||
             done != line.size())
             return std::nullopt;
-        const ULONGLONG deadline = GetTickCount64() + timeout_ms;
+        return Read(timeout_ms);
+    }
+
+    // The next line the engine sends (INFINITE: however long that takes); nullopt as Request's.
+    std::optional<JsonValue> Read(DWORD timeout_ms) {
+        const ULONGLONG deadline = timeout_ms == INFINITE ? 0 : GetTickCount64() + timeout_ms;
+        DWORD done = 0;
         while (true) {
             if (const size_t nl = buffer_.find('\n'); nl != std::string::npos) {
                 const std::string text = buffer_.substr(0, nl);
@@ -173,11 +180,14 @@ public:
                 }
             }
             if (buffer_.size() > kMaxApiMessageBytes) return std::nullopt;
-            const ULONGLONG now = GetTickCount64();
-            if (now >= deadline) return std::nullopt;
+            DWORD wait_ms = INFINITE;
+            if (deadline) {
+                const ULONGLONG now = GetTickCount64();
+                if (now >= deadline) return std::nullopt;
+                wait_ms = static_cast<DWORD>(deadline - now);
+            }
             char chunk[4096];
-            if (!Io(false, chunk, sizeof(chunk), &done, static_cast<DWORD>(deadline - now)) || done == 0)
-                return std::nullopt;
+            if (!Io(false, chunk, sizeof(chunk), &done, wait_ms) || done == 0) return std::nullopt;
             buffer_.append(chunk, done);
         }
     }
@@ -314,20 +324,16 @@ struct Answer {
     int                      exit_code = kExitOk;
 };
 
-Answer Ask(const Args& args, JsonValue req, DWORD timeout_ms) {
+// Connects and says hello as `app`; kExitOk, or the exit code of a failure already reported.
+int OpenSession(const Args& args, const std::string& type, Pipe& pipe) {
     const bool json = args.Has(L"--json");
-    const std::string type = StrField(req, "type");
-    Answer answer;
-    Pipe pipe;
     switch (pipe.Open(kConnectTimeoutMs)) {
         case Connect::kOk: break;
         case Connect::kNotRunning:
-            answer.exit_code = Fail(json, type.c_str(), "not_running",
-                                    L"" OMBRA_PRODUCT_NAME " isn't running (start it with \"" OMBRA_CLI_NAME " start\")");
-            return answer;
+            return Fail(json, type.c_str(), "not_running",
+                        L"" OMBRA_PRODUCT_NAME " isn't running (start it with \"" OMBRA_CLI_NAME " start\")");
         case Connect::kNoAnswer:
-            answer.exit_code = Fail(json, type.c_str(), "no_answer", L"" OMBRA_PRODUCT_NAME " didn't answer");
-            return answer;
+            return Fail(json, type.c_str(), "no_answer", L"" OMBRA_PRODUCT_NAME " didn't answer");
     }
     JsonValue hello = JsonValue::MakeObject();
     hello.Set("type", JsonValue::MakeStr("hello"));
@@ -336,14 +342,18 @@ Answer Ask(const Args& args, JsonValue req, DWORD timeout_ms) {
     const std::wstring* as = args.Value(L"--as");
     hello.Set("app", JsonValue::MakeStr(as ? Utf8(*as) : std::string(kDefaultApp)));
     const std::optional<JsonValue> greeted = pipe.Request(hello, kRequestTimeoutMs);
-    if (!greeted) {
-        answer.exit_code = Fail(json, type.c_str(), "no_answer", L"" OMBRA_PRODUCT_NAME " didn't answer");
-        return answer;
-    }
-    if (!IsOk(*greeted)) {
-        answer.exit_code = EngineFailure(json, *greeted);
-        return answer;
-    }
+    if (!greeted) return Fail(json, type.c_str(), "no_answer", L"" OMBRA_PRODUCT_NAME " didn't answer");
+    if (!IsOk(*greeted)) return EngineFailure(json, *greeted);
+    return kExitOk;
+}
+
+Answer Ask(const Args& args, JsonValue req, DWORD timeout_ms) {
+    const bool json = args.Has(L"--json");
+    const std::string type = StrField(req, "type");
+    Answer answer;
+    Pipe pipe;
+    answer.exit_code = OpenSession(args, type, pipe);
+    if (answer.exit_code != kExitOk) return answer;
     req.Set("id", JsonValue::MakeNum(2));
     answer.resp = pipe.Request(req, timeout_ms);
     if (!answer.resp)
@@ -476,6 +486,81 @@ int RunReplay(int argc, wchar_t** argv) {
     return kExitOk;
 }
 
+// One event as a line of text: the local time, the event, what it says.
+std::wstring DescribeEvent(const JsonValue& ev) {
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    wchar_t stamp[16];
+    swprintf(stamp, 16, L"%02u:%02u:%02u", now.wHour, now.wMinute, now.wSecond);
+    const std::string name = StrField(ev, "event");
+    const auto flag = [&](const char* key) {
+        const JsonValue* v = ev.Find(key);
+        return v && v->type == JsonValue::Type::Bool && v->b;
+    };
+    std::wstring text = std::wstring(stamp) + L"  ";
+    if (name == "replay") return text + L"Instant Replay " + (flag("replay") ? L"on" : L"off");
+    if (name == "buffering") return text + (flag("buffering") ? L"Recording" : L"Not recording");
+    if (name == "game_start") return text + L"Game started: " + Wide(StrField(ev, "game"));
+    if (name == "game_end") return text + L"Game ended: " + Wide(StrField(ev, "game"));
+    if (name == "exiting") return text + L"" OMBRA_PRODUCT_NAME " is exiting";
+    if (name == "clip_saved") {
+        const std::string app = StrField(ev, "app");
+        text += L"Clip saved" + (app.empty() ? std::wstring() : L" for " + Wide(app));
+        if (const JsonValue* s = ev.Find("seconds"); s && s->type == JsonValue::Type::Number) {
+            wchar_t secs[32];
+            swprintf(secs, 32, L" (%.1f s)", s->num);
+            text += secs;
+        }
+        if (const JsonValue* paths = ev.Find("paths"); paths && paths->type == JsonValue::Type::Array)
+            for (const JsonValue& p : paths->arr)
+                if (p.type == JsonValue::Type::String) text += L"\n          " + Wide(p.str);
+        return text;
+    }
+    return text + Wide(name);
+}
+
+// Prints the engine's events as they happen until it exits (0) or the connection drops (1).
+int RunWatch(int argc, wchar_t** argv) {
+    int code = kExitOk;
+    const auto args = ParseArgs(argc, argv, {}, {}, &code);
+    if (!args) return code;
+    const bool json = args->Has(L"--json");
+    JsonValue req = Request("subscribe");
+    req.Set("id", JsonValue::MakeNum(2));
+    // exiting is always heard, so the engine quitting ends the watch with 0; shown only if asked for.
+    bool show_exiting = args->positional.empty();
+    if (!args->positional.empty()) {
+        JsonValue names = JsonValue::MakeArray();
+        names.arr.push_back(JsonValue::MakeStr("exiting"));
+        for (const std::wstring& name : args->positional) {
+            if (std::none_of(std::begin(kEventNames), std::end(kEventNames),
+                             [&](const char* known) { return Wide(known) == name; }))
+                return UsageError(L"unknown event " + name + L" (watch takes replay, buffering, game_start, "
+                                  L"game_end, clip_saved, exiting)");
+            if (name == L"exiting") show_exiting = true;
+            else names.arr.push_back(JsonValue::MakeStr(Utf8(name)));
+        }
+        req.Set("events", std::move(names));
+    }
+    Pipe pipe;
+    code = OpenSession(*args, "watch", pipe);
+    if (code != kExitOk) return code;
+    const std::optional<JsonValue> reply = pipe.Request(req, kRequestTimeoutMs);
+    if (!reply) return Fail(json, "watch", "no_answer", L"" OMBRA_PRODUCT_NAME " didn't answer");
+    if (!IsOk(*reply)) return EngineFailure(json, *reply);
+    while (true) {
+        const std::optional<JsonValue> line = pipe.Read(INFINITE);
+        if (!line) return Fail(json, "watch", "disconnected", L"lost the connection to " OMBRA_PRODUCT_NAME);
+        if (StrField(*line, "type") != "event") continue;
+        const bool exiting = StrField(*line, "event") == "exiting";
+        if (!exiting || show_exiting) {
+            if (json) PrintJson(*line);
+            else Out(DescribeEvent(*line));
+        }
+        if (exiting) return kExitOk;
+    }
+}
+
 // The engine beside this binary, started without a console or focus; returns once its pipe answers.
 // On a new install the engine opens its setup: nothing records before the user agrees to it.
 int RunStart(int argc) {
@@ -535,7 +620,7 @@ int RunStart(int argc) {
 
 bool IsCliCommand(const wchar_t* arg) {
     if (!arg) return false;
-    for (const wchar_t* command : {L"clip", L"marker", L"status", L"replay", L"start", L"help"})
+    for (const wchar_t* command : {L"clip", L"marker", L"status", L"replay", L"watch", L"start", L"help"})
         if (std::wcscmp(arg, command) == 0) return true;
     return false;
 }
@@ -555,6 +640,9 @@ int PrintCliUsage(bool error) {
         L"        Whether Instant Replay is on and recording, the game, the buffer length.\n"
         L"  replay on|off\n"
         L"        Turn Instant Replay on or off.\n"
+        L"  watch [EVENT...]\n"
+        L"        Print what happens as it happens until " OMBRA_PRODUCT_NAME " exits: replay, buffering,\n"
+        L"        game_start, game_end, clip_saved, exiting (default: all of them).\n"
         L"  start\n"
         L"        Start " OMBRA_PRODUCT_NAME " in the background if it isn't running.\n"
         L"\n"
@@ -576,6 +664,7 @@ int RunCli(int argc, wchar_t** argv) {
     if (command == L"marker") return RunMarker(argc, argv);
     if (command == L"status") return RunStatus(argc, argv);
     if (command == L"replay") return RunReplay(argc, argv);
+    if (command == L"watch") return RunWatch(argc, argv);
     if (command == L"start") return RunStart(argc);
     return UsageError(L"unknown command " + command);
 }
