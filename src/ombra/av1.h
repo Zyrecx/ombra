@@ -23,4 +23,8 @@ bool Av1CodedSize(const uint8_t* seq_header, size_t size, uint32_t& width, uint3
 // OBU; `out` then holds whatever came before it.
 bool FilterAv1Sample(const uint8_t* data, size_t size, std::vector<uint8_t>& out);
 
+// `data` is a sample FilterAv1Sample could have written: OBUs of a type a sample carries, their
+// sizes adding up to `size`. Zeros (a power cut's unwritten data) fail: OBU type 0 is reserved.
+bool Av1SampleWellFormed(const uint8_t* data, size_t size);
+
 }  // namespace ombra

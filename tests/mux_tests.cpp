@@ -396,6 +396,7 @@ MuxAudioTrack FakeAacTrack(const char* name) {
 MuxAudioFrame FakeAacFrame(size_t i) {
     MuxAudioFrame f;
     f.data.assign(32 + i % 7, static_cast<uint8_t>(i));
+    f.data.front() = 0xFF;  // never all zeros: Recover takes that for a sample the disk never got
     return f;
 }
 
@@ -721,6 +722,7 @@ TEST_CASE("mux: past 4 GB a recording and a save use co64 and a 64-bit mdat, and
     const H264Fixture& fx = StandardFixture();
     REQUIRE(fx.aus.size() % fx.gop == 0);
     REQUIRE(kCrashFrame % fx.gop == 0);
+    REQUIRE(kBigFrames % fx.gop == 0);
     ULARGE_INTEGER free_bytes{};
     REQUIRE(GetDiskFreeSpaceExW(TestOutputPath(L"").c_str(), &free_bytes, nullptr, nullptr));
     REQUIRE_MESSAGE(free_bytes.QuadPart > (uint64_t{6} << 30), "the test output folder's disk needs 6 GB free");
@@ -835,6 +837,317 @@ TEST_CASE("mux: past 4 GB a recording and a save use co64 and a 64-bit mdat, and
         CHECK(clip.video_bytes == video_bytes);
         CHECK(clip.duration_s == doctest::Approx(double(kBigFrames) / fx.fps));
     }
+
+    // The same recording abandoned at the keyframe after its last frame (that fragment is the last
+    // written, its start past 4 GB in every track), made plain by Recover.
+    {
+        const std::wstring path = TestOutputPath(L"mux_large_recovered.mp4");
+        DeleteOnExit remove{path};
+        {
+            Mp4FragmentedWriter w;
+            REQUIRE(w.Open(path, fx.sps_pps, fx.width, fx.height, fx.fps, VideoCodec::H264, {},
+                           {FakeAacTrack("Game")}));
+            for (size_t i = 0; i <= kBigFrames; ++i) {
+                BigAu(fx, i, bytes);
+                REQUIRE(w.AddVideo({fx.aus[i % fx.aus.size()].idr, i}, bytes));
+                if (i % 2 == 0 && i < kBigFrames) REQUIRE(w.AddAudio(0, FakeAacFrame(i)));
+            }
+        }
+        const Mp4FragmentedWriter::Recovered r = Mp4FragmentedWriter::Recover(path, markers);
+        REQUIRE_MESSAGE(r.result == Mp4FragmentedWriter::Recovery::kRecovered, r.detail);
+        CHECK(r.cut_bytes == 0);
+        CHECK(TopLevelBoxes(path) == std::vector<std::string>{"ftyp", "mdat", "moov"});
+        const PlainLayout layout = ReadPlainLayout(path);
+        CHECK(layout.mdat_size32 == 1);
+        CHECK(layout.co64 == 3);  // video, audio, chapters
+        CHECK(layout.stco == 0);
+        CHECK(PacketHashes(path, L"v:0") == video_packets);
+        CHECK(PacketHashes(path, L"a:0") == audio_packets);
+        CHECK(Probe(path).chapters.size() == 2);
+    }
+}
+
+// --- Recover --------------------------------------------------------------------------------------
+
+namespace {
+
+using Recovery = Mp4FragmentedWriter::Recovery;
+
+struct Box {
+    std::string type;
+    uint64_t    pos = 0, size = 0;
+};
+std::vector<Box> BoxList(const std::wstring& path) {
+    std::vector<Box> boxes;
+    const uint64_t   end = FileSize(path);
+    for (uint64_t pos = 0; pos + 8 <= end;) {
+        const std::vector<uint8_t> h = ReadAt(path, pos, 8);
+        uint64_t size = Be32(h, 0);
+        if (size == 1) {
+            const std::vector<uint8_t> l = ReadAt(path, pos + 8, 8);
+            size = (uint64_t{Be32(l, 0)} << 32) | Be32(l, 4);
+        }
+        boxes.push_back({std::string(reinterpret_cast<const char*>(h.data() + 4), 4), pos, size});
+        if (size < 8) break;
+        pos += size;
+    }
+    return boxes;
+}
+
+bool CutAt(const std::wstring& path, uint64_t size) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER at;
+    at.QuadPart = static_cast<LONGLONG>(size);
+    const bool ok = SetFilePointerEx(h, at, nullptr, FILE_BEGIN) && SetEndOfFile(h);
+    CloseHandle(h);
+    return ok;
+}
+
+// Writes `bytes` at `pos`, past the end included (the gap reads as zeros).
+bool WriteAt(const std::wstring& path, uint64_t pos, const std::vector<uint8_t>& bytes) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER at;
+    at.QuadPart = static_cast<LONGLONG>(pos);
+    DWORD      wrote = 0;
+    const bool ok    = SetFilePointerEx(h, at, nullptr, FILE_BEGIN) &&
+                    WriteFile(h, bytes.data(), static_cast<DWORD>(bytes.size()), &wrote, nullptr) &&
+                    wrote == bytes.size();
+    CloseHandle(h);
+    return ok;
+}
+
+std::wstring CopyOf(const std::wstring& src, const wchar_t* name) {
+    const std::wstring dst = TestOutputPath(name);
+    REQUIRE(CopyFileW(src.c_str(), dst.c_str(), FALSE));
+    return dst;
+}
+
+// A recording of the fixture's first `frames` frames with one audio track, left as a crash
+// leaves it: a fragment ends before each IDR (every 60 frames), the frames after the last unwritten.
+std::wstring Abandoned(const wchar_t* name, size_t frames) {
+    const H264Fixture& fx   = StandardFixture();
+    const std::wstring path = TestOutputPath(name);
+    Mp4FragmentedWriter w;
+    REQUIRE(w.Open(path, fx.sps_pps, fx.width, fx.height, fx.fps, VideoCodec::H264, {}, {FakeAacTrack("Game")}));
+    Feed(w, fx, frames, true);
+    return path;
+}
+
+bool IsPrefix(const std::vector<std::string>& part, const std::vector<std::string>& all) {
+    return part.size() <= all.size() && std::equal(part.begin(), part.end(), all.begin());
+}
+
+}  // namespace
+
+TEST_CASE("mux: Recover makes an abandoned recording plain, every whole fragment and the markers in it") {
+    const H264Fixture& fx   = StandardFixture();
+    const std::wstring path = Abandoned(L"mux_recover.mp4", 150);
+    const std::vector<std::string> video = PacketHashes(path, L"v:0");
+    const std::vector<std::string> audio = PacketHashes(path, L"a:0");
+    REQUIRE(video.size() == 120);
+    REQUIRE(audio.size() == 60);
+    const uint64_t fragmented_size = FileSize(path);
+
+    MuxMarkers markers;
+    markers.chapters = {{1000, "Kill"}};
+    markers.json     = R"({"v":1})";
+    const Mp4FragmentedWriter::Recovered r = Mp4FragmentedWriter::Recover(path, markers);
+    REQUIRE_MESSAGE(r.result == Recovery::kRecovered, r.detail);
+    CHECK(r.video_ms == 2000);
+    CHECK(r.cut_bytes == 0);
+    CHECK(TopLevelBoxes(path) == std::vector<std::string>{"ftyp", "mdat", "moov"});
+    CHECK(PacketHashes(path, L"v:0") == video);
+    CHECK(PacketHashes(path, L"a:0") == audio);
+    CHECK(DecodeErrors(path, L"0:v").empty());
+    const VideoFrames frames = ProbeVideoFrames(path);
+    CHECK(frames.count == 120);
+    CHECK(frames.first_is_key);
+    ClipInfo clip;
+    REQUIRE(ReadClipInfo(path, clip));
+    CHECK(clip.duration_s == doctest::Approx(120.0 / fx.fps));
+    CHECK(clip.audio_track_names == std::vector<std::string>{"Game"});
+    const ProbeInfo info = Probe(path);
+    REQUIRE_MESSAGE(info.ok, info.error);
+    REQUIRE(info.chapters.size() == 2);
+    CHECK(info.chapters[0].title == kStartChapter);
+    CHECK(info.chapters[1].title == "Kill");
+    CHECK(info.chapters[1].start_s == doctest::Approx(1.0));
+    REQUIRE(info.format_tags.count("markers") == 1);
+    CHECK(info.format_tags.at("markers") == markers.json);
+    CHECK(FileSize(path) > fragmented_size);  // only added to: the moov and chapter samples
+
+    // A second run finds it done and leaves it alone.
+    const uint64_t plain_size = FileSize(path);
+    CHECK(Mp4FragmentedWriter::Recover(path, {}).result == Recovery::kAlreadyPlain);
+    CHECK(FileSize(path) == plain_size);
+
+    // Finish's file is plain already too.
+    const std::wstring finished = TestOutputPath(L"mux_recover_finished.mp4");
+    {
+        Mp4FragmentedWriter w;
+        REQUIRE(w.Open(finished, fx.sps_pps, fx.width, fx.height, fx.fps, VideoCodec::H264, {}, {}));
+        Feed(w, fx, 90, false);
+        REQUIRE(w.Finish(1, {}));
+    }
+    CHECK(Mp4FragmentedWriter::Recover(finished, {}).result == Recovery::kAlreadyPlain);
+}
+
+TEST_CASE("mux: Recover cuts a torn last fragment, wherever it tore") {
+    // Three fragments of 60 frames; the frames after 180 never went out.
+    const std::wstring source = Abandoned(L"mux_recover_src.mp4", 190);
+    const std::vector<std::string> video = PacketHashes(source, L"v:0");
+    REQUIRE(video.size() == 180);
+    const std::vector<Box> boxes = BoxList(source);
+    REQUIRE(boxes.size() == 9);
+    const Box& moof = boxes[7];
+    const Box& mdat = boxes[8];
+    REQUIRE(moof.type == "moof");
+    REQUIRE(mdat.type == "mdat");
+    const uint64_t whole = mdat.pos + mdat.size;
+    REQUIRE(whole == FileSize(source));
+
+    const auto check = [&](const std::wstring& path, size_t frames, uint64_t cut) {
+        const Mp4FragmentedWriter::Recovered r = Mp4FragmentedWriter::Recover(path, {});
+        REQUIRE_MESSAGE(r.result == Recovery::kRecovered, r.detail);
+        CHECK(r.cut_bytes == cut);
+        CHECK(TopLevelBoxes(path) == std::vector<std::string>{"ftyp", "mdat", "moov"});
+        const std::vector<std::string> got = PacketHashes(path, L"v:0");
+        CHECK(got.size() == frames);
+        CHECK(IsPrefix(got, video));
+        CHECK(DecodeErrors(path, L"0:v").empty());
+    };
+
+    // Cut inside the last fragment: in its moof's header, its moof, its mdat's header, its data.
+    for (const uint64_t at : {moof.pos + 4, moof.pos + 40, moof.pos + moof.size, mdat.pos + 12,
+                              mdat.pos + mdat.size / 2, whole - 1}) {
+        CAPTURE(at - moof.pos);
+        const std::wstring path = CopyOf(source, L"mux_recover_cut.mp4");
+        REQUIRE(CutAt(path, at));
+        check(path, 120, at - moof.pos);
+    }
+
+    // Whole boxes over data that never reached the disk: a power cut can leave zeros there.
+    {
+        const std::wstring path = CopyOf(source, L"mux_recover_zeros.mp4");
+        REQUIRE(WriteAt(path, mdat.pos + 8, std::vector<uint8_t>(static_cast<size_t>(mdat.size - 8), 0)));
+        check(path, 120, whole - moof.pos);
+    }
+    // ...or after the last box: a size-0 box ends the walk.
+    {
+        const std::wstring path = CopyOf(source, L"mux_recover_tail.mp4");
+        REQUIRE(WriteAt(path, whole, std::vector<uint8_t>(4096, 0)));
+        check(path, 180, 4096);
+    }
+    // Garbage that isn't a moof.
+    {
+        const std::wstring path = CopyOf(source, L"mux_recover_junk.mp4");
+        REQUIRE(WriteAt(path, whole, {0, 0, 0, 16, 'm', 'o', 'o', 'f', 1, 2, 3, 4, 5, 6, 7, 8}));
+        check(path, 180, 16);
+    }
+    // Nothing torn: every fragment stays.
+    check(CopyOf(source, L"mux_recover_whole.mp4"), 180, 0);
+}
+
+TEST_CASE("mux: Recover finishes a Finish the power cut stopped halfway") {
+    const std::wstring source = Abandoned(L"mux_recover_half_src.mp4", 150);
+    const std::vector<std::string> video = PacketHashes(source, L"v:0");
+    const std::vector<std::string> audio = PacketHashes(source, L"a:0");
+    const std::vector<Box> boxes = BoxList(source);
+    REQUIRE(boxes.size() >= 3);
+    REQUIRE(boxes[1].type == "free");
+    const uint64_t placeholder = boxes[1].pos;
+    const std::vector<uint8_t> free_box = ReadAt(source, placeholder, 16);
+    MuxMarkers markers;
+    markers.chapters = {{500, "Kill"}};
+
+    // The mdat header reached the disk, the moov it points at didn't (an older Finish synced them
+    // in the wrong order).
+    {
+        const std::wstring path = CopyOf(source, L"mux_recover_header.mp4");
+        const uint64_t     size = FileSize(path) + 900 - placeholder;
+        REQUIRE(WriteAt(path, placeholder, {uint8_t(size >> 24), uint8_t(size >> 16), uint8_t(size >> 8), uint8_t(size),
+                                            'm', 'd', 'a', 't'}));
+        const Mp4FragmentedWriter::Recovered r = Mp4FragmentedWriter::Recover(path, markers);
+        REQUIRE_MESSAGE(r.result == Recovery::kRecovered, r.detail);
+        CHECK(TopLevelBoxes(path) == std::vector<std::string>{"ftyp", "mdat", "moov"});
+        CHECK(PacketHashes(path, L"v:0") == video);
+        CHECK(PacketHashes(path, L"a:0") == audio);
+        CHECK(Probe(path).chapters.size() == 2);
+    }
+    // The chapter samples and the moov reached the disk, the mdat header didn't.
+    {
+        const std::wstring path = CopyOf(source, L"mux_recover_moov.mp4");
+        REQUIRE(Mp4FragmentedWriter::Recover(path, markers).result == Recovery::kRecovered);
+        const uint64_t plain_size = FileSize(path);
+        REQUIRE(WriteAt(path, placeholder, free_box));
+        const Mp4FragmentedWriter::Recovered r = Mp4FragmentedWriter::Recover(path, markers);
+        REQUIRE_MESSAGE(r.result == Recovery::kRecovered, r.detail);
+        CHECK(r.cut_bytes == plain_size - FileSize(source));
+        CHECK(FileSize(path) == plain_size);
+        CHECK(TopLevelBoxes(path) == std::vector<std::string>{"ftyp", "mdat", "moov"});
+        CHECK(PacketHashes(path, L"v:0") == video);
+        CHECK(PacketHashes(path, L"a:0") == audio);
+        CHECK(Probe(path).chapters.size() == 2);
+    }
+}
+
+TEST_CASE("mux: Recover leaves alone what isn't an abandoned recording, and deletes one with no video") {
+    const H264Fixture& fx = StandardFixture();
+    CHECK(Mp4FragmentedWriter::Recover(TestOutputPath(L"mux_recover_none.mp4"), {}).result == Recovery::kMissing);
+
+    // A save: plain, never fragmented.
+    std::vector<MuxAu> aus;
+    for (size_t i = 0; i < 30; ++i) aus.push_back({fx.aus[i].annexb, fx.aus[i].idr, i});
+    const std::wstring save = TestOutputPath(L"mux_recover_save.mp4");
+    REQUIRE(MuxWriteMp4(save, fx.sps_pps, fx.width, fx.height, fx.fps, aus));
+    const uint64_t save_size = FileSize(save);
+    CHECK(Mp4FragmentedWriter::Recover(save, {}).result == Recovery::kNotOurs);
+    CHECK(FileSize(save) == save_size);
+
+    const std::wstring text = TestOutputPath(L"mux_recover_text.mp4");
+    {
+        FILE* f = nullptr;
+        REQUIRE(_wfopen_s(&f, text.c_str(), L"wb") == 0);
+        fputs("not an mp4 at all", f);
+        fclose(f);
+    }
+    CHECK(Mp4FragmentedWriter::Recover(text, {}).result == Recovery::kNotOurs);
+    CHECK(FileSize(text) == 17);
+
+    // Open in another program: untouched, for the next start.
+    const std::wstring busy = Abandoned(L"mux_recover_busy.mp4", 70);
+    const uint64_t     busy_size = FileSize(busy);
+    {
+        HANDLE h = CreateFileW(busy.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        REQUIRE(h != INVALID_HANDLE_VALUE);
+        CHECK(Mp4FragmentedWriter::Recover(busy, {}).result == Recovery::kInUse);
+        CloseHandle(h);
+    }
+    CHECK(FileSize(busy) == busy_size);
+    CHECK(Mp4FragmentedWriter::Recover(busy, {}).result == Recovery::kRecovered);
+
+    // Audio went out on its own (video stalled), never a video fragment: deleted, as Finish would.
+    const std::wstring audio_only = TestOutputPath(L"mux_recover_audio.mp4");
+    {
+        Mp4FragmentedWriter w;
+        REQUIRE(w.Open(audio_only, fx.sps_pps, fx.width, fx.height, fx.fps, VideoCodec::H264, {},
+                       {FakeAacTrack("Game")}));
+        for (size_t i = 1; i <= 100; ++i) REQUIRE(w.AddAudio(0, FakeAacFrame(i)));
+    }
+    REQUIRE(TopLevelBoxes(audio_only).size() == 5);  // ftyp, free, moov, moof, mdat
+    CHECK(Mp4FragmentedWriter::Recover(audio_only, {}).result == Recovery::kNoVideo);
+    CHECK_FALSE(FileExists(audio_only));
+
+    // Opened, nothing written after the header.
+    const std::wstring header_only = TestOutputPath(L"mux_recover_header_only.mp4");
+    {
+        Mp4FragmentedWriter w;
+        REQUIRE(w.Open(header_only, fx.sps_pps, fx.width, fx.height, fx.fps, VideoCodec::H264, {}, {}));
+    }
+    CHECK(Mp4FragmentedWriter::Recover(header_only, {}).result == Recovery::kNoVideo);
+    CHECK_FALSE(FileExists(header_only));
 }
 
 }  // namespace ombra::test

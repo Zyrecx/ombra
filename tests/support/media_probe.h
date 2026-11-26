@@ -46,8 +46,9 @@ struct ProbeInfo {
 
 ProbeInfo Probe(const std::wstring& file);
 
-// Everything ffmpeg reports at -v error while decoding every stream to null. Empty means clean.
-std::string DecodeErrors(const std::wstring& file);
+// Everything ffmpeg reports at -v error while decoding `map` (an ffmpeg -map: every stream, or L"0:v"
+// beside fake audio) to null. Empty means clean.
+std::string DecodeErrors(const std::wstring& file, const wchar_t* map = L"0");
 
 struct VideoFrames {
     size_t count        = 0;

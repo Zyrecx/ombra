@@ -15,6 +15,7 @@
 
 #include <windows.h>
 
+#include <cstring>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -189,6 +190,55 @@ TEST_CASE("av1: an unparseable sequence header fails the save and leaves no file
     const std::vector<uint8_t> not_a_header = {0x12, 0x00};
     CHECK_FALSE(MuxWriteMp4(file, not_a_header, fx.width, fx.height, fx.fps, FixtureAus(fx), {}, VideoCodec::AV1));
     CHECK(GetFileAttributesW(file.c_str()) == INVALID_FILE_ATTRIBUTES);
+}
+
+TEST_CASE("av1: Recover makes an abandoned AV1 recording plain, clean aperture kept, zeroed tail cut") {
+    const Av1Fixture& fx = StandardAv1Fixture();
+    REQUIRE(fx.aus.size() >= 190);
+    // Fragments end before each key frame (every 60): 180 frames out, the 10 after never written.
+    const std::wstring file = TestOutputPath(L"av1\\recover.mp4");
+    REQUIRE(EnsureParentDir(file));
+    {
+        Mp4FragmentedWriter w;
+        REQUIRE(w.Open(file, fx.seq_header, fx.width, fx.height, fx.fps, VideoCodec::AV1, {fx.width, 176}, {}));
+        for (size_t i = 0; i < 190; ++i) REQUIRE(w.AddVideo({fx.aus[i].key, i}, fx.aus[i].obus));
+    }
+    // Zeros over the last fragment's samples, as a power cut can leave under whole boxes.
+    HANDLE h = CreateFileW(file.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    REQUIRE(h != INVALID_HANDLE_VALUE);
+    LARGE_INTEGER size{}, at{};
+    REQUIRE(GetFileSizeEx(h, &size));
+    uint64_t last_mdat = 0;
+    for (uint64_t pos = 0; pos + 8 <= uint64_t(size.QuadPart);) {
+        uint8_t b[8];
+        DWORD   got = 0;
+        at.QuadPart = LONGLONG(pos);
+        REQUIRE(SetFilePointerEx(h, at, nullptr, FILE_BEGIN));
+        REQUIRE((ReadFile(h, b, 8, &got, nullptr) && got == 8));
+        const uint64_t box = (uint64_t{b[0]} << 24) | (uint64_t{b[1]} << 16) | (uint64_t{b[2]} << 8) | b[3];
+        REQUIRE(box >= 8);
+        if (std::memcmp(b + 4, "mdat", 4) == 0) last_mdat = pos;
+        pos += box;
+    }
+    REQUIRE(last_mdat != 0);
+    const std::vector<uint8_t> zeros(static_cast<size_t>(uint64_t(size.QuadPart) - last_mdat - 8), 0);
+    at.QuadPart = LONGLONG(last_mdat + 8);
+    DWORD wrote = 0;
+    REQUIRE(SetFilePointerEx(h, at, nullptr, FILE_BEGIN));
+    REQUIRE((WriteFile(h, zeros.data(), DWORD(zeros.size()), &wrote, nullptr) && wrote == zeros.size()));
+    CloseHandle(h);
+
+    const Mp4FragmentedWriter::Recovered r = Mp4FragmentedWriter::Recover(file, {});
+    REQUIRE_MESSAGE(r.result == Mp4FragmentedWriter::Recovery::kRecovered, r.detail);
+    CHECK(r.video_ms == 2000);
+    const std::string errors = DecodeErrors(file);
+    CHECK_MESSAGE(errors.empty(), "ffmpeg decode errors: " << errors);
+    CHECK(ProbeVideoFrames(file).count == 120);
+    CHECK(KeyPackets(file) == std::vector<size_t>{0, 60});
+    CHECK(CropBottom(file) == "4");
+    ClipInfo clip;
+    REQUIRE(ReadClipInfo(file, clip));
+    CHECK(clip.picture_height == 176);
 }
 
 }  // namespace ombra::test

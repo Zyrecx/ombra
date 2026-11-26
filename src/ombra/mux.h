@@ -182,6 +182,30 @@ public:
 
     uint64_t FileBytes() const;   // written so far, buffered bytes included
     uint64_t VideoTicks() const;  // video written so far, in ticks (1/fps), the pending sample excluded
+    // Video on the disk: in fragments written and synced, in ticks. What a crash keeps.
+    uint64_t DurableTicks() const;
+
+    enum class Recovery {
+        kRecovered,     // made plain, up to its last whole fragment
+        kAlreadyPlain,  // a finished file: nothing to do
+        kNoVideo,       // Ombra's, without one whole video fragment: deleted, as Finish would
+        kNotOurs,       // not the layout this writer leaves: untouched
+        kInUse,         // another program has it open: untouched, try again later
+        kMissing,       // no file there
+        kFailed,        // a read or write failed (no room for the moov): left fragmented
+    };
+    struct Recovered {
+        Recovery    result = Recovery::kFailed;
+        uint64_t    video_ms  = 0;  // what the file holds now
+        uint64_t    cut_bytes = 0;  // the torn end taken off
+        std::string detail;         // why, for the log
+    };
+    // Makes a file this writer left fragmented (the engine crashed, the power went) plain in place,
+    // with `markers`: every whole fragment kept, a torn one at the end cut off (one whose samples
+    // don't parse included: a power cut can leave zeros under whole boxes). Reads one moof per
+    // fragment and the last fragment's data; writes only the moov and the mdat header. Never dies.
+    static Recovered Recover(const std::wstring& path, const MuxMarkers& markers);
+    static const char* RecoveryName(Recovery r);
 
 private:
     struct Impl;

@@ -273,6 +273,20 @@ std::vector<uint8_t> BuildAv1C(const uint8_t* buf, size_t size) {
     return out;
 }
 
+bool Av1SampleWellFormed(const uint8_t* buf, size_t size) {
+    if (size == 0) return false;
+    while (size > 0) {
+        ObuHeader h;
+        if (!ParseObuHeader(buf, size, h) || h.total == 0) return false;
+        // What a sample keeps: sequence header (1), frame header (3), tile group (4), metadata (5),
+        // frame (6).
+        if (h.type != kObuSequenceHeader && (h.type < 3 || h.type > kObuFrame)) return false;
+        buf  += h.total;
+        size -= h.total;
+    }
+    return true;
+}
+
 bool FilterAv1Sample(const uint8_t* buf, size_t size, std::vector<uint8_t>& out) {
     while (size > 0) {
         ObuHeader h;

@@ -117,9 +117,9 @@ ProbeInfo Probe(const std::wstring& file) {
     return info;
 }
 
-std::string DecodeErrors(const std::wstring& file) {
+std::string DecodeErrors(const std::wstring& file, const wchar_t* map) {
     const ProcessResult r = RunProcess(Quote(FfmpegPath()) + L" -hide_banner -nostdin -v error -i " +
-                                       Quote(file) + L" -map 0 -f null -");
+                                       Quote(file) + L" -map " + map + L" -f null -");
     std::string errors = r.err;
     if (!r.launched) errors += "ffmpeg did not launch";
     else if (r.exit_code != 0) errors += "ffmpeg exited with " + std::to_string(r.exit_code);

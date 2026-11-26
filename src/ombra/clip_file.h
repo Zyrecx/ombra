@@ -52,4 +52,19 @@ bool ReadClipAudio(const std::wstring& src, double start_s, double end_s, const 
 TrimResult TrimClip(const std::wstring& src, const std::wstring& dst, double start_s, double end_s,
                     const std::vector<bool>* keep_audio = nullptr);
 
+// What a moov says its tracks are, samples or not: a recording's opening moov (Mp4FragmentedWriter)
+// has none, so ReadClipInfo can't read it, but it carries every format the finished file needs.
+struct MoovFormats {
+    VideoCodec           codec = VideoCodec::H264;
+    uint32_t             width = 0, height = 0;  // the sample entry's coded size
+    MuxPicture           picture;                // the clean aperture, else the coded size
+    uint32_t             video_timescale = 0;
+    std::vector<uint8_t> video_config;           // avcC / av1C payload
+    std::vector<MuxAudioTrack> audio;            // in file order; skip_samples from the edit list
+    bool                 fragmented = false;     // has mvex
+};
+// `moov`: the moov box's payload. False with `error` for anything but one video track (avc1/av01)
+// followed by AAC tracks.
+bool ParseMoovFormats(const uint8_t* moov, size_t size, MoovFormats& out, std::string* error = nullptr);
+
 }  // namespace ombra

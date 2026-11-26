@@ -530,6 +530,54 @@ bool ReadClipInfo(const std::wstring& path, ClipInfo& out, std::string* error) {
     return true;
 }
 
+bool ParseMoovFormats(const uint8_t* moov, size_t size, MoovFormats& out, std::string* error) {
+    const auto fail = [&](const char* why) {
+        if (error) *error = why;
+        return false;
+    };
+    Movie m;
+    m.file_size = UINT64_MAX;  // no samples to bound
+    out = {};
+    ForEachBox(Bytes(moov, size), [&](const std::string& type, Bytes b) {
+        if (type == "mvhd") {
+            const uint8_t version = b.U8();
+            b.Skip(3 + (version == 1 ? 16 : 8));
+            const uint32_t ts = b.U32();
+            if (b.Ok() && ts) m.timescale = ts;
+        }
+        if (type == "mvex") out.fragmented = true;
+        return true;
+    });
+    const bool ok = ForEachBox(Bytes(moov, size), [&](const std::string& type, Bytes b) {
+        return type != "trak" || ParseTrak(m, b);
+    });
+    if (!ok) return fail("malformed moov");
+    if (m.tracks.empty()) return fail("no tracks");
+    const Track& v = m.tracks.front();
+    if (v.handler != "vide" || (v.entry != "avc1" && v.entry != "av01") || v.config.empty() || !v.timescale)
+        return fail("the first track isn't H.264 or AV1 video");
+    out.codec           = v.entry == "av01" ? VideoCodec::AV1 : VideoCodec::H264;
+    out.width           = v.width;
+    out.height          = v.height;
+    out.picture         = PictureOf(v);
+    out.video_timescale = v.timescale;
+    out.video_config    = v.config;
+    for (size_t i = 1; i < m.tracks.size(); ++i) {
+        const Track& t = m.tracks[i];
+        if (t.handler != "soun" || t.entry != "mp4a" || t.config.empty() || !t.timescale || t.media_time < 0)
+            return fail("a track after the video isn't AAC audio");
+        MuxAudioTrack a;
+        a.name         = t.name;
+        a.language     = t.language;
+        a.sample_rate  = t.timescale;
+        a.bitrate_bps  = t.avg_bitrate;
+        a.asc          = t.config;
+        a.skip_samples = static_cast<uint32_t>(t.media_time);
+        out.audio.push_back(std::move(a));
+    }
+    return true;
+}
+
 TrimResult TrimClip(const std::wstring& src, const std::wstring& dst, double start_s, double end_s,
                     const std::vector<bool>* keep_audio) {
     TrimResult r;

@@ -17,6 +17,7 @@
 #include "ombra/brand.h"
 
 #include "ombra/av1.h"
+#include "ombra/clip_file.h"
 #include "ombra/die.h"
 #include "ombra/log.h"
 
@@ -994,6 +995,39 @@ public:
         ok_ = handle_ != INVALID_HANDLE_VALUE;
         if (ok_) buf_.reserve(kBufferBytes);
     }
+    // An existing file, read and then appended to (Mp4FragmentedWriter::Recover): shared with no
+    // one while it's open, kept whatever happens. Appending starts at its end.
+    struct Existing {};
+    Mp4FileSink(const std::wstring& path, Existing) : path_(path), keep_(true) {
+        handle_ = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle_ == INVALID_HANDLE_VALUE) {
+            open_error_ = GetLastError();
+            return;
+        }
+        LARGE_INTEGER size{};
+        ok_ = GetFileSizeEx(handle_, &size) != 0 && SeekTo(static_cast<uint64_t>(size.QuadPart));
+        flushed_ = static_cast<uint64_t>(size.QuadPart);
+    }
+    DWORD OpenError() const { return open_error_; }
+    // Reads written bytes: [pos, pos + n) within Pos(), nothing buffered. Moves the file pointer:
+    // only before the next write, which Truncate puts back.
+    bool ReadAt(uint64_t pos, void* dst, size_t n) {
+        if (!ok_ || !buf_.empty() || pos > flushed_ || n > flushed_ - pos) return false;
+        uint8_t* out = static_cast<uint8_t*>(dst);
+        while (n > 0) {
+            OVERLAPPED ov{};
+            ov.Offset     = static_cast<DWORD>(pos);
+            ov.OffsetHigh = static_cast<DWORD>(pos >> 32);
+            const DWORD want = static_cast<DWORD>((std::min)(n, size_t{1} << 30));
+            DWORD       got  = 0;
+            if (!ReadFile(handle_, out, want, &got, &ov) || got == 0) return false;
+            out += got;
+            pos += got;
+            n -= got;
+        }
+        return true;
+    }
     ~Mp4FileSink() {
         const bool created = handle_ != INVALID_HANDLE_VALUE;
         if (created) CloseHandle(handle_);
@@ -1093,6 +1127,7 @@ private:
     bool                 keep_ = false;
     std::vector<uint8_t> buf_;
     uint64_t             flushed_ = 0;  // bytes already handed to WriteFile
+    DWORD                open_error_ = 0;
 };
 
 // WriteDescLen's single-byte lengths: esds wraps the ASC in ~23 bytes of fixed descriptors.
@@ -1562,6 +1597,11 @@ struct Mp4FragmentedWriter::Impl {
         }
         return !failed;
     }
+
+    // After the last fragment: the chapter samples, the full moov, and the placeholder turned into
+    // the mdat header that covers everything before the moov. False (a write failed) leaves the
+    // file fragmented, whole up to its last fragment.
+    bool WritePlainTail(const MuxMarkers& markers);
 };
 
 Mp4FragmentedWriter::Mp4FragmentedWriter() : impl_(std::make_unique<Impl>()) {}
@@ -1676,14 +1716,20 @@ bool Mp4FragmentedWriter::Finish(uint32_t last_sample_ticks, const MuxMarkers& m
     if (m.failed) return false;  // left fragmented as written
     if (!m.pending_video.empty()) m.pending_video.back().duration = last_sample_ticks ? last_sample_ticks : 1;
     if (!m.FlushFragment()) return false;
+    if (!m.WritePlainTail(markers)) return false;
+    m.sink.reset();  // done: closed, and Discard no longer reaches it
+    return true;
+}
 
-    Mp4FileSink&   sink         = *m.sink;
-    const uint64_t fragment_end = sink.Pos();
+bool Mp4FragmentedWriter::Impl::WritePlainTail(const MuxMarkers& markers) {
+    Impl&          m            = *this;
+    Mp4FileSink&   file         = *m.sink;
+    const uint64_t fragment_end = file.Pos();
     const uint64_t video_ms     = m.video.duration * 1000 / m.fps;
     const std::vector<MuxChapter> chapters = FileChapters(markers, video_ms);
     TrackTiming chapter_t;
-    if (!chapters.empty()) chapter_t = WriteChapterSamples(sink, chapters, video_ms);
-    const uint64_t data_end = sink.Pos();
+    if (!chapters.empty()) chapter_t = WriteChapterSamples(file, chapters, video_ms);
+    const uint64_t data_end = file.Pos();
 
     // A track that never got a frame isn't in the plain file.
     std::vector<AudioMoovParams> params;
@@ -1692,13 +1738,13 @@ bool Mp4FragmentedWriter::Finish(uint32_t last_sample_ticks, const MuxMarkers& m
     ByteWriter moov;
     WriteMoov(moov, Mp4Now(), m.width, m.height, m.entry, m.video, params, chapters.empty() ? nullptr : &chapter_t,
               chapters, markers.json);
-    sink.Write(moov.Data());
+    file.Write(moov.Data());
     // On the disk before the placeholder turns into the mdat that points at it: a power cut
     // between the two must not leave a header promising a moov the disk never got.
-    sink.Sync();
-    if (!sink.Ok()) {
+    file.Sync();
+    if (!file.Ok()) {
         // Out of room for the moov: back to the fragmented file, whole up to its last fragment.
-        sink.Truncate(fragment_end);
+        file.Truncate(fragment_end);
         return false;
     }
 
@@ -1713,12 +1759,11 @@ bool Mp4FragmentedWriter::Finish(uint32_t last_sample_ticks, const MuxMarkers& m
     } else {
         WriteBox(hdr, static_cast<uint32_t>(size), "mdat");
     }
-    sink.Patch(m.placeholder, hdr.Data().data(), hdr.Data().size());
-    if (!sink.Sync()) {
-        sink.Truncate(fragment_end);  // not two moovs
+    file.Patch(m.placeholder, hdr.Data().data(), hdr.Data().size());
+    if (!file.Sync()) {
+        file.Truncate(fragment_end);  // not two moovs
         return false;
     }
-    m.sink.reset();  // done: closed, and Discard no longer reaches it
     return true;
 }
 
@@ -1741,6 +1786,349 @@ uint64_t Mp4FragmentedWriter::FileBytes() const {
 uint64_t Mp4FragmentedWriter::VideoTicks() const {
     const Impl& m = *impl_;
     return m.video.duration + m.pending_ticks;
+}
+
+uint64_t Mp4FragmentedWriter::DurableTicks() const {
+    const Impl& m = *impl_;
+    return m.failed ? 0 : m.video.duration;
+}
+
+const char* Mp4FragmentedWriter::RecoveryName(Recovery r) {
+    switch (r) {
+    case Recovery::kRecovered:    return "recovered";
+    case Recovery::kAlreadyPlain: return "already_plain";
+    case Recovery::kNoVideo:      return "no_video";
+    case Recovery::kNotOurs:      return "not_ours";
+    case Recovery::kInUse:        return "in_use";
+    case Recovery::kMissing:      return "missing";
+    case Recovery::kFailed:       return "failed";
+    }
+    return "?";
+}
+
+// --- recovery: an abandoned fragmented recording made plain ---------------------------------------
+
+namespace {
+
+// Big-endian reads from a buffer that fail (and stay failed) past its end.
+struct BeReader {
+    const uint8_t* p;
+    size_t         n;
+    size_t         pos = 0;
+    bool           ok  = true;
+    bool Need(size_t k) {
+        if (!ok || k > n - pos) ok = false;
+        return ok;
+    }
+    uint32_t U32() {
+        if (!Need(4)) return 0;
+        const uint32_t v = (uint32_t{p[pos]} << 24) | (uint32_t{p[pos + 1]} << 16) | (uint32_t{p[pos + 2]} << 8) | p[pos + 3];
+        pos += 4;
+        return v;
+    }
+    uint64_t U64() {
+        const uint64_t hi = U32();
+        return (hi << 32) | U32();
+    }
+};
+
+// A box header at `pos`, wholly before `end`. Size 0 ("to the end of the file") counts as torn:
+// this writer never writes it.
+struct BoxHead {
+    uint64_t size = 0;
+    uint32_t hdr  = 8;
+    char     type[4] = {};
+    bool Is(const char* t) const { return std::memcmp(type, t, 4) == 0; }
+};
+bool ReadBoxHead(Mp4FileSink& f, uint64_t pos, uint64_t end, BoxHead& h) {
+    uint8_t b[16];
+    if (pos > end || end - pos < 8 || !f.ReadAt(pos, b, 8)) return false;
+    h.size = (uint64_t{b[0]} << 24) | (uint64_t{b[1]} << 16) | (uint64_t{b[2]} << 8) | b[3];
+    std::memcpy(h.type, b + 4, 4);
+    h.hdr = 8;
+    if (h.size == 1) {
+        if (end - pos < 16 || !f.ReadAt(pos + 8, b + 8, 8)) return false;
+        h.size = 0;
+        for (int i = 8; i < 16; ++i) h.size = (h.size << 8) | b[i];
+        h.hdr = 16;
+    }
+    return h.size >= h.hdr && h.size <= end - pos;
+}
+
+// A video sample as FlushFragment wrote it, checked byte by byte: H.264 length-prefixed NALs with
+// sizes adding up, or AV1 OBUs.
+bool VideoSampleWellFormed(bool av1, const uint8_t* p, size_t n) {
+    if (av1) return Av1SampleWellFormed(p, n);
+    if (n == 0) return false;
+    while (n > 0) {
+        if (n < 5) return false;
+        const uint32_t len = (uint32_t{p[0]} << 24) | (uint32_t{p[1]} << 16) | (uint32_t{p[2]} << 8) | p[3];
+        if (len == 0 || len > n - 4) return false;
+        const uint8_t nal = p[4];
+        if ((nal & 0x80) || (nal & 0x1F) == 0) return false;  // forbidden_zero_bit, a reserved type
+        p += 4 + len;
+        n -= 4 + len;
+    }
+    return true;
+}
+
+constexpr uint64_t kMaxMoofBytes         = 4u << 20;   // ~1 s of samples at 12 bytes each, many times over
+constexpr uint64_t kMaxOpeningMoovBytes  = 1u << 20;
+constexpr uint64_t kMaxCheckedFragment   = 512u << 20;  // a last fragment read back whole
+
+}  // namespace
+
+Mp4FragmentedWriter::Recovered Mp4FragmentedWriter::Recover(const std::wstring& path, const MuxMarkers& markers) {
+    Recovered out;
+    const auto result = [&](Recovery r, const char* detail) {
+        out.result = r;
+        out.detail = detail;
+        return out;
+    };
+
+    auto sink = std::make_unique<Mp4FileSink>(path, Mp4FileSink::Existing{});
+    if (!sink->Ok()) {
+        const DWORD e = sink->OpenError();
+        if (e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND) return result(Recovery::kMissing, "no file");
+        if (e == ERROR_SHARING_VIOLATION || e == ERROR_LOCK_VIOLATION) return result(Recovery::kInUse, "open elsewhere");
+        return result(Recovery::kFailed, "can't open it");
+    }
+    Mp4FileSink&   f         = *sink;
+    const uint64_t file_size = f.Pos();
+
+    // ftyp, as WriteFtyp writes it for a fragmented file (iso6), then the 16-byte placeholder.
+    BoxHead ftyp;
+    uint8_t brands[64];
+    if (!ReadBoxHead(f, 0, file_size, ftyp) || !ftyp.Is("ftyp") || ftyp.hdr != 8 || ftyp.size > sizeof brands ||
+        !f.ReadAt(0, brands, static_cast<size_t>(ftyp.size)))
+        return result(Recovery::kNotOurs, "no ftyp");
+    bool iso6 = false;
+    for (uint64_t i = 16; i + 4 <= ftyp.size; i += 4) iso6 = iso6 || std::memcmp(brands + i, "iso6", 4) == 0;
+    if (!iso6) return result(Recovery::kNotOurs, "not a fragmented file");
+    const uint64_t placeholder = ftyp.size;
+    BoxHead        ph;
+    uint8_t        ph_type[8];
+    if (!f.ReadAt(placeholder, ph_type, sizeof ph_type)) return result(Recovery::kNotOurs, "no box after ftyp");
+    if (std::memcmp(ph_type + 4, "mdat", 4) == 0) {
+        // Made plain already, if the moov the mdat ends at is whole and ends the file. Otherwise
+        // Finish's patch got to the disk without the moov (the mdat can then run past the end):
+        // rebuild as if it were still a placeholder.
+        BoxHead moov;
+        if (ReadBoxHead(f, placeholder, file_size, ph) &&
+            ReadBoxHead(f, placeholder + ph.size, file_size, moov) && moov.Is("moov") &&
+            placeholder + ph.size + moov.size == file_size)
+            return result(Recovery::kAlreadyPlain, "plain");
+    } else if (!ReadBoxHead(f, placeholder, file_size, ph) || !ph.Is("free") || ph.size != kPlaceholderBytes ||
+               ph.hdr != 8) {
+        return result(Recovery::kNotOurs, "no placeholder");
+    }
+
+    // The opening moov: every track's format.
+    const uint64_t moov_pos = placeholder + kPlaceholderBytes;
+    BoxHead        moov;
+    if (!ReadBoxHead(f, moov_pos, file_size, moov) || !moov.Is("moov") || moov.size > kMaxOpeningMoovBytes)
+        return result(Recovery::kNotOurs, "no opening moov");
+    std::vector<uint8_t> moov_bytes(static_cast<size_t>(moov.size - moov.hdr));
+    if (!f.ReadAt(moov_pos + moov.hdr, moov_bytes.data(), moov_bytes.size()))
+        return result(Recovery::kFailed, "can't read the moov");
+    MoovFormats formats;
+    std::string why;
+    if (!ParseMoovFormats(moov_bytes.data(), moov_bytes.size(), formats, &why) || !formats.fragmented ||
+        !AudioTracksFit(formats.audio))
+        return result(Recovery::kNotOurs, "opening moov isn't a recording's");
+    const bool     av1    = formats.codec == VideoCodec::AV1;
+    const size_t   tracks = 1 + formats.audio.size();
+
+    // Each fragment: a moof (mfhd, a traf per track that has samples) and its mdat.
+    struct Run {
+        size_t                track = 0;  // 0 video, 1.. audio
+        uint64_t              offset = 0;
+        std::vector<uint32_t> sizes;
+        std::vector<uint32_t> durations;  // video
+        std::vector<bool>     keyframes;  // video
+    };
+    std::vector<TrackTiming> timing(tracks);
+    timing[0].timescale = formats.video_timescale;
+    for (size_t i = 1; i < tracks; ++i) timing[i].timescale = formats.audio[i - 1].sample_rate;
+    for (TrackTiming& t : timing) t.chunked = true;
+    const auto commit = [&](const std::vector<Run>& runs) {
+        for (const Run& run : runs) {
+            TrackTiming& t = timing[run.track];
+            t.chunks.push_back({run.offset, static_cast<uint32_t>(run.sizes.size())});
+            for (size_t k = 0; k < run.sizes.size(); ++k) {
+                t.sample_sizes.push_back(run.sizes[k]);
+                if (run.track != 0) continue;
+                if (run.keyframes[k]) t.sync_samples.push_back(static_cast<uint32_t>(t.sample_sizes.size()));
+                AddDelta(t, run.durations[k]);
+            }
+            if (run.track != 0) AddDelta(t, kAacFrameSamples, static_cast<uint32_t>(run.sizes.size()));
+        }
+    };
+
+    // A fragment goes into `timing` once the next one is found whole; the last is checked first.
+    std::vector<uint64_t> decoded(tracks, 0);  // each track's duration through the fragments walked
+    std::vector<Run>      last_runs;
+    uint64_t              last_data = 0, last_end = 0;  // the last whole fragment's mdat payload
+    uint64_t              kept_end  = moov_pos + moov.size;  // after the fragments before it
+    uint32_t              fragments = 0;
+    std::vector<uint8_t>  moof_bytes;
+    uint64_t              pos = kept_end;
+    while (pos < file_size) {
+        BoxHead head;
+        if (!ReadBoxHead(f, pos, file_size, head) || !head.Is("moof") || head.hdr != 8 || head.size > kMaxMoofBytes)
+            break;
+        moof_bytes.resize(static_cast<size_t>(head.size - head.hdr));
+        if (!f.ReadAt(pos + head.hdr, moof_bytes.data(), moof_bytes.size())) break;
+        const uint64_t moof_start = pos;
+        const uint64_t mdat_pos   = pos + head.size;
+        BoxHead        mdat;
+        if (!ReadBoxHead(f, mdat_pos, file_size, mdat) || !mdat.Is("mdat")) break;
+        const uint64_t data_start = mdat_pos + mdat.hdr;
+        const uint64_t data_end   = mdat_pos + mdat.size;
+
+        std::vector<Run>  runs;
+        std::vector<bool> seen(tracks, false);
+        bool              good = true, have_mfhd = false;
+        BeReader          r{moof_bytes.data(), moof_bytes.size()};
+        while (good && r.pos < r.n) {
+            const size_t   box_start = r.pos;
+            const uint32_t size      = r.U32();
+            const uint32_t type      = r.U32();
+            if (!r.ok || size < 8 || size > r.n - box_start) {
+                good = false;
+                break;
+            }
+            const size_t box_end = box_start + size;
+            BeReader     b{moof_bytes.data(), box_end, r.pos};
+            if (type == 0x6D666864) {  // mfhd
+                b.U32();               // version, flags
+                good = !have_mfhd && b.U32() == fragments + 1 && b.ok && b.pos == box_end;
+                have_mfhd = true;
+            } else if (type == 0x74726166) {  // traf: tfhd, tfdt, trun, as WriteTraf writes them
+                const size_t   tfhd     = b.pos;
+                const uint32_t tfhd_len = b.U32(), tfhd_type = b.U32(), tfhd_flags = b.U32() & 0xFFFFFF;
+                const uint32_t track_id = b.U32();
+                if (!b.ok || tfhd_type != 0x74666864 || track_id < 1 || track_id > tracks || seen[track_id - 1]) {
+                    good = false;
+                    break;
+                }
+                Run run;
+                run.track       = track_id - 1;
+                seen[run.track] = true;
+                const bool     video     = run.track == 0;
+                const uint32_t want_tfhd = kTfhdBaseDataOffset | (video ? 0 : kTfhdDefaultDuration | kTfhdDefaultFlags);
+                if (tfhd_flags != want_tfhd || b.U64() != moof_start ||
+                    (!video && (b.U32() != kAacFrameSamples || b.U32() != kSampleDependsNo)) || !b.ok ||
+                    b.pos != tfhd + tfhd_len) {
+                    good = false;
+                    break;
+                }
+                const uint32_t tfdt_len = b.U32(), tfdt_type = b.U32(), tfdt_vf = b.U32();
+                if (!b.ok || tfdt_len != 20 || tfdt_type != 0x74666474 || tfdt_vf != 0x01000000 ||
+                    b.U64() != decoded[run.track]) {
+                    good = false;
+                    break;
+                }
+                const size_t   trun     = b.pos;
+                const uint32_t trun_len = b.U32(), trun_type = b.U32(), trun_flags = b.U32() & 0xFFFFFF;
+                const uint32_t count = b.U32(), data_offset = b.U32();
+                const uint32_t want_trun =
+                    kTrunDataOffset | kTrunSampleSize | (video ? kTrunSampleDuration | kTrunSampleFlags : 0);
+                const size_t per = video ? 12 : 4;
+                if (!b.ok || trun_type != 0x7472756E || trun_flags != want_trun || count == 0 ||
+                    count > (box_end - b.pos) / per || trun_len != 20 + count * per) {
+                    good = false;
+                    break;
+                }
+                uint64_t bytes = 0, ticks = 0;
+                for (uint32_t k = 0; k < count && good; ++k) {
+                    if (video) {
+                        const uint32_t duration = b.U32(), sample = b.U32(), flags = b.U32();
+                        good = duration != 0;
+                        run.durations.push_back(duration);
+                        run.sizes.push_back(sample);
+                        run.keyframes.push_back(!(flags & kSampleNonSync));
+                        ticks += duration;
+                    } else {
+                        run.sizes.push_back(b.U32());
+                        ticks += kAacFrameSamples;
+                    }
+                    bytes += run.sizes.back();
+                }
+                run.offset = moof_start + data_offset;
+                good = good && b.ok && b.pos == trun + trun_len && b.pos == box_end && run.offset >= data_start &&
+                       run.offset <= data_end && bytes <= data_end - run.offset &&
+                       // the recording's first video sample is a keyframe
+                       (!video || decoded[0] != 0 || run.keyframes.front());
+                if (!good) break;
+                decoded[run.track] += ticks;
+                runs.push_back(std::move(run));
+            }
+            r.pos = box_end;
+        }
+        if (!good || !r.ok || !have_mfhd || runs.empty()) break;
+
+        // The fragment before this one is whole: it stays.
+        commit(last_runs);
+        if (!last_runs.empty()) kept_end = last_end;
+        last_runs = std::move(runs);
+        last_data = data_start;
+        last_end  = data_end;
+        ++fragments;
+        pos = data_end;
+    }
+
+    // The last whole fragment was the one being written when it stopped: after a power cut its
+    // boxes can be whole over data that never reached the disk. Its samples are read back.
+    if (!last_runs.empty()) {
+        bool sound = last_end - last_data <= kMaxCheckedFragment;
+        std::vector<uint8_t> data;
+        if (sound) {
+            data.resize(static_cast<size_t>(last_end - last_data));
+            sound = f.ReadAt(last_data, data.data(), data.size());
+        }
+        for (const Run& run : last_runs) {
+            uint64_t at = run.offset - last_data;
+            for (size_t k = 0; k < run.sizes.size() && sound; ++k) {
+                const uint8_t* p = data.data() + at;
+                const uint32_t n = run.sizes[k];
+                sound = run.track == 0 ? VideoSampleWellFormed(av1, p, n)
+                                       : n > 0 && std::any_of(p, p + n, [](uint8_t c) { return c != 0; });
+                at += n;
+            }
+        }
+        if (sound) {
+            commit(last_runs);
+            kept_end = last_end;
+        } else {
+            --fragments;
+        }
+    }
+
+    if (timing[0].sample_sizes.empty()) {
+        sink.reset();
+        if (!DeleteFileW(path.c_str())) return result(Recovery::kFailed, "no video, and can't delete it");
+        return result(Recovery::kNoVideo, "no whole video fragment");
+    }
+
+    out.cut_bytes = file_size - kept_end;
+    Impl m;
+    m.entry       = av1 ? VideoEntry{"av01", "av1C", formats.video_config, formats.picture}
+                        : VideoEntry{"avc1", "avcC", formats.video_config, formats.picture};
+    m.width       = formats.width;
+    m.height      = formats.height;
+    m.fps         = formats.video_timescale;
+    m.av1         = av1;
+    m.audio       = formats.audio;
+    m.placeholder = placeholder;
+    m.fragments   = fragments;
+    m.video       = std::move(timing[0]);
+    m.audio_t.assign(std::make_move_iterator(timing.begin() + 1), std::make_move_iterator(timing.end()));
+    m.sink = std::move(sink);
+    if (!m.sink->Truncate(kept_end)) return result(Recovery::kFailed, "can't cut the torn end");
+    if (!m.WritePlainTail(markers)) return result(Recovery::kFailed, "can't write the moov");
+    out.video_ms = m.video.duration * 1000 / m.fps;
+    return result(Recovery::kRecovered, "made plain");
 }
 
 }  // namespace ombra
