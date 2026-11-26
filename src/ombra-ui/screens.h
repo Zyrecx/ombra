@@ -197,9 +197,9 @@ public:
     // the keys meanwhile (hotkeys_suspend). The host renews the engine's lease while this is true.
     virtual void SetHotkeysSuspended(bool suspended) { (void)suspended; }
     virtual void SwitchScreen(ActiveScreen screen) = 0;
-    // Asks get_status now instead of at the next once-a-second poll: after starting or stopping a
-    // recording, so the overlay shows it at once.
-    virtual void PollStatusNow() {}
+    // Asks get_status now: after the user starts or stops a recording (shown at once, before the
+    // engine's event), and on each engine event.
+    virtual void RefreshStatusNow() {}
     virtual void ShowModal(const std::wstring& title, const std::wstring& msg,
                            bool is_danger, std::function<void()> on_confirm,
                            std::function<void()> on_cancel = nullptr,
@@ -324,6 +324,14 @@ public:
     // get_status's my_recording. `sent_ms` (GetTickCount64 when the request went out) lets a reply
     // asked before the user's last click on Record not undo what that click did.
     void UpdateRecording(const ombra::JsonValue& status_resp, uint64_t sent_ms);
+    // The user's recording is on show: its time and space left move on each second (TickRecording).
+    bool RecordingShown() const { return my_recording_; }
+    // "Checking the space left": the engine measures the disk a few seconds into a recording. Past
+    // the first 15 s it may never know (a failed look): no point asking each second.
+    bool SpaceUnknown() const {
+        return my_recording_ && my_seconds_left_ < 0 && my_elapsed_.Seconds(static_cast<double>(GetTickCount64())) < 15;
+    }
+    void TickRecording() { RefreshRecordTile(); }
     void Layout(const D2D1_RECT_F& bounds, float dpi_scale);
     void Draw(ID2D1DeviceContext* dc, const Theme& theme, float dpi_scale);
 
@@ -390,6 +398,7 @@ private:
     bool        my_recording_ = false;
     LiveElapsed my_elapsed_;
     double      my_seconds_left_ = -1;    // until the disk runs low; -1 before the first check
+    uint64_t    my_seconds_left_ms_ = 0;  // when the engine said so: it counts down from there
     int         buffer_seconds_ = 0;      // buffer.seconds: how far back "N s ago" reaches
     int         record_from_ = 0;         // the segment's pick, kept while it is disabled
     bool        record_request_pending_ = false;

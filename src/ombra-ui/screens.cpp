@@ -543,12 +543,15 @@ void HomeScreen::RefreshRecordTile() {
     t.recording = my_recording_;
     t.detail_warn = false;
     if (my_recording_) {
-        t.title = FormatElapsed(my_elapsed_.Seconds(static_cast<double>(GetTickCount64())));
+        const uint64_t now = GetTickCount64();
+        t.title = FormatElapsed(my_elapsed_.Seconds(static_cast<double>(now)));
         if (my_seconds_left_ < 0) {
             t.detail = L"Checking the space left";
         } else {
-            t.detail = SpaceLeftText(my_seconds_left_);
-            t.detail_warn = my_seconds_left_ < kLowSpaceSeconds;
+            // This recording uses the space as it goes: a second of it per second recorded.
+            const double left = (std::max)(0.0, my_seconds_left_ - static_cast<double>(now - my_seconds_left_ms_) / 1000.0);
+            t.detail = SpaceLeftText(left);
+            t.detail_warn = left < kLowSpaceSeconds;
         }
         return;
     }
@@ -597,7 +600,7 @@ void HomeScreen::OnRecordClick() {
         }
         RefreshRecordTile();
         if (host_) {
-            host_->PollStatusNow();
+            host_->RefreshStatusNow();
             host_->RequestRepaint();
         }
     });
@@ -613,6 +616,7 @@ void HomeScreen::UpdateRecording(const ombra::JsonValue& status_resp, uint64_t s
         my_elapsed_.Report(secs && secs->type == ombra::JsonValue::Type::Number ? secs->num : 0,
                            static_cast<double>(GetTickCount64()));
         my_seconds_left_ = left && left->type == ombra::JsonValue::Type::Number ? left->num : -1;
+        my_seconds_left_ms_ = GetTickCount64();
     } else {
         my_elapsed_ = {};
     }

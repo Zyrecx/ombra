@@ -13,6 +13,7 @@
 #include "ombra-ui/clips_screen.h"
 #include "ombra-ui/setup_screen.h"
 #include "ombra-ui/ui/motion.h"
+#include "ombra-ui/engine_events.h"
 #include "ombra-ui/pipe_client.h"
 #include "ombra-ui/screens.h"
 #include "ombra-ui/ui/theme.h"
@@ -93,7 +94,7 @@ public:
     void RequestRepaint() override;
     HWND OwnerWindow() const override { return hwnd_; }
     void SwitchScreen(ActiveScreen screen) override;
-    void PollStatusNow() override;
+    void RefreshStatusNow() override;
     void ShowModal(const std::wstring& title, const std::wstring& msg,
                    bool is_danger, std::function<void()> on_confirm,
                    std::function<void()> on_cancel = nullptr,
@@ -322,15 +323,22 @@ private:
     IconButtonControl back_btn_;
     IconButtonControl close_btn_;
 
-    // Apps' recordings, as pills in the header on every screen (get_status.app_recordings, asked
-    // once a second while the overlay is open). Times count on locally between replies.
+    // The engine's state while the overlay is open: get_status when an event says something
+    // changed (events_), Home and the header pills from its reply. Apps' recordings show as pills
+    // on every screen; recording times count on locally between replies.
+    void OnEngineEvent(EngineEvent e);
+    void OnStatusTick();
     void ApplyStatus(const ombra::JsonValue& status, uint64_t sent_ms);
     void RefreshPillTimes();
     void ConfirmStopAppRecording(const RecordingPillsControl::Entry& e);
+    EngineEvents events_;
     RecordingPillsControl rec_pills_;
     std::vector<std::pair<uint64_t, LiveElapsed>> pill_elapsed_;  // by recording id
-    bool status_poll_in_flight_ = false;
-    bool status_poll_frozen_ = false;  // ApplyStatusForTest
+    bool status_in_flight_ = false;
+    bool status_again_ = false;      // asked while one was in flight: ask once more after it
+    bool status_frozen_ = false;     // ApplyStatusForTest
+    uint64_t status_generation_ = 0; // Hide bumps it: a reply from before belongs to no one
+    uint64_t status_asked_ms_ = 0;   // the last get_status sent, for the slow resync while recording
 
     ComPtr<ID3D11Device>        d3d_device_;
     ComPtr<ID3D11DeviceContext> d3d_context_;

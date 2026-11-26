@@ -11,6 +11,7 @@
 #include "ombra/paths.h"
 #include "ombra/pipe.h"
 #include "ombra/protocol.h"
+#include "ombra-ui/engine_events.h"
 #include "ombra-ui/pipe_client.h"
 
 #include <windows.h>
@@ -791,6 +792,36 @@ TEST_CASE("pipe events: subscribe answers with the names taken, then events arri
     CHECK(NumOf(status, "id") == 3);
 }
 
+TEST_CASE("pipe events: the overlay's internal connection subscribes and hears the private fields") {
+    EventServer s;
+    REQUIRE(s.server_.Start());
+    RawPipeClient client;
+    REQUIRE(client.Connected());
+    REQUIRE(client.Send(Hello()));
+    REQUIRE(OkIs(client.Receive(), true));
+
+    REQUIRE(client.Send(Subscribe({"clip_saved"})));
+    const JsonValue reply = client.Receive();
+    CHECK(OkIs(reply, true));
+    CHECK(StrOf(reply, "type") == "subscribe");
+    CHECK(NumOf(reply, "id") == 2);
+    REQUIRE(WaitActive(s.hub));
+
+    JsonValue fields = JsonValue::MakeObject(), private_fields = JsonValue::MakeObject();
+    fields.Set("seconds", JsonValue::MakeNum(30));
+    private_fields.Set("paths", JsonValue::MakeArray());
+    s.hub.Publish("clip_saved", fields, private_fields);
+    const JsonValue ev = client.Receive();
+    CHECK(StrOf(ev, "event") == "clip_saved");
+    CHECK(ev.Find("paths"));
+
+    // Other internal requests still reach the internal handler.
+    REQUIRE(client.Send(Request("get_status", 3)));
+    const JsonValue status = client.Receive();
+    CHECK(OkIs(status, true));
+    CHECK(NumOf(status, "id") == 3);
+}
+
 TEST_CASE("pipe events: a bad events list is refused, and omitting it takes every event") {
     EventServer s;
     REQUIRE(s.server_.Start());
@@ -853,6 +884,83 @@ TEST_CASE("pipe events: a client that disconnects unsubscribes") {
     }
     for (int i = 0; i < 200 && s.hub.Active(); ++i) Sleep(5);
     CHECK(!s.hub.Active());
+}
+
+namespace {
+
+// A message-only window collecting what ombra_ui::EngineEvents posts to it.
+class EventSink {
+public:
+    static constexpr UINT kMsg = WM_APP + 1;
+    EventSink() {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = DefWindowProcW;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = L"OmbraTestEventSink";
+        RegisterClassExW(&wc);
+        hwnd = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
+    }
+    ~EventSink() {
+        if (hwnd) DestroyWindow(hwnd);
+    }
+    // Waits up to `timeout_ms` for `want`, keeping every event seen meanwhile.
+    bool WaitFor(ombra_ui::EngineEvent want, DWORD timeout_ms = 3000) {
+        const ULONGLONG deadline = GetTickCount64() + timeout_ms;
+        while (GetTickCount64() < deadline) {
+            MSG m;
+            while (PeekMessageW(&m, hwnd, kMsg, kMsg, PM_REMOVE)) {
+                const auto e = static_cast<ombra_ui::EngineEvent>(m.wParam);
+                seen.push_back(e);
+                if (e == want) return true;
+            }
+            Sleep(5);
+        }
+        return false;
+    }
+    HWND hwnd = nullptr;
+    std::vector<ombra_ui::EngineEvent> seen;
+};
+
+}  // namespace
+
+TEST_CASE("overlay events: subscribes, hears batched events, and reconnects after the engine goes") {
+    using ombra_ui::EngineEvent;
+    EventSink sink;
+    REQUIRE(sink.hwnd);
+    ombra_ui::EngineEvents events;
+    {
+        EventServer s;
+        REQUIRE(s.server_.Start());
+        events.Start(sink.hwnd, EventSink::kMsg);
+        REQUIRE(sink.WaitFor(EngineEvent::kConnected));
+        REQUIRE(WaitActive(s.hub));
+
+        // Raised together they can arrive in one read: none may be lost.
+        JsonValue on = JsonValue::MakeObject();
+        on.Set("replay", JsonValue::MakeBool(true));
+        s.hub.Publish("clip_saved", JsonValue::MakeObject());  // not subscribed
+        s.hub.Publish("replay", on);
+        s.hub.Publish("recording_started", JsonValue::MakeObject());
+        s.hub.Publish("game_end", JsonValue::MakeObject());
+        REQUIRE(sink.WaitFor(EngineEvent::kGame));
+        CHECK(sink.seen == std::vector<EngineEvent>{EngineEvent::kConnected, EngineEvent::kReplay,
+                                                    EngineEvent::kRecording, EngineEvent::kGame});
+        s.server_.Stop();
+        CHECK(sink.WaitFor(EngineEvent::kLost));
+    }
+    // An engine back again: subscribed anew.
+    sink.seen.clear();
+    EventServer again;
+    REQUIRE(again.server_.Start());
+    CHECK(sink.WaitFor(EngineEvent::kConnected));
+    CHECK(WaitActive(again.hub));
+
+    // Stop returns at once, though the worker sits in a read.
+    const ULONGLONG before = GetTickCount64();
+    events.Stop();
+    CHECK(GetTickCount64() - before < 1000);
+    CHECK(!events.Running());
 }
 
 }  // namespace ombra::test

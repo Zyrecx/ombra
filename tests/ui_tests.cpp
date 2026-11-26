@@ -1972,7 +1972,7 @@ TEST_CASE("ui: Home's Record tile starts from now or seconds back, and shows the
         std::vector<JsonValue> sent;
         bool ok = true;
         int polls = 0;
-        void PollStatusNow() override { ++polls; }
+        void RefreshStatusNow() override { ++polls; }
         void RequestAsync(JsonValue req, DWORD, std::function<void(std::optional<JsonValue>)> cb) override {
             sent.push_back(req);
             JsonValue resp = JsonValue::MakeObject();

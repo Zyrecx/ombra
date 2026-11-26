@@ -88,6 +88,10 @@ struct ProcessListResultMsg {
 // RequestAudioSessionListAsync's result, same generation-guarded shape.
 constexpr UINT kWmAudioSessionListResult = WM_APP + 6;
 constexpr UINT_PTR kStatusTimerId = 1;
+// While a recording shows, get_status at most this often without an event (the space left).
+constexpr uint64_t kRecordingResyncMs = 15000;
+// EngineEvents' posts, an EngineEvent in wParam.
+constexpr UINT kWmEngineEvent = WM_APP + 13;
 constexpr UINT_PTR kMeterTimerId = 2;  // the Audio page's level meters
 constexpr UINT kMeterTimerMs = 33;
 constexpr UINT kWmFrameTick = WM_APP + 12;  // SetFrameTimer's compositor-clock worker
@@ -668,17 +672,24 @@ void OverlayHost::ActivateScreen(ActiveScreen screen) {
     active_screen_ = screen;
 }
 
-void OverlayHost::PollStatusNow() {
-    // One get_status at a time; the timer only runs while the overlay is open.
-    if (!client_ || !hwnd_ || status_poll_in_flight_ || status_poll_frozen_) return;
-    status_poll_in_flight_ = true;
-    const uint64_t sent = GetTickCount64();
+void OverlayHost::RefreshStatusNow() {
+    if (!client_ || !hwnd_ || status_frozen_) return;
+    // One get_status at a time; a burst of events asks once more after it, not once each.
+    if (status_in_flight_) {
+        status_again_ = true;
+        return;
+    }
+    status_in_flight_ = true;
+    status_again_ = false;
+    const uint64_t sent = status_asked_ms_ = GetTickCount64();
     ombra::JsonValue req = ombra::JsonValue::MakeObject();
     req.Set("type", ombra::JsonValue::MakeStr("get_status"));
-    RequestAsync(std::move(req), 1000, [this, sent](std::optional<ombra::JsonValue> resp) {
-        status_poll_in_flight_ = false;
-        if (status_poll_frozen_) return;
+    RequestAsync(std::move(req), 1000, [this, sent, gen = status_generation_](std::optional<ombra::JsonValue> resp) {
+        if (gen != status_generation_) return;
+        status_in_flight_ = false;
+        if (status_frozen_ || !hwnd_) return;
         if (resp) {
+            if (home_screen_) home_screen_->UpdateState(&*resp, nullptr);
             ApplyStatus(*resp, sent);
         } else {
             rec_pills_.SetEntries({});  // no engine, no recordings to stop
@@ -686,11 +697,38 @@ void OverlayHost::PollStatusNow() {
             if (home_screen_) home_screen_->MarkEngineUnavailable();
         }
         RequestRepaint();
+        if (status_again_) RefreshStatusNow();
     });
 }
 
+void OverlayHost::OnEngineEvent(EngineEvent e) {
+    if (status_frozen_) return;
+    if (e == EngineEvent::kLost) {
+        // Gone or restarting: nothing Home or the pills show still holds. kConnected follows.
+        rec_pills_.SetEntries({});
+        pill_elapsed_.clear();
+        if (home_screen_) home_screen_->MarkEngineUnavailable();
+        RequestRepaint();
+        return;
+    }
+    RefreshStatusNow();
+}
+
+void OverlayHost::OnStatusTick() {
+    // Only a recording on show changes from second to second; otherwise nothing is drawn.
+    const bool mine = home_screen_ && home_screen_->RecordingShown();
+    if (!mine && rec_pills_.Entries().empty()) return;
+    RefreshPillTimes();
+    if (mine) home_screen_->TickRecording();
+    RequestRepaint();
+    // The space left depends on the disk, which other programs fill too: checked now and then,
+    // and each second until the engine first knows it.
+    if ((mine && home_screen_->SpaceUnknown()) || GetTickCount64() - status_asked_ms_ >= kRecordingResyncMs)
+        RefreshStatusNow();
+}
+
 void OverlayHost::ApplyStatusForTest(const ombra::JsonValue& status) {
-    status_poll_frozen_ = true;
+    status_frozen_ = true;
     ApplyStatus(status, GetTickCount64());
 }
 
@@ -741,8 +779,8 @@ void OverlayHost::ConfirmStopAppRecording(const RecordingPillsControl::Entry& e)
                   req.Set("type", ombra::JsonValue::MakeStr("stop_app_recording"));
                   req.Set("recording", ombra::JsonValue::MakeNum(static_cast<double>(id)));
                   RequestAsync(std::move(req), 3000, [this](std::optional<ombra::JsonValue>) {
-                      // Already ended or not: the next status shows which.
-                      PollStatusNow();
+                      // Already ended or not: the status shows which.
+                      RefreshStatusNow();
                   });
               },
               nullptr, ModalButtons{L"Stop", L"Keep recording"});
@@ -2028,6 +2066,8 @@ bool OverlayHost::Show(PipeClient* client, ActiveScreen first_screen) {
         CleanupWindowResources();
         return false;
     }
+    // Before the first status: its kConnected asks once more, so a change in between isn't missed.
+    if (client_) events_.Start(hwnd_, kWmEngineEvent);
     // After the window exists, still hidden: the engine state builds Settings' pages, whose list
     // fetches (displays, windows, audio, thumbnails) post their replies to hwnd_. Loaded before it,
     // they posted to nothing and stayed pending: Displays read "Loading displays…" for good.
@@ -2080,7 +2120,10 @@ void OverlayHost::Hide() {
     if (setup_screen_) setup_screen_->CancelShortcutRecording();
     if (clips_screen_) clips_screen_->Leave();
     // Replies still in flight are dropped with the window; the next open starts clean.
-    status_poll_in_flight_ = false;
+    events_.Stop();
+    ++status_generation_;
+    status_in_flight_ = false;
+    status_again_ = false;
     rec_pills_.SetEntries({});
     pill_elapsed_.clear();
     if (home_screen_) home_screen_->OnOverlayHidden();
@@ -2424,7 +2467,7 @@ LRESULT OverlayHost::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
 
         case WM_TIMER:
-            if (wp == kStatusTimerId) PollStatusNow();
+            if (wp == kStatusTimerId) OnStatusTick();
             if (wp == kStatusTimerId && active_screen_ == ActiveScreen::Settings && settings_screen_)
                 settings_screen_->OnStatusTick();
             // Paints only when a meter lights or drops a block: silence costs no frames.
@@ -2499,6 +2542,10 @@ LRESULT OverlayHost::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (frame_demand_.PaintOnTick(clips_frame)) RenderFrame();
                 return 0;
             }
+            if (msg == kWmEngineEvent) {
+                OnEngineEvent(static_cast<EngineEvent>(wp));
+                return 0;
+            }
             if (msg == kWmRunOnUi) {
                 std::unique_ptr<std::function<void()>> fn(reinterpret_cast<std::function<void()>*>(lp));
                 if (*fn) (*fn)();
@@ -2570,6 +2617,7 @@ bool OverlayHost::StartHeadless(int width, int height, float dpi_scale, PipeClie
     theme_.SetFontScale(dpi_scale_);
 
     if (client_ && client_->Connected()) {
+        events_.Start(hwnd_, kWmEngineEvent);  // a real engine (--drive --engine), as live
         LoadFromEngine();
         if (settings_screen_) settings_screen_->FetchPreviewAsync();
         ShowPendingAutotuneModal();

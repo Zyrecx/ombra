@@ -215,6 +215,7 @@ set_target_properties(ombra-cli PROPERTIES OUTPUT_NAME ombra SUFFIX .com PDB_NAM
 # to avoid duplicate symbols when ombra-tests links both ombra_core and ombra_ui_core.
 add_library(ombra_ui_core STATIC
     src/ombra-ui/pipe_client.cpp
+    src/ombra-ui/engine_events.cpp
     src/ombra-ui/screens.cpp
     src/ombra-ui/audio_levels.cpp
     src/ombra-ui/clips_screen.cpp
