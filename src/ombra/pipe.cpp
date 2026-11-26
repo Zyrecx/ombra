@@ -442,7 +442,7 @@ std::optional<PipeSurface> PipeServer::Hello(const JsonValue& req, HANDLE pipe, 
     return refuse("bad_request", "hello needs \"api\" (the API version the client speaks)");
 }
 
-JsonValue PipeServer::Subscribe(const JsonValue& req, const PipeCaller& caller,
+JsonValue PipeServer::Subscribe(const JsonValue& req, bool privileged,
                                  std::unique_ptr<Subscription>& subscription) {
     std::vector<std::string> names;
     if (const JsonValue* list = req.Find("events")) {
@@ -456,8 +456,8 @@ JsonValue PipeServer::Subscribe(const JsonValue& req, const PipeCaller& caller,
     } else {
         names.assign(std::begin(kEventNames), std::end(kEventNames));
     }
-    // The paths of the user's clips are Ombra's own command line's to see until consent exists.
-    if (!subscription) subscription = std::make_unique<Subscription>(*events_, caller.command_line);
+    // The paths of the user's clips are Ombra's own (command line, overlay) to see until consent exists.
+    if (!subscription) subscription = std::make_unique<Subscription>(*events_, privileged);
     JsonValue taken = JsonValue::MakeArray();
     for (std::string& name : subscription->Set(names)) taken.arr.push_back(JsonValue::MakeStr(std::move(name)));
     JsonValue resp = JsonValue::MakeObject();
@@ -532,7 +532,9 @@ void PipeServer::ServeClient(HANDLE pipe) {
         }
 
         if (*surface == PipeSurface::kInternal) {
-            if (!reply(handler_(request))) break;
+            // The overlay hears events as apps do, paths included: it is Ombra's own.
+            if (!reply(type == "subscribe" && events_ ? Subscribe(request, true, subscription) : handler_(request)))
+                break;
             continue;
         }
         if (!valid_id) {
@@ -546,7 +548,7 @@ void PipeServer::ServeClient(HANDLE pipe) {
             continue;
         }
         if (type == "subscribe" && events_) {
-            if (!reply(Subscribe(request, caller, subscription))) break;
+            if (!reply(Subscribe(request, caller.command_line, subscription))) break;
             continue;
         }
         if (!reply(api_handler_(request, caller))) break;

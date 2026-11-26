@@ -90,7 +90,8 @@
 //                   <- {"events":[string] (the names this engine raises, in the order below;
 //                       unknown names are left out, not refused)}
 //                      Replaces what this connection hears; [] hears nothing. Answered by the
-//                      transport (PipeServer), not the API handler. Events then arrive between
+//                      transport (PipeServer), not the API handler; the internal hello may send it
+//                      too (the overlay hears "paths" as Ombra's command line does). Events then arrive between
 //                      responses, unasked, as {"type":"event","event":name, ...fields}:
 //                        replay      {"replay":bool}       the Instant Replay switch changed
 //                        buffering   {"buffering":bool}    footage started or stopped being kept
@@ -98,7 +99,7 @@
 //                        game_end    {"game":string}       that game ended
 //                        clip_saved  {"app":string|null (null: the user's own save), "clip"?:number
 //                                     (an app's clip id), "seconds":number, "paths"?:[string]
-//                                     (only for Ombra's command line until consent exists)}
+//                                     (only for Ombra's own until consent exists)}
 //                        recording_started {"app":string|null (null: the user's own), "recording":number}
 //                        recording_stopped {"app":string|null, "recording":number, "reason":string,
 //                                     "end":string (as record_stop's), "seconds":number,

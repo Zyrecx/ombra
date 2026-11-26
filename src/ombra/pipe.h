@@ -83,7 +83,7 @@ public:
     using InternalGate = std::function<bool(DWORD pid, const std::wstring& exe)>;
 
     // Without `api`, an API hello is refused with not_allowed. With `events` (outliving this), the
-    // API's `subscribe` is the transport's: it pushes the hub's events down that connection.
+    // `subscribe` is the transport's on both surfaces: it pushes the hub's events down that connection.
     explicit PipeServer(Handler internal, ApiHandler api = nullptr, InternalGate gate = nullptr,
                         EventHub* events = nullptr);
     ~PipeServer();
@@ -118,8 +118,9 @@ private:
     // Answers the connection's first message into `resp`; the surface it opened, or nullopt
     // (refused: the connection closes after `resp`).
     std::optional<PipeSurface> Hello(const JsonValue& req, HANDLE pipe, PipeCaller& caller, JsonValue& resp);
-    // Answers `subscribe`, making the connection's subscription on the first.
-    JsonValue Subscribe(const JsonValue& req, const PipeCaller& caller, std::unique_ptr<Subscription>& subscription);
+    // Answers `subscribe`, making the connection's subscription on the first. `privileged`: it
+    // hears the paths only Ombra's own may (Subscription).
+    JsonValue Subscribe(const JsonValue& req, bool privileged, std::unique_ptr<Subscription>& subscription);
 
     Handler                  handler_;
     ApiHandler               api_handler_;
