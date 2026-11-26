@@ -35,6 +35,7 @@
 #include "ombra/ring.h"
 #include "ombra/supervisor.h"
 #include "ombra/reconfig.h"
+#include "ombra/open_recording.h"
 #include "ombra/recording.h"
 #include "ombra/clip.h"
 #include "ombra/save.h"
@@ -978,6 +979,7 @@ int RunEngine(int argc, wchar_t** argv) {
         mp.save_ctx.audio            = &audio_hub;
         mp.save_ctx.markers          = &markers;
         mp.save_ctx.events           = &events;
+        mp.save_ctx.open_records_dir = OpenRecordingsDir();
         mp.save_ctx.buffer_seconds   = buffer_seconds;
         // Every pipeline gets the same literal out_path — harmless for resident mode, where this
         // is always the sentinel "out\ombra.mp4" that makes DoSave take the templated

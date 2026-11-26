@@ -11,6 +11,8 @@
 
 #include "ombra/clip_file.h"
 #include "ombra/mux.h"
+#include "ombra/open_recording.h"
+#include "ombra/util.h"
 
 #include <windows.h>
 
@@ -1148,6 +1150,200 @@ TEST_CASE("mux: Recover leaves alone what isn't an abandoned recording, and dele
     }
     CHECK(Mp4FragmentedWriter::Recover(header_only, {}).result == Recovery::kNoVideo);
     CHECK_FALSE(FileExists(header_only));
+}
+
+// The crash records (open_recording.h) the engine start recovers from.
+namespace {
+
+// An empty record folder of its own.
+std::wstring RecordDir(const wchar_t* name) {
+    const std::wstring dir = TestOutputPath(name);
+    for (const LeftRecording& l : ListLeftRecordings(dir)) DeleteFileW(l.record.c_str());
+    return dir;
+}
+
+std::vector<std::string> ChapterTitles(const std::wstring& path) {
+    std::vector<std::string> titles;
+    for (const auto& c : Probe(path).chapters) titles.push_back(c.title);
+    return titles;
+}
+
+}  // namespace
+
+TEST_CASE("open recording: a record's JSON reads back, and a bad one doesn't") {
+    OpenRecordingInfo info;
+    info.path     = L"D:\\Videos\\\u00c9t\u00e9 \u2014 run.mp4";
+    info.file_id  = "0123456789abcdef:00112233445566778899aabbccddeeff";
+    info.app      = "Tool \"x\"";
+    info.title    = "\xC3\xA9t\xC3\xA9";
+    info.tries    = 1;
+    info.markers.chapters = {{0, "Start"}, {1500, "Kill \xC2\xB7 Tool"}};
+    info.markers.json     = R"({"v":1,"markers":[]})";
+    OpenRecordingInfo back;
+    REQUIRE(ParseOpenRecordingJson(WriteOpenRecordingJson(info), back));
+    CHECK(back.path == info.path);
+    CHECK(back.file_id == info.file_id);
+    CHECK(back.app == info.app);
+    CHECK(back.title == info.title);
+    CHECK(back.tries == 1);
+    REQUIRE(back.markers.chapters.size() == 2);
+    CHECK(back.markers.chapters[1].ms == 1500);
+    CHECK(back.markers.chapters[1].title == info.markers.chapters[1].title);
+    CHECK(back.markers.json == info.markers.json);
+
+    CHECK_FALSE(ParseOpenRecordingJson("", back));
+    CHECK_FALSE(ParseOpenRecordingJson(R"({"v":1,"path":"D:\\a.mp4")", back));  // cut short
+    CHECK_FALSE(ParseOpenRecordingJson(R"({"v":2,"path":"D:\\a.mp4"})", back));
+    CHECK_FALSE(ParseOpenRecordingJson(R"({"v":1,"path":""})", back));
+    CHECK_FALSE(ParseOpenRecordingJson(R"([1])", back));
+}
+
+TEST_CASE("open recording: a record lives from before its file is made until the file is plain") {
+    const std::wstring dir  = RecordDir(L"open_records_life");
+    const std::wstring path = TestOutputPath(L"open_record_life.mp4");
+    DeleteFileW(path.c_str());
+
+    OpenRecording record;
+    REQUIRE(record.Begin(dir, path, "Tool", "Run"));
+    std::vector<LeftRecording> left = ListLeftRecordings(dir);
+    REQUIRE(left.size() == 1);
+    CHECK(left[0].info.path == path);
+    CHECK(left[0].info.file_id.empty());
+    CHECK(left[0].info.app == "Tool");
+    CHECK(left[0].info.title == "Run");
+    CHECK(left[0].info.tries == 0);
+
+    Abandoned(L"open_record_life.mp4", 70);
+    record.Opened();
+    MuxMarkers markers;
+    markers.chapters = {{500, "Kill"}};
+    record.SetMarkers(markers);
+    left = ListLeftRecordings(dir);
+    REQUIRE(left.size() == 1);
+    CHECK(left[0].info.file_id == FileIdAt(path));
+    CHECK_FALSE(left[0].info.file_id.empty());
+    REQUIRE(left[0].info.markers.chapters.size() == 1);
+    CHECK(left[0].info.markers.chapters[0].title == "Kill");
+
+    // A second recording's record beside it; a temporary file and a record that doesn't read, as a
+    // crash mid-write could leave them, are cleared away.
+    OpenRecording other;
+    REQUIRE(other.Begin(dir, TestOutputPath(L"open_record_other.mp4"), "", ""));
+    {
+        HANDLE h = CreateFileW((dir + L"\\junk.json").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+        REQUIRE(h != INVALID_HANDLE_VALUE);
+        DWORD wrote = 0;
+        WriteFile(h, "{\"v\":1,", 7, &wrote, nullptr);
+        CloseHandle(h);
+        h = CreateFileW((dir + L"\\x.json.tmp").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+        REQUIRE(h != INVALID_HANDLE_VALUE);
+        CloseHandle(h);
+    }
+    CHECK(ListLeftRecordings(dir).size() == 2);
+    CHECK_FALSE(FileExists(dir + L"\\junk.json"));
+    CHECK_FALSE(FileExists(dir + L"\\x.json.tmp"));
+
+    record.End();
+    other.End();
+    CHECK(ListLeftRecordings(dir).empty());
+    CHECK_FALSE(record.Active());
+
+    // No folder (data_dir unresolvable): no record, and the recording goes on without one.
+    OpenRecording none;
+    CHECK_FALSE(none.Begin(L"", path, "", ""));
+    CHECK_FALSE(none.Active());
+}
+
+TEST_CASE("open recording: a file's id follows it through a move, and another file at its path isn't it") {
+    const std::wstring path  = Abandoned(L"open_record_id.mp4", 70);
+    const std::wstring moved = TestOutputPath(L"open_record_id moved.mp4");
+    DeleteFileW(moved.c_str());
+    const std::string id = FileIdAt(path);
+    REQUIRE_FALSE(id.empty());
+    CHECK(PathOfFileId(path, id) == path);
+    REQUIRE(MoveFileExW(path.c_str(), moved.c_str(), 0));
+    CHECK(FileIdAt(moved) == id);
+    CHECK(PathOfFileId(path, id) == moved);
+    Abandoned(L"open_record_id.mp4", 70);
+    CHECK(FileIdAt(path) != id);
+    REQUIRE(DeleteFileW(moved.c_str()));
+    CHECK_MESSAGE(PathOfFileId(path, id).empty(), NarrowUtf8(PathOfFileId(path, id)));
+    CHECK(PathOfFileId(path, "junk").empty());
+    CHECK(FileIdAt(moved).empty());
+}
+
+TEST_CASE("open recording: the engine start makes a left file plain where it went, with its markers") {
+    const std::wstring dir   = RecordDir(L"open_records_recover");
+    const std::wstring path  = TestOutputPath(L"open_record_recover.mp4");
+    const std::wstring moved = TestOutputPath(L"open_record_recover part 1.mp4");
+    DeleteFileW(moved.c_str());
+    {
+        OpenRecording record;
+        REQUIRE(record.Begin(dir, path, "Tool", ""));
+        Abandoned(L"open_record_recover.mp4", 150);
+        record.Opened();
+        MuxMarkers markers;
+        markers.chapters = {{1000, "Kill"}};
+        record.SetMarkers(markers);
+        REQUIRE(MoveFileExW(path.c_str(), moved.c_str(), 0));
+    }  // the engine died: the record stays
+    // Another recording now has the old name: never the one to recover.
+    Abandoned(L"open_record_recover.mp4", 70);
+    const std::vector<std::string> before = TopLevelBoxes(path);
+
+    std::vector<LeftRecording> left = ListLeftRecordings(dir);
+    REQUIRE(left.size() == 1);
+    const std::vector<RecoveredRecording> done = RecoverLeftRecordings(left);
+    REQUIRE(done.size() == 1);
+    CHECK(done[0].path == moved);
+    CHECK(done[0].app == "Tool");
+    CHECK(done[0].seconds == doctest::Approx(2.0));
+    CHECK(TopLevelBoxes(moved) == std::vector<std::string>{"ftyp", "mdat", "moov"});
+    CHECK(ChapterTitles(moved) == std::vector<std::string>{kStartChapter, "Kill"});
+    CHECK(TopLevelBoxes(path) == before);
+    CHECK(ListLeftRecordings(dir).empty());
+}
+
+TEST_CASE("open recording: a file is tried a few times, waits while another program holds it, and a gone one is dropped") {
+    const std::wstring dir  = RecordDir(L"open_records_tries");
+    const std::wstring path = Abandoned(L"open_record_tries.mp4", 70);
+    const std::vector<std::string> fragmented = TopLevelBoxes(path);
+    OpenRecordingInfo info;
+    info.path    = path;
+    info.file_id = FileIdAt(path);
+
+    // Held open: not tried, the record waits with no try counted.
+    {
+        const HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        REQUIRE(h != INVALID_HANDLE_VALUE);
+        OpenRecording record;
+        REQUIRE(record.Begin(dir, path, "", ""));
+        std::vector<LeftRecording> listed = ListLeftRecordings(dir);
+        REQUIRE(listed.size() == 1);
+        listed[0].info.file_id = info.file_id;
+        CHECK(RecoverLeftRecordings(listed).empty());
+        CloseHandle(h);
+        listed = ListLeftRecordings(dir);
+        REQUIRE(listed.size() == 1);
+        CHECK(listed[0].info.tries == 0);
+        CHECK(TopLevelBoxes(path) == fragmented);
+
+        // Every start so far failed on it, or began on it and never finished: given up, the file left as it is.
+        listed[0].info.tries = kMaxRecoverTries;
+        CHECK(RecoverLeftRecordings(listed).empty());
+        CHECK(ListLeftRecordings(dir).empty());
+        CHECK(TopLevelBoxes(path) == fragmented);
+    }
+
+    // Deleted since: the record goes, nothing else happens.
+    OpenRecording record;
+    REQUIRE(record.Begin(dir, path, "", ""));
+    std::vector<LeftRecording> listed = ListLeftRecordings(dir);
+    REQUIRE(listed.size() == 1);
+    listed[0].info.file_id = info.file_id;
+    REQUIRE(DeleteFileW(path.c_str()));
+    CHECK(RecoverLeftRecordings(listed).empty());
+    CHECK(ListLeftRecordings(dir).empty());
 }
 
 }  // namespace ombra::test

@@ -153,6 +153,7 @@ add_library(ombra_core STATIC
     src/ombra/save.cpp
     src/ombra/clip.cpp
     src/ombra/recording.cpp
+    src/ombra/open_recording.cpp
     src/ombra/update.cpp
     src/ombra/cli.cpp
     src/ombra/engine_pipe.cpp)

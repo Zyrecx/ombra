@@ -11,6 +11,7 @@
 // disarmed) only waits: a recording ends when it's stopped, the disk runs low or a write fails.
 #pragma once
 
+#include "ombra/open_recording.h"
 #include "ombra/reconfig.h"
 #include "ombra/save.h"
 
@@ -112,6 +113,8 @@ private:
     bool OpenPartFile(Part& part, const AuDescriptor& first);
     // Part 2's name onward; at the first, moves part 1 into the parts' folder.
     std::wstring NextPartPath();
+    // Rewrites the crash record's markers once a fragment more is on the disk.
+    void KeepRecordMarkers(Part& part);
     // Moves the audio drained so far into the file.
     void TakeAudio(Part& part);
     // Writes the rest of `part`'s audio and its markers and makes the file plain. False: a write failed.
@@ -131,6 +134,9 @@ private:
     std::wstring    parts_stem_;
     std::vector<std::shared_ptr<void>> reservations_;  // the later parts' names
     std::vector<std::wstring>          paths_;
+    std::string     app_;  // RecordRequest's, for the crash record
+    std::string     title_;
+    std::vector<OpenRecording> kept_records_;  // of parts whose Finish failed: the next start's
     double          written_seconds_ = 0;  // finished parts
 
     std::atomic<int64_t> stop_qpc_{(std::numeric_limits<int64_t>::max)()};  // max: not stopped

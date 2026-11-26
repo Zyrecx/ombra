@@ -8,6 +8,7 @@
 #include "ombra/log.h"
 #include "ombra/marker.h"
 #include "ombra/mux.h"
+#include "ombra/open_recording.h"
 #include "ombra/ring.h"
 #include "ombra/supervisor.h"
 #include "ombra/telemetry.h"
@@ -102,6 +103,8 @@ struct RecordingSession::Part {
     std::optional<AuDescriptor>             written;  // the newest AU written
     int64_t                                 last_drain = 0;
     bool                                    audio_failed = false;
+    OpenRecording                           record;             // its crash record
+    uint64_t                                durable_ticks = 0;  // what the record's markers cover
 };
 
 std::shared_ptr<RecordingSession> RecordingSession::Open(SaveContext* ctx, const RecordRequest& request,
@@ -130,6 +133,8 @@ std::shared_ptr<RecordingSession> RecordingSession::Open(SaveContext* ctx, const
         s->floored_         = true;
     }
 
+    s->app_   = request.app;
+    s->title_ = NarrowUtf8(request.title);
     const double rate = ctx->bitrate_kbps.load() * 1000.0 / 8.0;
     s->dest_ = PickClipPath(ctx, request.start_qpc, group_folder_name, request.title,
                             ClipRoomNeeded(static_cast<uint64_t>(rate * kRecordDiskReserveSeconds)), "recording");
@@ -193,6 +198,9 @@ std::wstring RecordingSession::NextPartPath() {
         reservations_.push_back(ReserveClipName(moved, L".mp4"));
         if (MoveFileExW(first.c_str(), moved.c_str(), 0)) {
             paths_.front() = moved;
+            // Its id finds it too, but not on a volume without ids (FAT32).
+            for (OpenRecording& r : kept_records_)
+                if (r.Path() == first) r.Moved(moved);
         } else {
             Log::Warn("recording: can't move \"%ls\" to \"%ls\" (error %lu); it keeps its name", first.c_str(),
                       moved.c_str(), GetLastError());
@@ -219,12 +227,15 @@ bool RecordingSession::OpenPartFile(Part& part, const AuDescriptor& first) {
         }
     }
     const SegmentParams& seg = *part.segment;
+    part.record.Begin(ctx_->open_records_dir, path, app_, title_);
     if (!part.writer.Open(path, seg.codec_header, seg.width, seg.height, part.fps, seg.codec,
                           {seg.picture_width, seg.picture_height}, formats)) {
         Log::Error("recording: can't create \"%ls\"", path.c_str());
         part.audio.reset();
+        part.record.End();
         return false;
     }
+    part.record.Opened();
     part.open        = true;
     part.first_qpc   = first.qpc;
     part.first_index = first.index;
@@ -234,6 +245,15 @@ bool RecordingSession::OpenPartFile(Part& part, const AuDescriptor& first) {
     paths_.push_back(path);
     Log::Info("recording: part %zu \"%ls\"", paths_.size(), path.c_str());
     return true;
+}
+
+void RecordingSession::KeepRecordMarkers(Part& part) {
+    if (!ctx_->markers || !part.record.Active()) return;
+    const uint64_t durable = part.writer.DurableTicks();
+    if (durable == part.durable_ticks) return;  // no fragment synced since the last look
+    part.durable_ticks = durable;
+    const int64_t end_qpc = part.first_qpc + static_cast<int64_t>(durable) * qpc_freq_ / part.fps;
+    part.record.SetMarkers(MarkersForFile(ctx_->markers->ForFile(part.first_qpc, end_qpc), *part.clock));
 }
 
 void RecordingSession::TakeAudio(Part& part) {
@@ -252,6 +272,7 @@ bool RecordingSession::FinishPart(Part& part) {
     if (!part.written) {
         // Not a frame went in (its first couldn't be read, or it was stopped at once): no part.
         part.writer.Discard();
+        part.record.End();
         part.audio.reset();
         part.pin.Unpin();
         part.marker_hold.Reset();
@@ -269,7 +290,15 @@ bool RecordingSession::FinishPart(Part& part) {
     MuxMarkers markers;
     if (ctx_->markers) markers = MarkersForFile(ctx_->markers->ForFile(part.first_qpc, end_qpc), *part.clock);
     part.marker_hold.Reset();
-    const bool ok = part.writer.Finish(1, markers) && !part.audio_failed;
+    const bool finished = part.writer.Finish(1, markers);
+    // Plain: no record needed. Not: the next engine start makes it plain from its fragments.
+    if (finished) {
+        part.record.End();
+    } else {
+        part.record.SetMarkers(markers);
+        if (part.record.Active()) kept_records_.push_back(std::move(part.record));  // to follow part 1's move
+    }
+    const bool ok = finished && !part.audio_failed;
     const uint64_t ticks = part.written->index - part.first_index + 1;
     written_seconds_ += static_cast<double>(ticks) / part.fps;
     seconds_.store(written_seconds_, std::memory_order_relaxed);
@@ -439,6 +468,7 @@ RecordingSession::Result RecordingSession::Run(const std::function<int64_t()>& n
         }
         part->clock->Add(d.qpc, d.index);
         part->written = d;
+        KeepRecordMarkers(*part);
         tell(true);
         seconds_.store(written_seconds_ + static_cast<double>(d.index - part->first_index + 1) / part->fps,
                        std::memory_order_relaxed);

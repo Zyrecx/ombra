@@ -82,6 +82,8 @@ struct SaveContext {
     MarkerTimeline*      markers = nullptr;
     // The engine's pipe events (events.h), shared likewise; null: none raised.
     EventHub*            events = nullptr;
+    // Where a recording keeps its crash record (open_recording.h); empty: none kept.
+    std::wstring         open_records_dir;
 
     // Tools' clips open on this pipeline (clip.h), under clip_mutex. A buffer reallocation refuses
     // while any is open and sets clips_blocked meanwhile, so none opens between its check and the

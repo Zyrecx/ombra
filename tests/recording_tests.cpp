@@ -17,6 +17,7 @@
 #include "ombra/events.h"
 #include "ombra/json.h"
 #include "ombra/marker.h"
+#include "ombra/open_recording.h"
 #include "ombra/reconfig.h"
 #include "ombra/recording.h"
 #include "ombra/ring.h"
@@ -26,6 +27,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -216,6 +218,56 @@ TEST_CASE("recording: from `before` until it's stopped, one plain MP4 with its a
     CHECK(Listed(rig.ctx));  // until its thread is done with the context
     rec->Close();
     CHECK_FALSE(Listed(rig.ctx));
+}
+
+TEST_CASE("recording: each open part has a crash record with its file's id and the markers on the disk") {
+    MarkerTimeline timeline;
+    RecordRig rig(L"crash_record");
+    rig.ctx.markers          = &timeline;
+    rig.ctx.open_records_dir = TestOutputPath(L"recording\\open_records");
+    for (const LeftRecording& l : ListLeftRecordings(rig.ctx.open_records_dir)) DeleteFileW(l.record.c_str());
+    rig.FeedTo(180);
+    rig.now_s = 3.0;
+    RecordRequest req;
+    req.start_qpc      = rig.At(3.0);
+    req.before_seconds = 2.0;
+    req.app            = "Tool";
+    req.title          = L"Run";
+    auto rec = RecordingSession::Open(&rig.ctx, req, nullptr, nullptr);
+    REQUIRE(rec);
+    bool                       placed = false, cut = false;
+    std::vector<LeftRecording> before_marker, after_marker, in_part_2;
+    const auto r = rig.Run(*rec, 11.0, {}, [&](double now) {
+        if (!placed && now >= 4.0) {
+            before_marker = ListLeftRecordings(rig.ctx.open_records_dir);
+            Marker m;
+            m.qpc   = rig.At(4.0);
+            m.label = "During";
+            REQUIRE(timeline.Add(m, "command line", rig.At(0.0)) == MarkerTimeline::AddResult::kAdded);
+            placed = true;
+        }
+        if (after_marker.empty() && now >= 7.0) after_marker = ListLeftRecordings(rig.ctx.open_records_dir);
+        if (!cut && now >= 8.0) {
+            rig.ring.Barrier(rig.Tick(rig.fed), FixtureParams());
+            cut = true;
+        }
+        if (in_part_2.empty() && now >= 10.0) in_part_2 = ListLeftRecordings(rig.ctx.open_records_dir);
+    });
+    REQUIRE(r.paths.size() == 2);
+
+    REQUIRE(before_marker.size() == 1);
+    CHECK(before_marker[0].info.path == rig.ctx.out_path);
+    CHECK(before_marker[0].info.app == "Tool");
+    CHECK(before_marker[0].info.title == "Run");
+    CHECK(before_marker[0].info.file_id == FileIdAt(r.paths[0]));  // part 1, since moved
+    REQUIRE(after_marker.size() == 1);
+    std::vector<std::string> titles;
+    for (const MuxChapter& c : after_marker[0].info.markers.chapters) titles.push_back(c.title);
+    CHECK(std::find(titles.begin(), titles.end(), "During") != titles.end());
+    REQUIRE(in_part_2.size() == 1);  // part 1 finished: its record went
+    CHECK(in_part_2[0].info.path == r.paths[1]);
+    CHECK(in_part_2[0].info.file_id == FileIdAt(r.paths[1]));
+    CHECK(ListLeftRecordings(rig.ctx.open_records_dir).empty());
 }
 
 TEST_CASE("recording: footage that stops arriving only pauses it") {
