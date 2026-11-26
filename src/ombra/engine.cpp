@@ -762,23 +762,28 @@ int RunEngine(int argc, wchar_t** argv) {
         std::vector<LeftRecording> left = ListLeftRecordings(OpenRecordingsDir());
         if (!left.empty()) {
             Log::Info("recording: %zu left by an earlier run", left.size());
-            recover_left = std::jthread([left = std::move(left), &events, &cfg](std::stop_token stop) {
+            recover_left = std::jthread([left = std::move(left), &events, &cfg, &recordings](std::stop_token stop) {
                 const std::vector<RecoveredRecording> done = RecoverLeftRecordings(left, stop);
+                // Kept before it's raised: an app subscribes, then asks `status`, and so misses
+                // neither a recovery that ends between the two nor one that ended before.
+                const std::vector<Recordings::Recovered> recovered = recordings.AddRecovered(done);
                 double   seconds = 0;
-                std::string app  = done.empty() ? std::string{} : done.front().app;
-                for (const RecoveredRecording& r : done) {
+                std::string app  = recovered.empty() ? std::string{} : recovered.front().name;
+                for (const Recordings::Recovered& r : recovered) {
                     seconds += r.seconds;
-                    if (r.app != app) app.clear();  // apps differ: the toast names none
+                    if (r.name != app) app.clear();  // apps differ: the toast names none
                     events.PublishIfActive("recording_recovered", [&](JsonValue& f, JsonValue& private_fields) {
-                        f.Set("app", JsonValue::MakeStr(r.app));
+                        // null: the user's own, as recording_started has it
+                        f.Set("app", r.app == kUserRecordingApp ? JsonValue{} : JsonValue::MakeStr(r.name));
+                        f.Set("recording", JsonValue::MakeNum(static_cast<double>(r.id)));
                         f.Set("seconds", JsonValue::MakeNum(std::round(r.seconds * 100) / 100));
                         JsonValue paths = JsonValue::MakeArray();
-                        paths.arr.push_back(JsonValue::MakeStr(NarrowUtf8(r.path)));
+                        for (const std::wstring& p : r.paths) paths.arr.push_back(JsonValue::MakeStr(NarrowUtf8(p)));
                         private_fields.Set("paths", std::move(paths));
                     });
                 }
-                if (!done.empty() && ReadLiveConfig(cfg, [](const Config& c) { return c.ui_toast_enabled; }))
-                    SpawnAppToast(L"record_recovered", WideFromUtf8(app), seconds, static_cast<uint32_t>(done.size()));
+                if (!recovered.empty() && ReadLiveConfig(cfg, [](const Config& c) { return c.ui_toast_enabled; }))
+                    SpawnAppToast(L"record_recovered", WideFromUtf8(app), seconds, static_cast<uint32_t>(recovered.size()));
             });
         }
     }

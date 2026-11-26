@@ -1175,6 +1175,9 @@ TEST_CASE("open recording: a record's JSON reads back, and a bad one doesn't") {
     info.path     = L"D:\\Videos\\\u00c9t\u00e9 \u2014 run.mp4";
     info.file_id  = "0123456789abcdef:00112233445566778899aabbccddeeff";
     info.app      = "Tool \"x\"";
+    info.owner    = "command line";
+    info.recording = "1db5f0c2a7e3b00-4242-3";
+    info.monitor  = "DISPLAY2";
     info.title    = "\xC3\xA9t\xC3\xA9";
     info.tries    = 1;
     info.markers.chapters = {{0, "Start"}, {1500, "Kill \xC2\xB7 Tool"}};
@@ -1184,6 +1187,9 @@ TEST_CASE("open recording: a record's JSON reads back, and a bad one doesn't") {
     CHECK(back.path == info.path);
     CHECK(back.file_id == info.file_id);
     CHECK(back.app == info.app);
+    CHECK(back.owner == info.owner);
+    CHECK(back.recording == info.recording);
+    CHECK(back.monitor == info.monitor);
     CHECK(back.title == info.title);
     CHECK(back.tries == 1);
     REQUIRE(back.markers.chapters.size() == 2);
@@ -1204,12 +1210,17 @@ TEST_CASE("open recording: a record lives from before its file is made until the
     DeleteFileW(path.c_str());
 
     OpenRecording record;
-    REQUIRE(record.Begin(dir, path, "Tool", "Run"));
+    REQUIRE(record.Begin(dir, path, "Tool", "command line", 7, "Main", "Run"));
     std::vector<LeftRecording> left = ListLeftRecordings(dir);
     REQUIRE(left.size() == 1);
     CHECK(left[0].info.path == path);
     CHECK(left[0].info.file_id.empty());
     CHECK(left[0].info.app == "Tool");
+    CHECK(left[0].info.owner == "command line");
+    CHECK(left[0].info.monitor == "Main");
+    // This run's token, then the id: another run's recording 7 is another recording.
+    CHECK(left[0].info.recording.size() > 2);
+    CHECK(left[0].info.recording.ends_with("-7"));
     CHECK(left[0].info.title == "Run");
     CHECK(left[0].info.tries == 0);
 
@@ -1228,7 +1239,7 @@ TEST_CASE("open recording: a record lives from before its file is made until the
     // A second recording's record beside it; a temporary file and a record that doesn't read, as a
     // crash mid-write could leave them, are cleared away.
     OpenRecording other;
-    REQUIRE(other.Begin(dir, TestOutputPath(L"open_record_other.mp4"), "", ""));
+    REQUIRE(other.Begin(dir, TestOutputPath(L"open_record_other.mp4"), "", ":user", 8, "", ""));
     {
         HANDLE h = CreateFileW((dir + L"\\junk.json").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
         REQUIRE(h != INVALID_HANDLE_VALUE);
@@ -1250,7 +1261,7 @@ TEST_CASE("open recording: a record lives from before its file is made until the
 
     // No folder (data_dir unresolvable): no record, and the recording goes on without one.
     OpenRecording none;
-    CHECK_FALSE(none.Begin(L"", path, "", ""));
+    CHECK_FALSE(none.Begin(L"", path, "", ":user", 9, "", ""));
     CHECK_FALSE(none.Active());
 }
 
@@ -1279,7 +1290,7 @@ TEST_CASE("open recording: the engine start makes a left file plain where it wen
     DeleteFileW(moved.c_str());
     {
         OpenRecording record;
-        REQUIRE(record.Begin(dir, path, "Tool", ""));
+        REQUIRE(record.Begin(dir, path, "Tool", "command line", 3, "Main", ""));
         Abandoned(L"open_record_recover.mp4", 150);
         record.Opened();
         MuxMarkers markers;
@@ -1297,6 +1308,9 @@ TEST_CASE("open recording: the engine start makes a left file plain where it wen
     REQUIRE(done.size() == 1);
     CHECK(done[0].path == moved);
     CHECK(done[0].app == "Tool");
+    CHECK(done[0].owner == "command line");
+    CHECK(done[0].monitor == "Main");
+    CHECK(done[0].recording.ends_with("-3"));
     CHECK(done[0].seconds == doctest::Approx(2.0));
     CHECK(TopLevelBoxes(moved) == std::vector<std::string>{"ftyp", "mdat", "moov"});
     CHECK(ChapterTitles(moved) == std::vector<std::string>{kStartChapter, "Kill"});
@@ -1317,7 +1331,7 @@ TEST_CASE("open recording: a file is tried a few times, waits while another prog
         const HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
         REQUIRE(h != INVALID_HANDLE_VALUE);
         OpenRecording record;
-        REQUIRE(record.Begin(dir, path, "", ""));
+        REQUIRE(record.Begin(dir, path, "", ":user", 1, "", ""));
         std::vector<LeftRecording> listed = ListLeftRecordings(dir);
         REQUIRE(listed.size() == 1);
         listed[0].info.file_id = info.file_id;
@@ -1337,7 +1351,7 @@ TEST_CASE("open recording: a file is tried a few times, waits while another prog
 
     // Deleted since: the record goes, nothing else happens.
     OpenRecording record;
-    REQUIRE(record.Begin(dir, path, "", ""));
+    REQUIRE(record.Begin(dir, path, "", ":user", 2, "", ""));
     std::vector<LeftRecording> listed = ListLeftRecordings(dir);
     REQUIRE(listed.size() == 1);
     listed[0].info.file_id = info.file_id;

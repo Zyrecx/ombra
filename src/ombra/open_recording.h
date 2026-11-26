@@ -18,6 +18,9 @@ struct OpenRecordingInfo {
     std::wstring path;
     std::string  file_id;  // FileIdAt's: finds the file when it was moved; empty before it exists
     std::string  app;      // who asked for the recording, as its toasts name it
+    std::string  owner;    // its Recordings key (kUserRecordingApp: the user's own)
+    std::string  recording;  // the same for every file of one recording, unique across engine runs
+    std::string  monitor;    // which of its monitors (MonitorSpec::label): its parts share it
     std::string  title;
     int          tries = 0;  // recoveries started, synced before each: a file that crashes Recover can't loop
     MuxMarkers   markers;    // those inside footage already on the disk
@@ -38,7 +41,9 @@ std::wstring PathOfFileId(const std::wstring& on_volume_of, const std::string& f
 class OpenRecording {
 public:
     // Writes the record for `path`, which doesn't exist yet, into `dir`.
-    bool Begin(const std::wstring& dir, const std::wstring& path, const std::string& app, const std::string& title);
+    // `app` as its toasts name it, `owner` its Recordings key, `id` its Recordings id.
+    bool Begin(const std::wstring& dir, const std::wstring& path, const std::string& app, const std::string& owner,
+               uint64_t id, const std::string& monitor, const std::string& title);
     void Opened();                           // the file exists: its id goes in
     void Moved(const std::wstring& path);    // renamed (part 1 into its parts' folder)
     void SetMarkers(const MuxMarkers& markers);  // rewrites the record only when they changed
@@ -63,6 +68,9 @@ struct RecoveredRecording {
     std::wstring path;
     double       seconds = 0;
     std::string  app;
+    std::string  owner;
+    std::string  recording;  // OpenRecordingInfo's: groups one recording's files
+    std::string  monitor;
 };
 // Makes each left file plain where it can (see Mp4FragmentedWriter::Recover) and drops its record.
 // A file another program holds, or one that failed (a full disk), keeps its record for the next

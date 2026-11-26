@@ -143,6 +143,7 @@ private:
     std::string     app_;  // RecordRequest's, for the crash record
     std::string     title_;
     std::string     marker_app_;  // RecordRequest's
+    uint64_t        id_ = 0;      // RecordRequest's, for the crash record
     std::vector<OpenRecording> kept_records_;  // of parts whose Finish failed: the next start's
     double          written_seconds_ = 0;  // finished parts
 
@@ -250,6 +251,20 @@ public:
     // Engine exit, before StopClipsAndWait: refuses every start and stops every recording.
     void Close();
 
+    // Recordings an earlier run left unfinished, made plain at this start (open_recording.h), one
+    // per recording however many files it had, each numbered from this run's ids. Kept for this
+    // run, so an app that connects later still learns of its own through `status`.
+    struct Recovered {
+        uint64_t                  id = 0;
+        std::string               app;   // the registry key
+        std::string               name;  // as its toasts named it
+        double                    seconds = 0;
+        std::vector<std::wstring> paths;
+    };
+    // Groups `files` by recording and keeps them; returns the new entries.
+    std::vector<Recovered> AddRecovered(const std::vector<RecoveredRecording>& files);
+    std::vector<Recovered> ListRecovered(const std::string& app);
+
 private:
     struct Entry {
         std::string                     app;
@@ -260,6 +275,7 @@ private:
     };
     std::mutex        mutex_;  // held across StartRecording: an app can't start two at once
     std::vector<Entry> entries_;  // the latest per app, kept after it ends until stopped or replaced
+    std::vector<Recovered> recovered_;
     uint64_t           next_id_ = 1;
     bool               closed_  = false;
 };

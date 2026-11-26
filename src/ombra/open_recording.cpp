@@ -100,6 +100,21 @@ bool SameMarkers(const MuxMarkers& a, const MuxMarkers& b) {
     return true;
 }
 
+// This engine run, unique across reboots (the wall clock at first use, then the pid): with a
+// Recordings id it names one recording, whose files share it.
+std::string RunToken() {
+    static const std::string token = [] {
+        FILETIME now;
+        GetSystemTimeAsFileTime(&now);
+        char text[48];
+        snprintf(text, sizeof(text), "%llx-%lu",
+                 (static_cast<unsigned long long>(now.dwHighDateTime) << 32) | now.dwLowDateTime,
+                 GetCurrentProcessId());
+        return std::string(text);
+    }();
+    return token;
+}
+
 // This engine's record names: its pid and start time, then a count.
 std::wstring NextRecordName() {
     static const unsigned long long started = GetTickCount64();
@@ -165,6 +180,9 @@ std::string WriteOpenRecordingJson(const OpenRecordingInfo& info) {
     root.Set("path", JsonValue::MakeStr(NarrowUtf8(info.path)));
     root.Set("file_id", JsonValue::MakeStr(info.file_id));
     root.Set("app", JsonValue::MakeStr(info.app));
+    root.Set("owner", JsonValue::MakeStr(info.owner));
+    root.Set("recording", JsonValue::MakeStr(info.recording));
+    root.Set("monitor", JsonValue::MakeStr(info.monitor));
     root.Set("title", JsonValue::MakeStr(info.title));
     root.Set("tries", JsonValue::MakeNum(info.tries));
     JsonValue chapters = JsonValue::MakeArray();
@@ -197,6 +215,9 @@ bool ParseOpenRecordingJson(const std::string& text, OpenRecordingInfo& out) {
     out.path = WideFromUtf8(*path);
     if (const std::string* s = str("file_id")) out.file_id = *s;
     if (const std::string* s = str("app")) out.app = *s;
+    if (const std::string* s = str("owner")) out.owner = *s;
+    if (const std::string* s = str("recording")) out.recording = *s;
+    if (const std::string* s = str("monitor")) out.monitor = *s;
     if (const std::string* s = str("title")) out.title = *s;
     if (const std::string* s = str("markers")) out.markers.json = *s;
     if (const JsonValue* t = root.Find("tries"); t && t->type == JsonValue::Type::Number)
@@ -215,13 +236,17 @@ bool ParseOpenRecordingJson(const std::string& text, OpenRecordingInfo& out) {
 }
 
 bool OpenRecording::Begin(const std::wstring& dir, const std::wstring& path, const std::string& app,
+                          const std::string& owner, uint64_t id, const std::string& monitor,
                           const std::string& title) {
     record_.clear();  // a part whose Finish failed leaves its record for the next start
     if (dir.empty()) return false;
-    info_       = {};
-    info_.path  = path;
-    info_.app   = app;
-    info_.title = title;
+    info_           = {};
+    info_.path      = path;
+    info_.app       = app;
+    info_.owner     = owner;
+    info_.recording = RunToken() + "-" + std::to_string(id);
+    info_.monitor   = monitor;
+    info_.title     = title;
     record_     = dir + L"\\" + NextRecordName();
     if (!EnsureParentDir(record_) || !Write()) {
         Log::Warn("recording: can't write its crash record \"%ls\"; a crash would leave it fragmented",
@@ -334,7 +359,7 @@ std::vector<RecoveredRecording> RecoverLeftRecordings(const std::vector<LeftReco
                   static_cast<unsigned long long>(r.cut_bytes));
         switch (r.result) {
             case Recovery::kRecovered:
-                done.push_back({path, r.video_ms / 1000.0, info.app});
+                done.push_back({path, r.video_ms / 1000.0, info.app, info.owner, info.recording, info.monitor});
                 drop();
                 break;
             case Recovery::kInUse:

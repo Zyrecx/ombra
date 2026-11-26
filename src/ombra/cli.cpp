@@ -551,6 +551,23 @@ int RunStatus(int argc, wchar_t** argv) {
     if (!game.empty()) Out(L"Game            " + Wide(game));
     if (seconds && seconds->type == JsonValue::Type::Number)
         Out(L"Buffer          " + std::to_wstring(static_cast<long long>(std::llround(seconds->num))) + L" s");
+    // Recordings an earlier run left unfinished (a crash, a power cut), made playable at this start.
+    if (const JsonValue* recovered = resp.Find("recovered"); recovered && recovered->type == JsonValue::Type::Array) {
+        for (const JsonValue& r : recovered->arr) {
+            std::wstring line = L"Recovered       recording";
+            if (const JsonValue* id = r.Find("recording"); id && id->type == JsonValue::Type::Number)
+                line += L" " + std::to_wstring(static_cast<long long>(id->num));
+            if (const JsonValue* s = r.Find("seconds"); s && s->type == JsonValue::Type::Number) {
+                wchar_t secs[32];
+                swprintf(secs, 32, L", %.1f s", s->num);
+                line += secs;
+            }
+            if (const JsonValue* paths = r.Find("paths"); paths && paths->type == JsonValue::Type::Array)
+                for (const JsonValue& p : paths->arr)
+                    if (p.type == JsonValue::Type::String) line += L"\n                " + Wide(p.str);
+            Out(line);
+        }
+    }
     return kExitOk;
 }
 

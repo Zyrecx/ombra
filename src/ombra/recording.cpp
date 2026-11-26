@@ -136,6 +136,7 @@ std::shared_ptr<RecordingSession> RecordingSession::Open(SaveContext* ctx, const
 
     s->app_   = request.app;
     s->marker_app_ = request.marker_app;
+    s->id_    = request.id;
     s->title_ = NarrowUtf8(request.title);
     const double rate = ctx->bitrate_kbps.load() * 1000.0 / 8.0;
     s->dest_ = PickClipPath(ctx, request.start_qpc, group_folder_name, request.title,
@@ -236,7 +237,8 @@ bool RecordingSession::OpenPartFile(Part& part, const AuDescriptor& first) {
         }
     }
     const SegmentParams& seg = *part.segment;
-    part.record.Begin(ctx_->open_records_dir, path, app_, title_);
+    part.record.Begin(ctx_->open_records_dir, path, app_, marker_app_.empty() ? kUserRecordingApp : marker_app_,
+                      id_, NarrowUtf8(ctx_->monitor_label), title_);
     if (!part.writer.Open(path, seg.codec_header, seg.width, seg.height, part.fps, seg.codec,
                           {seg.picture_width, seg.picture_height}, formats)) {
         Log::Error("recording: can't create \"%ls\"", path.c_str());
@@ -729,6 +731,45 @@ std::vector<Recordings::Running> Recordings::List(const std::string& app) {
     for (const Entry& e : entries_)
         if ((app.empty() || e.app == app) && e.group->Done().wait_for(std::chrono::seconds(0)) != std::future_status::ready)
             out.push_back({e.id, e.app, e.name, e.exe, e.group->Seconds(), e.group->SecondsLeft()});
+    return out;
+}
+
+std::vector<Recordings::Recovered> Recordings::AddRecovered(const std::vector<RecoveredRecording>& files) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<Recovered>   added;
+    std::vector<std::string> keys;  // added[i]'s RecoveredRecording::recording
+    // Per recording, each monitor's seconds: its parts follow each other, its monitors run side
+    // by side, so the recording is as long as its longest monitor.
+    std::vector<std::vector<std::pair<std::string, double>>> monitors;
+    for (const RecoveredRecording& f : files) {
+        // A record without a recording key stands alone.
+        const auto it = f.recording.empty() ? keys.end() : std::find(keys.begin(), keys.end(), f.recording);
+        size_t     i  = static_cast<size_t>(it - keys.begin());
+        if (it == keys.end()) {
+            i = added.size();
+            keys.push_back(f.recording);
+            monitors.emplace_back();
+            Recovered& r = added.emplace_back();
+            r.id   = next_id_++;
+            r.app  = f.owner;
+            r.name = f.app;
+        }
+        auto& per = monitors[i];
+        auto m = std::find_if(per.begin(), per.end(), [&](const auto& p) { return p.first == f.monitor; });
+        if (m == per.end()) m = per.insert(per.end(), {f.monitor, 0.0});
+        m->second += f.seconds;
+        added[i].seconds = std::max(added[i].seconds, m->second);
+        added[i].paths.push_back(f.path);
+    }
+    recovered_.insert(recovered_.end(), added.begin(), added.end());
+    return added;
+}
+
+std::vector<Recordings::Recovered> Recordings::ListRecovered(const std::string& app) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<Recovered> out;
+    for (const Recovered& r : recovered_)
+        if (r.app == app) out.push_back(r);
     return out;
 }
 

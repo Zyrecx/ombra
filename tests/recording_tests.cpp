@@ -232,7 +232,10 @@ TEST_CASE("recording: each open part has a crash record with its file's id and t
     req.start_qpc      = rig.At(3.0);
     req.before_seconds = 2.0;
     req.app            = "Tool";
+    req.marker_app     = "command line";
+    req.id             = 5;
     req.title          = L"Run";
+    rig.ctx.monitor_label = L"Main";
     auto rec = RecordingSession::Open(&rig.ctx, req, nullptr, nullptr);
     REQUIRE(rec);
     bool                       placed = false, cut = false;
@@ -267,6 +270,12 @@ TEST_CASE("recording: each open part has a crash record with its file's id and t
     REQUIRE(in_part_2.size() == 1);  // part 1 finished: its record went
     CHECK(in_part_2[0].info.path == r.paths[1]);
     CHECK(in_part_2[0].info.file_id == FileIdAt(r.paths[1]));
+    // Both parts name one recording on one monitor, by its registry key: recovered as one.
+    CHECK(before_marker[0].info.owner == "command line");
+    CHECK(before_marker[0].info.monitor == "Main");
+    CHECK(before_marker[0].info.recording.ends_with("-5"));
+    CHECK(in_part_2[0].info.recording == before_marker[0].info.recording);
+    CHECK(in_part_2[0].info.monitor == "Main");
     CHECK(ListLeftRecordings(rig.ctx.open_records_dir).empty());
 }
 
@@ -629,6 +638,35 @@ TEST_CASE("RecordEndToast: an early end outranks the outcome; a monitor that wro
     CHECK(std::wstring(RecordEndToast(r)) == L"record_failed");
     r.outcome = SaveOutcome::kNothingNew;
     CHECK(std::wstring(RecordEndToast(r)) == L"record_nothing");
+}
+
+TEST_CASE("recordings: recovered files are grouped by recording, numbered from this run's ids, listed by app") {
+    Recordings recordings;
+    // One command-line recording on two monitors, the first in two parts; one of the user's; and
+    // another run's recording with the same id, which is another recording.
+    const std::vector<RecoveredRecording> files = {
+        {L"D:\\a part 1.mp4", 60.0, "Tool", "command line", "run1-4", "Main"},
+        {L"D:\\b.mp4", 90.0, "Tool", "command line", "run1-4", "Side"},
+        {L"D:\\a part 2.mp4", 45.0, "Tool", "command line", "run1-4", "Main"},
+        {L"D:\\mine.mp4", 12.0, "", kUserRecordingApp, "run1-5", "Main"},
+        {L"D:\\old.mp4", 5.0, "Tool", "command line", "run0-4", "Main"},
+    };
+    const std::vector<Recordings::Recovered> added = recordings.AddRecovered(files);
+    REQUIRE(added.size() == 3);
+    CHECK(added[0].app == "command line");
+    CHECK(added[0].name == "Tool");
+    CHECK(added[0].seconds == doctest::Approx(105.0));  // Main's two parts, longer than Side
+    CHECK(added[0].paths == std::vector<std::wstring>{L"D:\\a part 1.mp4", L"D:\\b.mp4", L"D:\\a part 2.mp4"});
+    CHECK(added[1].app == kUserRecordingApp);
+    CHECK(added[2].seconds == doctest::Approx(5.0));
+    CHECK(added[0].id != added[1].id);
+    CHECK(added[1].id != added[2].id);
+
+    CHECK(recordings.ListRecovered("command line").size() == 2);
+    CHECK(recordings.ListRecovered(kUserRecordingApp).size() == 1);
+    CHECK(recordings.ListRecovered("other").empty());
+    CHECK(recordings.AddRecovered({}).empty());
+    CHECK(recordings.ListRecovered("command line").size() == 2);  // kept for the run
 }
 
 TEST_CASE("recordings: one per app; a second start is refused before it arms; only its app stops it") {

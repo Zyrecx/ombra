@@ -31,7 +31,13 @@
 //                   <- {"replay":bool (the Instant Replay switch), "buffering":bool (footage is
 //                       being kept right now), "game":string|null, "buffer_seconds":number,
 //                       "recordings":[{"recording":number, "seconds":number}] (the caller's own
-//                       running recordings; only Ombra's command line has any until consent exists)}
+//                       running recordings; only Ombra's command line has any until consent exists),
+//                       "recovered":[{"recording":number (this engine run's id), "seconds":number,
+//                       "paths":[string]}] (the caller's own recordings an earlier run left
+//                       unfinished, a crash or a power cut, made playable at this engine's start;
+//                       kept for the run, so a client that comes back after the crash learns of them)}
+//                      To miss nothing: subscribe first, then ask status (an entry is kept before
+//                      its event is raised).
 //
 //   clip            -> {"before"?:number (seconds before now; default buffer_seconds, capped at it),
 //                       "after"?:number (seconds after now; default 0, capped at 120),
@@ -104,9 +110,12 @@
 //                        recording_stopped {"app":string|null, "recording":number, "reason":string,
 //                                     "end":string (as record_stop's), "seconds":number,
 //                                     "paths"?:[string] (as clip_saved)}
-//                        recording_recovered {"app":string, "seconds":number, "paths"?:[string]}
+//                        recording_recovered {"app":string|null (null: the user's own),
+//                                     "recording":number (as in status "recovered"), "seconds":number,
+//                                     "paths"?:[string] (as clip_saved)}
 //                                     a recording an earlier run left unfinished (a crash, a
-//                                     power cut), made playable at this engine's start
+//                                     power cut), made playable at this engine's start; status
+//                                     lists it for the rest of the run
 //                        exiting     {}                    the engine is shutting down
 //                      A connection more than kMaxQueuedEvents behind, or one whose events can't
 //                      be written within 5 s, is closed (catch up with status after reconnecting).

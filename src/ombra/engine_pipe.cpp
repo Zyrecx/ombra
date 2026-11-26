@@ -857,6 +857,21 @@ JsonValue PipeRequest::OnApiStatus() {
         }
     }
     resp.Set("recordings", std::move(recordings));
+    // The caller's own recordings an earlier run left unfinished, made playable at this start.
+    JsonValue recovered = JsonValue::MakeArray();
+    if (api && api->recordings && caller && caller->command_line) {
+        for (const Recordings::Recovered& r : api->recordings->ListRecovered(kCommandLineApp)) {
+            JsonValue entry = JsonValue::MakeObject();
+            entry.Set("recording", JsonValue::MakeNum(static_cast<double>(r.id)));
+            entry.Set("seconds", JsonValue::MakeNum(std::round(r.seconds * 100) / 100));
+            // Ombra's command line sees paths, as in its events (protocol.h "subscribe").
+            JsonValue paths = JsonValue::MakeArray();
+            for (const std::wstring& p : r.paths) paths.arr.push_back(JsonValue::MakeStr(NarrowUtf8(p)));
+            entry.Set("paths", std::move(paths));
+            recovered.arr.push_back(std::move(entry));
+        }
+    }
+    resp.Set("recovered", std::move(recovered));
     return resp;
 }
 

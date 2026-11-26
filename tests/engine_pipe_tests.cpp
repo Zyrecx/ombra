@@ -337,6 +337,33 @@ TEST_CASE("engine pipe api: record_start and record_stop: the gate, fields, one 
     CHECK((monitors && monitors->type == JsonValue::Type::Array && monitors->arr.size() == 1));
     CHECK(ErrorOf(rig.ApiRequest("record_stop", JsonValue::MakeObject(), &cli)) == "not_recording");  // forgotten
     CHECK(listed(&cli).empty());
+
+    // Recordings an earlier run left: the command line sees its own, with paths; no other app
+    // sees any, nor the user's. A recovered id is never a running one's.
+    const auto recovered = [&](const PipeCaller* caller) {
+        const JsonValue  status = rig.ApiRequest("status", JsonValue::MakeObject(), caller);
+        const JsonValue* list   = status.Find("recovered");
+        REQUIRE((list && list->type == JsonValue::Type::Array));
+        return list->arr;
+    };
+    CHECK(recovered(&cli).empty());
+    const auto added = recordings.AddRecovered({{L"D:\\left.mp4", 61.234, "Tool", "command line", "r-1", "Main"},
+                                                {L"D:\\mine.mp4", 9.0, "", kUserRecordingApp, "r-2", "Main"}});
+    REQUIRE(added.size() == 2);
+    CHECK(added[0].id > running.id);
+    CHECK(recovered(&app).empty());
+    const std::vector<JsonValue> left = recovered(&cli);
+    REQUIRE(left.size() == 1);
+    const JsonValue* left_id = left[0].Find("recording");
+    CHECK((left_id && left_id->num == static_cast<double>(added[0].id)));
+    const JsonValue* left_seconds = left[0].Find("seconds");
+    CHECK((left_seconds && left_seconds->num == doctest::Approx(61.23)));
+    const JsonValue* left_paths = left[0].Find("paths");
+    REQUIRE((left_paths && left_paths->type == JsonValue::Type::Array && left_paths->arr.size() == 1));
+    CHECK(left_paths->arr[0].str == "D:\\left.mp4");
+    // Not a recording record_stop knows.
+    CHECK(ErrorOf(rig.ApiRequest("record_stop", with("recording", JsonValue::MakeNum(static_cast<double>(added[0].id))),
+                                 &cli)) == "not_recording");
 }
 
 // The overlay's side: the user's own recording, every app's in get_status, and the user's Stop on one.
