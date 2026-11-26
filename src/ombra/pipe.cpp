@@ -396,7 +396,7 @@ std::optional<PipeSurface> PipeServer::Hello(const JsonValue& req, HANDLE pipe, 
             return refuse("too_many_connections", "too many apps are connected to Ombra");
         }
         caller.command_line = IsCommandLineClient(caller.pid, caller.exe);
-        Log::Info("pipe: app \"%s\" connected (pid %lu, %ls%s)", caller.app.c_str(), caller.pid,
+        Log::Info("pipe: app \"%s\" connected (pid %lu, %ls%ls)", caller.app.c_str(), caller.pid,
                   caller.exe.empty() ? L"image unknown" : caller.exe.c_str(),
                   caller.command_line ? L", command line" : L"");
         resp.Set("ok", JsonValue::MakeBool(true));
