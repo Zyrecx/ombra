@@ -741,6 +741,16 @@ int RunEngine(int argc, wchar_t** argv) {
         };
         return feedback;
     };
+    // The user's own recording follows the toast setting, as the user's saves do.
+    pipe_api.user_record_feedback = [&cfg] {
+        const auto toasts = [&cfg] { return ReadLiveConfig(cfg, [](const Config& c) { return c.ui_toast_enabled; }); };
+        RecordFeedback feedback;
+        feedback.started = [toasts] { if (toasts()) SpawnAppToast(L"record_started", {}); };
+        feedback.ended   = [toasts](const RecordingResults& r) {
+            if (toasts()) SpawnAppToast(RecordEndToast(r), {}, r.Seconds());
+        };
+        return feedback;
+    };
     // The pipe's events: before the pipe server, the saves and the controller (whose destructor
     // can still end a game), so every source outlives nothing it publishes into.
     EventHub     events;

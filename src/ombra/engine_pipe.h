@@ -44,7 +44,16 @@ struct PipeApi {
     std::function<void(const std::string& app, bool on)> replay_toast;
     // A recording's toasts, naming the app that started it. Empty shows nothing.
     std::function<RecordFeedback(const std::string& app)> record_feedback;
+    // The user's own recording's toasts (the overlay's Record and its hotkey). Empty shows nothing.
+    std::function<RecordFeedback()> user_record_feedback;
 };
+
+// Starts `key`'s recording of `contexts` (the request's start_qpc and before_seconds set) without
+// waiting for its first frame. Capture stays armed while it runs; it reaches back no further than
+// the footage Instant Replay kept for the user (switched off: nothing before its start).
+Recordings::Started StartHeldRecording(Recordings& recordings, BufferController& controller,
+                                       const std::vector<SaveContext*>& contexts, const std::string& key,
+                                       RecordRequest request, RecordFeedback feedback, const std::wstring& exe = {});
 
 // Defined in engine_pipe.cpp, set by RunEngine (engine.cpp); null/zero outside the resident engine.
 extern std::atomic<HotkeyRegistry*> g_hotkeys_for_engine;

@@ -46,7 +46,8 @@ public:
     JsonValue Request(const std::string& type, JsonValue fields = JsonValue::MakeObject()) {
         fields.Set("type", JsonValue::MakeStr(type));
         return HandlePipeRequest(fields, cfg, supervisor, controller, save_ctx, StartupGpuSummary{},
-                                 nullptr, nullptr, nullptr, nullptr, &raw_store);
+                                 nullptr, nullptr, nullptr, nullptr, &raw_store, nullptr, nullptr, {},
+                                 PipeSurface::kInternal, &api);
     }
 
     JsonValue ApiRequest(const std::string& type, JsonValue fields = JsonValue::MakeObject(),
@@ -336,6 +337,78 @@ TEST_CASE("engine pipe api: record_start and record_stop: the gate, fields, one 
     CHECK((monitors && monitors->type == JsonValue::Type::Array && monitors->arr.size() == 1));
     CHECK(ErrorOf(rig.ApiRequest("record_stop", JsonValue::MakeObject(), &cli)) == "not_recording");  // forgotten
     CHECK(listed(&cli).empty());
+}
+
+// The overlay's side: the user's own recording, every app's in get_status, and the user's Stop on one.
+TEST_CASE("engine pipe: my_record_start/stop, get_status's recordings, stop_app_recording") {
+    HandlerRig rig;
+    rig.save_ctx.out_path    = L"out\\ombra.mp4";
+    rig.save_ctx.output_root = NarrowUtf8(TestOutputPath(L"engine-pipe\\my-record"));
+    CHECK(IsBool(rig.Request("my_record_start").Find("ok"), false));  // no registry
+    Recordings recordings;
+    rig.api.recordings = &recordings;
+    struct Finish {
+        Recordings& r;
+        SaveContext& ctx;
+        ~Finish() { r.Close(); StopClipsAndWait(&ctx); }
+    } finish{recordings, rig.save_ctx};
+    int toasts_asked = 0;
+    rig.api.user_record_feedback = [&] { ++toasts_asked; return RecordFeedback{}; };
+
+    const auto status = [&] { return rig.Request("get_status"); };
+    const JsonValue* none = status().Find("my_recording");
+    CHECK((none && none->type == JsonValue::Type::Null));
+    CHECK(IsBool(rig.Request("my_record_stop").Find("ok"), false));
+    JsonValue bad = JsonValue::MakeObject();
+    bad.Set("before", JsonValue::MakeNum(-1));
+    CHECK(IsBool(rig.Request("my_record_start", std::move(bad)).Find("ok"), false));
+
+    const JsonValue started = rig.Request("my_record_start");
+    REQUIRE(IsBool(started.Find("ok"), true));
+    const JsonValue* id = started.Find("recording");
+    REQUIRE((id && id->type == JsonValue::Type::Number));
+    CHECK(toasts_asked == 1);
+    // A second press keeps the one running.
+    const JsonValue again = rig.Request("my_record_start");
+    CHECK(IsBool(again.Find("ok"), true));
+    CHECK(again.Find("recording")->num == id->num);
+
+    RecordRequest req;
+    req.start_qpc = QpcNow();
+    req.app       = "Tool";
+    const auto app = recordings.Start("tool", {&rig.save_ctx}, req, {}, {}, L"C:\\Tools\\tool.exe");
+    REQUIRE(app.group);
+    {
+        const JsonValue s = status();
+        const JsonValue* mine = s.Find("my_recording");
+        REQUIRE((mine && mine->type == JsonValue::Type::Object));
+        CHECK(mine->Find("recording")->num == id->num);
+        CHECK(mine->Find("seconds"));
+        const JsonValue* left = mine->Find("seconds_left");
+        CHECK((left && left->type == JsonValue::Type::Null));  // no disk check yet
+        const JsonValue* apps = s.Find("app_recordings");
+        REQUIRE((apps && apps->type == JsonValue::Type::Array && apps->arr.size() == 1));  // the user's isn't an app's
+        const JsonValue* name = apps->arr[0].Find("app");
+        CHECK((name && name->type == JsonValue::Type::String && name->str == "Tool"));
+        const JsonValue* exe = apps->arr[0].Find("exe");
+        CHECK((exe && exe->type == JsonValue::Type::String && exe->str == "C:\\Tools\\tool.exe"));
+    }
+
+    JsonValue stop_mine = JsonValue::MakeObject();
+    stop_mine.Set("recording", JsonValue::MakeNum(id->num));
+    CHECK(IsBool(rig.Request("stop_app_recording", std::move(stop_mine)).Find("ok"), false));  // not an app's
+    CHECK(IsBool(rig.Request("stop_app_recording").Find("ok"), false));
+    JsonValue stop_app = JsonValue::MakeObject();
+    stop_app.Set("recording", JsonValue::MakeNum(static_cast<double>(app.id)));
+    CHECK(IsBool(rig.Request("stop_app_recording", std::move(stop_app)).Find("ok"), true));
+    REQUIRE(app.group->Done().wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    CHECK(app.group->Done().get().end == RecordEnd::kUser);
+
+    CHECK(IsBool(rig.Request("my_record_stop").Find("ok"), true));
+    CHECK(IsBool(rig.Request("my_record_stop").Find("ok"), false));  // forgotten
+    const JsonValue after = status();
+    CHECK(after.Find("my_recording")->type == JsonValue::Type::Null);
+    CHECK(after.Find("app_recordings")->arr.empty());
 }
 
 // Turning replay off discards the user's buffer: only Ombra's command line may, and every change

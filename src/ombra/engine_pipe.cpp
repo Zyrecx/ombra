@@ -439,6 +439,9 @@ struct PipeRequest {
     JsonValue OnSaveNow();
     JsonValue OnScreenshot();
     JsonValue OnSetArmed();
+    JsonValue OnMyRecordStart();
+    JsonValue OnMyRecordStop();
+    JsonValue OnStopAppRecording();
     JsonValue OnPreviewConfig();
     JsonValue OnNotify();
     JsonValue OnListMonitors();
@@ -970,6 +973,24 @@ JsonValue RecordFailure(const RecordingResults& result) {
 
 }  // namespace
 
+Recordings::Started StartHeldRecording(Recordings& recordings, BufferController& controller,
+                                       const std::vector<SaveContext*>& contexts, const std::string& key,
+                                       RecordRequest request, RecordFeedback feedback, const std::wstring& exe) {
+    // The hold first: with it, switching Instant Replay off no longer ends capture, so the switch
+    // read after it decides how far back the recording may reach.
+    const auto arm = [&controller, &contexts](RecordRequest& r) {
+        std::shared_ptr<void> hold = controller.HoldRecording();
+        if (!controller.UserEnabled()) {
+            r.floor_qpc = r.start_qpc;  // what the ring holds is a recording's, not this one's
+        } else {
+            for (const SaveContext* ctx : contexts)
+                r.floor_qpc = (std::max)(r.floor_qpc, ctx->replay_floor_qpc.load(std::memory_order_acquire));
+        }
+        return hold;
+    };
+    return recordings.Start(key, contexts, std::move(request), arm, std::move(feedback), exe);
+}
+
 // The public API's recording (protocol.h, recording.h): only Ombra's command line until consent
 // exists. Answers once the first file opens, or with why none did (at most kRecordStartSeconds).
 // It runs with Instant Replay off too: then it starts now, and the ring keeps only its tail.
@@ -990,23 +1011,11 @@ JsonValue PipeRequest::OnApiRecordStart() {
     request.before_seconds = *before;
     if (title_v) request.title = WideFromUtf8(title_v->str);
     request.app = caller->app;
-    const std::vector<SaveContext*> contexts = Contexts();
-    // The hold first: with it, switching Instant Replay off no longer ends capture, so the switch
-    // read after it decides how far back the recording may reach.
-    const auto arm = [this, &contexts](RecordRequest& r) {
-        std::shared_ptr<void> hold = controller.HoldRecording();
-        if (!controller.UserEnabled()) {
-            r.floor_qpc = r.start_qpc;  // what the ring holds is a recording's, not this one's
-        } else {
-            for (const SaveContext* ctx : contexts)
-                r.floor_qpc = (std::max)(r.floor_qpc, ctx->replay_floor_qpc.load(std::memory_order_acquire));
-        }
-        return hold;
-    };
     // Every script using the command line is one app ("--as" only names it), so `record stop`
-    // from another process finds what `record start` began.
-    const Recordings::Started started = api->recordings->Start(
-        kCommandLineApp, contexts, std::move(request), arm,
+    // from another process finds what `record start` began. No exe for it: the script is the app,
+    // and the process asking is only ombra.com.
+    const Recordings::Started started = StartHeldRecording(
+        *api->recordings, controller, Contexts(), kCommandLineApp, std::move(request),
         api->record_feedback ? api->record_feedback(caller->app) : RecordFeedback{});
     if (started.refusal == Recordings::Refusal::kClosed) return ApiError("failed", "Ombra is exiting");
     if (started.refusal == Recordings::Refusal::kAlreadyRecording) {
@@ -1177,6 +1186,28 @@ JsonValue PipeRequest::OnGetStatus() {
     resp.Set("target", JsonValue::MakeStr(cfg.capture_target));
     resp.Set("current_game", game.empty() ? JsonValue{} : JsonValue::MakeStr(NarrowUtf8(game)));
     resp.Set("buffer_seconds", JsonValue::MakeNum(cfg.buffer_seconds));
+    // Recording now: the user's own (`my_recording`, null when none) and every app's.
+    JsonValue mine = JsonValue{};
+    JsonValue apps = JsonValue::MakeArray();
+    if (api && api->recordings) {
+        for (const Recordings::Running& running : api->recordings->List()) {
+            JsonValue entry = JsonValue::MakeObject();
+            entry.Set("recording", JsonValue::MakeNum(static_cast<double>(running.id)));
+            entry.Set("seconds", JsonValue::MakeNum(std::round(running.seconds * 100) / 100));
+            if (running.app == kUserRecordingApp) {
+                // Negative until the first disk check, a few seconds in.
+                entry.Set("seconds_left", running.seconds_left < 0 ? JsonValue{}
+                                                                    : JsonValue::MakeNum(std::floor(running.seconds_left)));
+                mine = std::move(entry);
+                continue;
+            }
+            entry.Set("app", JsonValue::MakeStr(running.name));
+            entry.Set("exe", running.exe.empty() ? JsonValue{} : JsonValue::MakeStr(NarrowUtf8(running.exe)));
+            apps.arr.push_back(std::move(entry));
+        }
+    }
+    resp.Set("my_recording", std::move(mine));
+    resp.Set("app_recordings", std::move(apps));
     // The rate the pipeline was built at: "match display" resolved at the last build/rebuild.
     resp.Set("fps", JsonValue::MakeNum(save_ctx.fps.load()));
     {
@@ -1410,6 +1441,58 @@ JsonValue PipeRequest::OnSetArmed() {
     resp.Set("ok", JsonValue::MakeBool(true));
     resp.Set("armed", JsonValue::MakeBool(armed));
     return resp;
+}
+
+namespace {
+
+JsonValue InternalResult(bool ok, const char* error = nullptr) {
+    JsonValue resp = JsonValue::MakeObject();
+    resp.Set("ok", JsonValue::MakeBool(ok));
+    if (error) resp.Set("error", JsonValue::MakeStr(error));
+    return resp;
+}
+
+}  // namespace
+
+// The overlay's Record: answered as soon as it starts, before its first frame (the toasts tell how
+// it went), so the overlay never waits out kRecordStartSeconds.
+JsonValue PipeRequest::OnMyRecordStart() {
+    const int64_t start_qpc = QpcNow();
+    if (!api || !api->recordings) return InternalResult(false, "this engine takes no recordings");
+    const JsonValue* before_v = req.Find("before");
+    if (before_v && (before_v->type != JsonValue::Type::Number || !std::isfinite(before_v->num) || before_v->num < 0))
+        return InternalResult(false, "\"before\" is seconds: a number, 0 or more");
+    RecordRequest request;
+    request.start_qpc      = start_qpc;
+    request.before_seconds = before_v ? before_v->num : 0;
+    const Recordings::Started started =
+        StartHeldRecording(*api->recordings, controller, Contexts(), kUserRecordingApp, std::move(request),
+                           api->user_record_feedback ? api->user_record_feedback() : RecordFeedback{});
+    if (started.refusal == Recordings::Refusal::kClosed) return InternalResult(false, "Ombra is exiting");
+    JsonValue resp = InternalResult(true);
+    // Already recording: the one running, which a double click must not stop.
+    resp.Set("recording", JsonValue::MakeNum(static_cast<double>(started.id)));
+    return resp;
+}
+
+// Stops the user's own recording without waiting for its files: its toast says how it ended.
+JsonValue PipeRequest::OnMyRecordStop() {
+    if (!api || !api->recordings) return InternalResult(false, "this engine takes no recordings");
+    // ok only for one still running: one already ended on its own (disk low) is just collected here.
+    const auto group = api->recordings->Stop(kUserRecordingApp, 0);
+    const bool running = group && group->Done().wait_for(std::chrono::seconds(0)) != std::future_status::ready;
+    return InternalResult(running, running ? nullptr : "no recording of yours is running");
+}
+
+// The user stops an app's recording (its Stop in the overlay): the app's record_stop then answers
+// with end "user".
+JsonValue PipeRequest::OnStopAppRecording() {
+    const JsonValue* id_v = req.Find("recording");
+    if (!id_v || id_v->type != JsonValue::Type::Number || !(id_v->num >= 1) || id_v->num != std::floor(id_v->num) ||
+        id_v->num > 9007199254740991.0)
+        return InternalResult(false, "\"recording\" is a recording's id");
+    if (!api || !api->recordings) return InternalResult(false, "this engine takes no recordings");
+    return InternalResult(api->recordings->StopByUser(static_cast<uint64_t>(id_v->num)), nullptr);
 }
 
 JsonValue PipeRequest::OnPreviewConfig() {
@@ -1741,6 +1824,9 @@ constexpr PipeCommand kPipeCommands[] = {
     {"save_now",                  true,  &PipeRequest::OnSaveNow},
     {"screenshot",                false, &PipeRequest::OnScreenshot},
     {"set_armed",                 false, &PipeRequest::OnSetArmed},
+    {"my_record_start",           false, &PipeRequest::OnMyRecordStart},
+    {"my_record_stop",            false, &PipeRequest::OnMyRecordStop},
+    {"stop_app_recording",        false, &PipeRequest::OnStopAppRecording},
     {"preview_config",            true,  &PipeRequest::OnPreviewConfig},
     {"notify",                    false, &PipeRequest::OnNotify},
     {"list_monitors",             false, &PipeRequest::OnListMonitors},

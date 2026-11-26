@@ -76,7 +76,8 @@
 //                      exists), already_recording (one per app; "recording" names it),
 //                      nothing_new (no footage within 10 s), busy, failed.
 //   record_stop     -> {"recording"?:number (default: the app's latest)}
-//                   <- {"recording":number, "end":"stopped"|"disk_low"|"write_failed"|"no_footage",
+//                   <- {"recording":number, "end":"stopped"|"user" (the user stopped it in the
+//                       overlay)|"disk_low"|"write_failed"|"no_footage",
 //                       "seconds":number, "paths":[string], "monitors":[{"monitor":string,
 //                       "reason":string, "end":string, "paths":[string], "fell_back":bool,
 //                       "seconds":number}]}
@@ -98,9 +99,10 @@
 //                        clip_saved  {"app":string|null (null: the user's own save), "clip"?:number
 //                                     (an app's clip id), "seconds":number, "paths"?:[string]
 //                                     (only for Ombra's command line until consent exists)}
-//                        recording_started {"app":string, "recording":number}
-//                        recording_stopped {"app":string, "recording":number, "reason":string,
-//                                     "end":string, "seconds":number, "paths"?:[string] (as clip_saved)}
+//                        recording_started {"app":string|null (null: the user's own), "recording":number}
+//                        recording_stopped {"app":string|null, "recording":number, "reason":string,
+//                                     "end":string (as record_stop's), "seconds":number,
+//                                     "paths"?:[string] (as clip_saved)}
 //                        recording_recovered {"app":string, "seconds":number, "paths"?:[string]}
 //                                     a recording an earlier run left unfinished (a crash, a
 //                                     power cut), made playable at this engine's start
@@ -145,7 +147,21 @@
 //                       "buffer_seconds":number, "last_save_path":string|null,
 //                       "last_save_time_qpc":number|null, "rss_ws_mb":number, "rss_private_mb":number,
 //                       "gpu_topology":"T1".."T6"|"Unknown", "gpu_topology_desc":string,
-//                       "gpu_display_owner":string|null, "gpu_nvidia_present":bool}
+//                       "gpu_display_owner":string|null, "gpu_nvidia_present":bool,
+//                       "my_recording":{"recording", "seconds", "seconds_left":number|null (until
+//                       the disk runs low; null before the first disk check)}|null,
+//                       "app_recordings":[{"recording", "app" (its name), "exe":string|null,
+//                       "seconds"}, ...]}
+//
+//   my_record_start -> {"before"?:number}   (the user's own recording: Home's Record, its hotkey)
+//                   <- {"ok":bool, "recording":number}
+//                      Answered at once; its toasts tell whether footage came. Already recording:
+//                      the running one's id, left running.
+//   my_record_stop  -> {}
+//                   <- {"ok":bool (false: none to stop)}   Doesn't wait for the files.
+//   stop_app_recording -> {"recording":number}
+//                   <- {"ok":bool (false: no app's recording by that id runs)}
+//                      The app's record_stop then answers with end "user".
 //
 //   save_now        -> {}
 //                   <- {"saved":bool, "path":string|null, "error":string|null,
