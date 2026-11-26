@@ -38,6 +38,7 @@ struct ClipRequest {
     double       after_seconds  = 0;  // capped at kClipMaxAfterSeconds
     std::wstring title;               // optional; sanitized into the file (or group folder) name
     std::string  app;                 // who asked, as its toast names it: the "clip saved" marker's label
+    uint64_t     id = 0;              // AppClips' id for it, told in the clip_saved event; 0: none
 };
 
 // Why a clip stopped taking footage.

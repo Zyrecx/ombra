@@ -3,6 +3,7 @@
 
 #include "ombra/controller.h"
 #include "ombra/crash_upload.h"
+#include "ombra/events.h"
 #include "ombra/log.h"
 #include "ombra/marker.h"
 #include "ombra/mux.h"
@@ -499,7 +500,10 @@ std::future<ReplaySaveResults> SaveReplay(const std::vector<SaveContext*>& conte
             }
             op->result.outcome = incomplete ? SaveOutcome::kFailed
                                  : saved ? SaveOutcome::kSaved : SaveOutcome::kNothingNew;
-            if (saved) PlaceClipSavedMarker(op->contexts, t_end, {});
+            if (saved) {
+                PlaceClipSavedMarker(op->contexts, t_end, {});
+                PublishClipSaved(op->contexts, op->result, {}, 0);
+            }
             if (op->feedback) op->feedback(op->result);
             op->promise.set_value(std::move(op->result));
         }).detach();
@@ -532,6 +536,24 @@ void PlaceClipSavedMarker(const std::vector<SaveContext*>& contexts, int64_t qpc
     if (contexts.front()->markers->Add(m, kOmbraMarkerOwner, MarkerReachAt(contexts, qpc).oldest_qpc) !=
         MarkerTimeline::AddResult::kAdded)
         Log::Info("markers: no room for Ombra's clip-saved marker");
+}
+
+void PublishClipSaved(const std::vector<SaveContext*>& contexts, const ReplaySaveResults& results,
+                      const std::string& app, uint64_t clip_id) {
+    if (contexts.empty() || !contexts.front()->events) return;
+    contexts.front()->events->PublishIfActive("clip_saved", [&](JsonValue& fields, JsonValue& private_fields) {
+        double seconds = 0;
+        JsonValue paths = JsonValue::MakeArray();
+        for (const ReplaySaveResult& m : results.monitors) {
+            if (m.outcome != SaveOutcome::kSaved) continue;
+            seconds = (std::max)(seconds, m.seconds);
+            paths.arr.push_back(JsonValue::MakeStr(NarrowUtf8(m.path)));
+        }
+        fields.Set("app", app.empty() ? JsonValue{} : JsonValue::MakeStr(app));
+        if (clip_id) fields.Set("clip", JsonValue::MakeNum(static_cast<double>(clip_id)));
+        fields.Set("seconds", JsonValue::MakeNum(std::round(seconds * 100) / 100));
+        private_fields.Set("paths", std::move(paths));
+    });
 }
 
 }  // namespace ombra

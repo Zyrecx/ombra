@@ -140,6 +140,11 @@ public:
     // Set before Start.
     using GameSessionSink = std::function<void(const std::wstring& exe_path, const std::wstring& name, int64_t qpc)>;
     void SetGameSessionSink(GameSessionSink sink) { game_sink_ = std::move(sink); }
+    // Called once per change, on whichever thread made it: the Instant Replay switch (UserEnabled),
+    // and whether footage is being kept (the supervisors' armed state). Set before Start.
+    using ChangeSink = std::function<void(bool on)>;
+    void SetReplaySink(ChangeSink sink) { replay_sink_ = std::move(sink); }
+    void SetBufferingSink(ChangeSink sink) { buffering_sink_ = std::move(sink); }
     // Test seam: a settle a test can wait out. Set before Start.
     void SetDisarmSettleForTest(int64_t ms) { settle_ms_ = ms; }
     bool ToggleUserEnabled();  // returns the new value
@@ -197,6 +202,13 @@ private:
     ArmState               arm_;
     uint64_t               game_window_ = 0;  // the game window last named
     GameSessionSink        game_sink_;
+    ChangeSink             replay_sink_;
+    ChangeSink             buffering_sink_;
+    // The pipe's thread and the worker both switch: a change and what its sink is told happen
+    // together, so the last event told is the state now.
+    std::mutex             replay_mutex_;  // user_enabled_'s changes with replay_sink_
+    std::mutex             armed_mutex_;   // SetArmed, applied_armed_ and buffering_sink_
+    int                    applied_armed_ = -1;  // what buffering_sink_ was last told; -1: nothing yet
     std::wstring           session_exe_;  // what game_sink_ was last told
     HWND                   scored_window_ = nullptr;  // focused, unknown, not armed: scored again for a while
     int64_t                scored_at_ms_ = 0;

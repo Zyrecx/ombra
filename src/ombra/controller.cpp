@@ -284,8 +284,12 @@ void BufferController::SetTarget(const std::string& capture_target, const std::s
 }
 
 void BufferController::SetUserEnabled(bool enabled) {
-    if (user_enabled_.exchange(enabled, std::memory_order_acq_rel) == enabled) return;
-    Log::Info("buffer controller  recording switched %s", enabled ? "on" : "off");
+    {
+        std::lock_guard<std::mutex> lock(replay_mutex_);
+        if (user_enabled_.exchange(enabled, std::memory_order_acq_rel) == enabled) return;
+        Log::Info("buffer controller  recording switched %s", enabled ? "on" : "off");
+        if (replay_sink_) replay_sink_(enabled);
+    }
     // Applied here when the answer needs no look at the screen, not on the worker's next pass, so
     // the switch reads right the moment the pipe command returns.
     bool always = false;
@@ -309,7 +313,11 @@ bool BufferController::ToggleUserEnabled() {
 }
 
 void BufferController::ApplyArmed(bool armed) {
+    std::lock_guard<std::mutex> lock(armed_mutex_);
     for (PipelineSupervisor* s : supervisors_) s->SetArmed(armed);
+    if (applied_armed_ == (armed ? 1 : 0)) return;
+    applied_armed_ = armed ? 1 : 0;
+    if (buffering_sink_) buffering_sink_(armed);
 }
 
 void CALLBACK BufferController::WinEventProcThunk(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id_object,

@@ -306,11 +306,14 @@ std::shared_ptr<ClipGroup> StartClip(const std::vector<SaveContext*>& contexts, 
     op->feedback = std::move(feedback);
     std::shared_ptr<ClipGroup> group(new ClipGroup());
     group->done_ = op->promise.get_future().share();
-    const auto finish = [op, contexts, at = request.event_qpc, app = request.app] {
+    const auto finish = [op, contexts, at = request.event_qpc, app = request.app, id = request.id] {
         op->result.outcome = FoldOutcome(op->result.monitors);
         const bool saved = std::any_of(op->result.monitors.begin(), op->result.monitors.end(),
                                        [](const ReplaySaveResult& m) { return m.outcome == SaveOutcome::kSaved; });
-        if (saved) PlaceClipSavedMarker(contexts, at, app);
+        if (saved) {
+            PlaceClipSavedMarker(contexts, at, app);
+            PublishClipSaved(contexts, op->result, app, id);
+        }
         if (op->feedback) op->feedback(op->result);
         op->promise.set_value(std::move(op->result));
     };
@@ -370,8 +373,10 @@ std::optional<AppClips::Started> AppClips::Request(const std::string& app,
         if (it->second.group->Extend(until)) return Started{it->second.id, true, it->second.group->Done()};
         open_.erase(it);  // past the cap or already ended: this request gets a clip of its own
     }
-    auto group = StartClip(contexts, request, feedback ? feedback() : SaveFeedback{});
     const uint64_t id = next_id_++;
+    ClipRequest numbered = request;
+    numbered.id = id;
+    auto group = StartClip(contexts, numbered, feedback ? feedback() : SaveFeedback{});
     Started started{id, false, group->Done()};
     if (started.done.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
         open_.emplace_back(app, Open{id, std::move(group)});

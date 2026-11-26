@@ -107,4 +107,9 @@ MarkerReach MarkerReachAt(const std::vector<SaveContext*>& contexts, int64_t qpc
 // doesn't carry its own.
 void PlaceClipSavedMarker(const std::vector<SaveContext*>& contexts, int64_t qpc, const std::string& app);
 
+// The clip_saved event (protocol.h) for an action that saved at least one file: `app` asked for it
+// (empty: the user), `clip_id` is its AppClips id (0: none).
+void PublishClipSaved(const std::vector<SaveContext*>& contexts, const ReplaySaveResults& results,
+                      const std::string& app, uint64_t clip_id);
+
 }  // namespace ombra

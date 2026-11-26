@@ -41,6 +41,7 @@ int64_t RingMaxAgeQpc(double buffer_seconds);
 int64_t AudioRingMaxAgeQpc(double buffer_seconds);
 
 class ClipSession;
+class EventHub;
 
 struct SaveContext {
     Ring*                ring = nullptr;
@@ -78,6 +79,8 @@ struct SaveContext {
     std::atomic<int>     save_count{0};
     // The engine's one marker timeline, shared by every pipeline; null: no markers.
     MarkerTimeline*      markers = nullptr;
+    // The engine's pipe events (events.h), shared likewise; null: none raised.
+    EventHub*            events = nullptr;
 
     // Tools' clips open on this pipeline (clip.h), under clip_mutex. A buffer reallocation refuses
     // while any is open and sets clips_blocked meanwhile, so none opens between its check and the

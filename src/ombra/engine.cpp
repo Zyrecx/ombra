@@ -721,6 +721,9 @@ int RunEngine(int argc, wchar_t** argv) {
     // Before what holds it: app_clips, the pipelines' saves, the controller's game markers.
     MarkerTimeline markers(static_cast<int64_t>(kMarkerTrailSeconds * static_cast<double>(QpcFrequency())));
     AppClips     app_clips;      // the API's clips, likewise
+    // The pipe's events: before the pipe server, the saves and the controller (whose destructor
+    // can still end a game), so every source outlives nothing it publishes into.
+    EventHub     events;
     std::unique_ptr<PipeServer> pipe_server;
     LogRssStage("process start");
 
@@ -956,6 +959,7 @@ int RunEngine(int argc, wchar_t** argv) {
         mp.save_ctx.ring             = &mp.ring;
         mp.save_ctx.audio            = &audio_hub;
         mp.save_ctx.markers          = &markers;
+        mp.save_ctx.events           = &events;
         mp.save_ctx.buffer_seconds   = buffer_seconds;
         // Every pipeline gets the same literal out_path — harmless for resident mode, where this
         // is always the sentinel "out\ombra.mp4" that makes DoSave take the templated
@@ -1121,16 +1125,30 @@ int RunEngine(int argc, wchar_t** argv) {
     };
     // Ombra's game start and end markers, from the same changes. Before the controller, likewise.
     GameMarkers game_markers(markers, QpcFrequency());
+    std::string event_game;  // the game game_start last named; the controller's worker only
     std::vector<SaveContext*> marker_ctxs;
     for (auto& mp : pipelines) marker_ctxs.push_back(&mp->save_ctx);
     BufferController controller(cfg.capture_mode, cfg.capture_target, cfg.capture_target_window,
                                 all_supervisors, &games);
+    // Events as status reports them (no debounce: an event, unlike a marker, can't be taken back).
+    controller.SetReplaySink([&events](bool on) {
+        events.PublishIfActive("replay", [on](JsonValue& f, JsonValue&) { f.Set("replay", JsonValue::MakeBool(on)); });
+    });
+    controller.SetBufferingSink([&events](bool on) {
+        events.PublishIfActive("buffering", [on](JsonValue& f, JsonValue&) { f.Set("buffering", JsonValue::MakeBool(on)); });
+    });
     controller.SetGameSessionSink(
         [&, total_saves](const std::wstring& exe_path, const std::wstring& game_name, int64_t at) {
             // An empty name means "no game", so a game whose name cleans to nothing still gets one.
             const std::string label =
                 exe_path.empty() ? std::string() : CleanMarkerLabel(NarrowUtf8(game_name)).value_or("Game");
             game_markers.Update(label, at, MarkerReachAt(marker_ctxs, at).oldest_qpc);
+            const auto game_event = [&events](const char* name, const std::string& game) {
+                events.PublishIfActive(name, [&game](JsonValue& f, JsonValue&) { f.Set("game", JsonValue::MakeStr(game)); });
+            };
+            if (!event_game.empty()) game_event("game_end", event_game);
+            event_game = exe_path.empty() ? std::string() : game_name.empty() ? "Game" : NarrowUtf8(game_name);
+            if (!event_game.empty()) game_event("game_start", event_game);
             if (!resident) return;
             const int64_t now = static_cast<int64_t>(std::time(nullptr));
             if (!open_game.exe.empty()) {
@@ -1421,7 +1439,8 @@ int RunEngine(int argc, wchar_t** argv) {
             [handle](const JsonValue& req) { return handle(req, PipeSurface::kInternal, nullptr); },
             [handle](const JsonValue& req, const PipeCaller& caller) {
                 return handle(req, PipeSurface::kApi, &caller);
-            });
+            },
+            nullptr, &events);
         // A failed Start() here means another ombra.exe instance already owns the pipe's single-
         // instance mutex (pipe.cpp) — i.e. this IS the "Ombra is already running" case, not merely
         // "no pipe available". The message says so explicitly rather than the more generic wording
@@ -1650,6 +1669,16 @@ int RunEngine(int argc, wchar_t** argv) {
     // below never waits out a clip. No clip opens after this.
     app_clips.Close();
     for (auto& mp : pipelines) StopClipsAndWait(&mp->save_ctx);
+    // Subscribers hear the exit after those clips' clip_saved and a hotkey save already running
+    // (its event follows its last file by a moment, so it's best effort), with a short, bounded
+    // chance to read it: the pipe's Stop cancels any write still pending.
+    if (events.Active())
+        for (auto& mp : pipelines)
+            while (mp->save_ctx.save_in_flight.load(std::memory_order_acquire))
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    events.PublishIfActive("exiting", [](JsonValue&, JsonValue&) {});
+    events.Close();
+    events.WaitDrained(500);
     // Pipe server first: stops accepting requests and joins every client worker before anything a
     // handler can reach (the tray, the hotkeys, then the supervisor's accessors) starts tearing down.
     if (pipe_server) pipe_server->Stop();

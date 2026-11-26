@@ -13,6 +13,7 @@
 #include "ombra/clip.h"
 #include "ombra/config.h"
 #include "ombra/controller.h"
+#include "ombra/events.h"
 #include "ombra/json.h"
 #include "ombra/reconfig.h"
 #include "ombra/ring.h"
@@ -435,7 +436,12 @@ TEST_CASE("clip: on engine exit every monitor's clip ends, is written and report
 }
 
 TEST_CASE("clip: an app's request during its own open clip extends it; another app's opens its own") {
+    EventHub events;  // before the rig: its clips publish into it
+    Subscription heard(events, false), own(events, true);
+    heard.Set({"clip_saved"});
+    own.Set({"clip_saved"});
     ClipRig rig(L"apps");
+    rig.ctx.events      = &events;
     rig.ctx.out_path    = L"out\\ombra.mp4";  // templated, so two clips get two names
     rig.ctx.output_root = NarrowUtf8(TestOutputPath(L"clip\\apps"));
     rig.EndNow(3.0);
@@ -447,6 +453,7 @@ TEST_CASE("clip: an app's request during its own open clip extends it; another a
     AppClips clips;
     int feedbacks = 0;
     const StartSaveFeedback feedback = [&]() -> SaveFeedback { ++feedbacks; return {}; };
+    req.app = "tool";  // the name an event and toast show; the first argument is the clip's key
     const auto first = clips.Request("tool", {&rig.ctx}, req, feedback);
     REQUIRE(first);
     CHECK_FALSE(first->extended);
@@ -455,6 +462,7 @@ TEST_CASE("clip: an app's request during its own open clip extends it; another a
     REQUIRE(again);
     CHECK(again->extended);
     CHECK(again->id == first->id);
+    req.app = "other";
     const auto other = clips.Request("other", {&rig.ctx}, req, feedback);
     REQUIRE(other);
     CHECK_FALSE(other->extended);
@@ -471,6 +479,27 @@ TEST_CASE("clip: an app's request during its own open clip extends it; another a
     REQUIRE(b.outcome == SaveOutcome::kSaved);
     CHECK(a.monitors.at(0).path != b.monitors.at(0).path);
     CHECK(ProbeVideoFrames(a.monitors.at(0).path).count >= 120);
+
+    // One clip_saved per file, naming its app and id; only Ombra's own client hears the path.
+    std::vector<std::string> lines, own_lines;
+    REQUIRE(heard.Take(lines));
+    REQUIRE(own.Take(own_lines));
+    REQUIRE(lines.size() == 2);
+    REQUIRE(own_lines.size() == 2);
+    for (size_t i = 0; i < 2; ++i) {
+        const JsonValue ev = ParseJson(lines[i]), mine = ParseJson(own_lines[i]);
+        const JsonValue* app = ev.Find("app");
+        const JsonValue* clip = ev.Find("clip");
+        REQUIRE((app && clip));
+        const bool tool = app->str == "tool";
+        CHECK(clip->num == static_cast<double>(tool ? first->id : other->id));
+        CHECK(ev.Find("seconds")->num >= 1.0);
+        CHECK_FALSE(ev.Find("paths"));
+        const JsonValue* paths = mine.Find("paths");
+        REQUIRE(paths);
+        REQUIRE(paths->arr.size() == 1);
+        CHECK(paths->arr[0].str == NarrowUtf8((tool ? a : b).monitors.at(0).path));
+    }
 }
 
 TEST_CASE("clip: an app's request after its clip was refused or ended opens a new one") {
