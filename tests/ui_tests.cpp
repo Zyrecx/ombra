@@ -1951,6 +1951,107 @@ TEST_CASE("ui: Home's Instant Replay tile says Off while switched off, not what 
     CHECK_FALSE(screen.BufferToggleCheckedForTest());
 }
 
+TEST_CASE("ui: a recording's time formats as m:ss, then h:mm:ss, and ticks on locally") {
+    CHECK(FormatElapsed(0) == L"0:00");
+    CHECK(FormatElapsed(40.9) == L"0:40");
+    CHECK(FormatElapsed(754) == L"12:34");
+    CHECK(FormatElapsed(3725) == L"1:02:05");
+    CHECK(FormatElapsed(-3) == L"0:00");
+    LiveElapsed live;
+    CHECK(live.Seconds(5000) == 0.0);
+    live.Report(10, 100000);
+    CHECK(live.Seconds(101500) == doctest::Approx(11.5));
+    live.Report(11, 101400);  // 0.1 s off: the local count stands
+    CHECK(live.Seconds(102000) == doctest::Approx(12.0));
+    live.Report(30, 102000);  // far off: the engine's time wins
+    CHECK(live.Seconds(102000) == doctest::Approx(30.0));
+}
+
+TEST_CASE("ui: Home's Record tile starts from now or seconds back, and shows the user's recording") {
+    struct RecHost : FakeScreenHost {
+        std::vector<JsonValue> sent;
+        bool ok = true;
+        int polls = 0;
+        void PollStatusNow() override { ++polls; }
+        void RequestAsync(JsonValue req, DWORD, std::function<void(std::optional<JsonValue>)> cb) override {
+            sent.push_back(req);
+            JsonValue resp = JsonValue::MakeObject();
+            resp.Set("ok", JsonValue::MakeBool(ok));
+            if (!ok) resp.Set("error", JsonValue::MakeStr("no disk"));
+            if (cb) cb(resp);
+        }
+    } host;
+    HomeScreen screen(&host);
+    JsonValue cfg = JsonValue::MakeObject();
+    cfg.Set("buffer.seconds", JsonValue::MakeNum(20));
+    cfg.Set("hotkeys.toggle_record", JsonValue::MakeStr("Alt+F9"));
+    JsonValue config = JsonValue::MakeObject();
+    config.Set("config", std::move(cfg));
+    JsonValue status = JsonValue::MakeObject();
+    status.Set("enabled", JsonValue::MakeBool(true));
+    status.Set("armed", JsonValue::MakeBool(true));
+    screen.UpdateState(&status, &config);
+
+    RecordTileControl& tile = screen.RecordTileForTest();
+    CHECK_FALSE(tile.recording);
+    CHECK(tile.stop_keys == L"Alt+F9");
+    REQUIRE(tile.from.options.size() == 2);
+    CHECK(tile.from.options[1] == L"20 s ago");  // never further back than the replay holds
+    CHECK(tile.detail == L"Click to start");
+    tile.from.on_change(1);
+    CHECK(screen.RecordTileForTest().detail == L"Starts 20 s back");
+
+    tile.on_click();
+    REQUIRE(host.sent.size() == 1);
+    CHECK(host.sent[0].Find("type")->str == "my_record_start");
+    REQUIRE(host.sent[0].Find("before"));
+    CHECK(host.sent[0].Find("before")->num == 20);
+    CHECK(host.polls == 1);
+    CHECK(screen.RecordTileForTest().recording);  // shown before the next status
+    CHECK(screen.RecordTileForTest().detail == L"Checking the space left");
+
+    // A status asked before the click doesn't undo it.
+    screen.UpdateRecording(status, 1);
+    CHECK(screen.RecordTileForTest().recording);
+
+    JsonValue mine = JsonValue::MakeObject();
+    mine.Set("recording", JsonValue::MakeNum(1));
+    mine.Set("seconds", JsonValue::MakeNum(754));
+    mine.Set("seconds_left", JsonValue::MakeNum(3 * 3600 + 600));
+    status.Set("my_recording", mine);
+    screen.UpdateRecording(status, GetTickCount64() + 1);
+    CHECK(screen.RecordTileForTest().title == L"12:34");
+    CHECK(screen.RecordTileForTest().detail == L"3 h 10 min of space left");
+    CHECK_FALSE(screen.RecordTileForTest().detail_warn);
+    mine.Set("seconds_left", JsonValue::MakeNum(480));
+    status.Set("my_recording", mine);
+    screen.UpdateRecording(status, GetTickCount64() + 1);
+    CHECK(screen.RecordTileForTest().detail == L"8 min of space left");
+    CHECK(screen.RecordTileForTest().detail_warn);
+
+    tile.on_click();
+    REQUIRE(host.sent.size() == 2);
+    CHECK(host.sent[1].Find("type")->str == "my_record_stop");
+    CHECK_FALSE(screen.RecordTileForTest().recording);
+
+    // Instant Replay off: nothing to start from, so the pick shows Now and isn't sent.
+    status.Set("my_recording", JsonValue{});
+    status.Set("armed", JsonValue::MakeBool(false));
+    screen.UpdateState(&status, nullptr);
+    CHECK_FALSE(screen.RecordTileForTest().from.enabled);
+    CHECK(screen.RecordTileForTest().from.selected == 0);
+    CHECK(screen.RecordTileForTest().detail == L"Click to start");
+    host.ok = false;
+    tile.on_click();
+    REQUIRE(host.sent.size() == 3);
+    CHECK_FALSE(host.sent[2].Find("before"));
+    CHECK(host.modal_count == 1);  // the engine's reason, in a modal
+    CHECK_FALSE(screen.RecordTileForTest().recording);
+    status.Set("armed", JsonValue::MakeBool(true));
+    screen.UpdateState(&status, nullptr);
+    CHECK(screen.RecordTileForTest().from.selected == 1);  // the pick came back with the replay
+}
+
 TEST_CASE("ui: HomeScreen lays its three tiles on one centered row, stats clear of the toggle") {
     FakeScreenHost host;
     HomeScreen screen(&host);
@@ -3889,6 +3990,39 @@ TEST_CASE("ui: the quality preset lives only on Replay & Quality; Auto-Tune ride
     CHECK(button == screen.ControlForTest("engine.autotune"));
     button->on_click();
     CHECK(host.modal_count == 1);  // a confirm first: the run closes this panel
+}
+
+TEST_CASE("ui: header pills fit what they can and count the rest") {
+    HeadlessDraw h;
+    REQUIRE(h.ok);
+    RecordingPillsControl pills;
+    std::vector<RecordingPillsControl::Entry> entries;
+    for (int i = 0; i < 4; ++i)
+        entries.push_back({static_cast<uint64_t>(i + 1), L"App " + std::to_wstring(i), i == 1 ? L"" : L"C:\\a\\app.exe", L"1:00"});
+    RecordingPillsControl::Entry stopped{};
+    pills.on_stop = [&](const RecordingPillsControl::Entry& e) { stopped = e; };
+    pills.SetEntries(entries);
+    pills.Place(0, 2000, 50, h.theme, 1.0f);
+    CHECK(pills.HitTest(D2D1::Point2F(5, 50)));
+    // A narrow header: the first pill and "+3".
+    pills.Place(0, 260, 50, h.theme, 1.0f);
+    CHECK(pills.bounds.right <= 260);
+    std::wstring tip;
+    D2D1_POINT_2F at{};
+    pills.OnMouseMove(D2D1::Point2F(pills.bounds.right + 10, 50));  // on "+3"
+    REQUIRE(pills.QueryTooltip(&tip, &at));
+    CHECK(tip.find(L"App 3") != std::wstring::npos);
+    CHECK(tip.find(L"App 0") == std::wstring::npos);
+    CHECK(at.y > 50);  // below: the header has no room above
+
+    // A pill's Stop (its rightmost button; `bounds` ends a gap past the pill) reports that entry.
+    pills.SetEntries({entries[0]});
+    pills.Place(0, 2000, 50, h.theme, 1.0f);
+    const D2D1_POINT_2F stop = D2D1::Point2F(pills.bounds.right - 24, 50);
+    CHECK(pills.CursorAt(stop) == CursorKind::Hand);
+    REQUIRE(pills.OnMouseDown(stop));
+    pills.OnMouseUp(stop);
+    CHECK(stopped.id == 1);
 }
 
 TEST_CASE("ui: fonts follow the monitor's DPI, and MeasureText reports layout pixels") {

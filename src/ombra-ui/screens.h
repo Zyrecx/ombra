@@ -43,6 +43,9 @@ enum class ActiveScreen {
 void SetNativeWindowSink(std::function<void(const std::wstring&)> sink);
 // True = don't open `what` (a window, dialog, the clipboard, the Recycle Bin): the sink was told.
 bool NativeWindowBlocked(const std::wstring& what);
+// Explorer, opened on `path`'s folder with it selected (through NativeWindowBlocked). Explorer
+// takes the foreground: the caller closes the overlay.
+void ShowFileInExplorer(const std::wstring& path);
 // The folder picker, owned by `owner` so it stacks above the overlay. "" on cancel or when blocked.
 std::wstring PickFolderDialog(HWND owner, const std::wstring& initial);
 
@@ -194,6 +197,9 @@ public:
     // the keys meanwhile (hotkeys_suspend). The host renews the engine's lease while this is true.
     virtual void SetHotkeysSuspended(bool suspended) { (void)suspended; }
     virtual void SwitchScreen(ActiveScreen screen) = 0;
+    // Asks get_status now instead of at the next once-a-second poll: after starting or stopping a
+    // recording, so the overlay shows it at once.
+    virtual void PollStatusNow() {}
     virtual void ShowModal(const std::wstring& title, const std::wstring& msg,
                            bool is_danger, std::function<void()> on_confirm,
                            std::function<void()> on_cancel = nullptr,
@@ -315,6 +321,9 @@ public:
 
     void MarkEngineUnavailable();  // no status reply: what Home last knew is no longer true
     void UpdateState(const ombra::JsonValue* status_resp, const ombra::JsonValue* config_resp);
+    // get_status's my_recording. `sent_ms` (GetTickCount64 when the request went out) lets a reply
+    // asked before the user's last click on Record not undo what that click did.
+    void UpdateRecording(const ombra::JsonValue& status_resp, uint64_t sent_ms);
     void Layout(const D2D1_RECT_F& bounds, float dpi_scale);
     void Draw(ID2D1DeviceContext* dc, const Theme& theme, float dpi_scale);
 
@@ -323,6 +332,11 @@ public:
     bool OnMouseDown(D2D1_POINT_2F pt);
     bool OnMouseUp(D2D1_POINT_2F pt);
     bool OnKeyDown(UINT vk);
+    // A start or stop still in flight is dropped with the window: Record takes clicks again.
+    void OnOverlayHidden() { record_request_pending_ = false; record_changed_ms_ = 0; }
+    bool QueryHoverTooltip(std::wstring* text, D2D1_POINT_2F* anchor) const {
+        return record_card_.QueryTooltip(text, anchor);
+    }
 
     // Headless testing accessors
     size_t ActionCardCount() const { return 3; }
@@ -336,15 +350,16 @@ public:
     const std::wstring& OutputFolder() const { return output_folder_str_; }
     bool BufferToggleCheckedForTest() const { return replay_card_.toggle.on; }
     const std::wstring& ReplayDetailForTest() const { return replay_card_.detail; }
+    RecordTileControl& RecordTileForTest() { RefreshRecordTile(); return record_card_; }
 
 private:
     ScreenHost* host_ = nullptr;
     D2D1_RECT_F bounds_{};
 
-    // Instant Replay (its foot is the on/off switch), Record (a placeholder until manual record
-    // mode exists) and Clips. Screenshot was dropped from Home; its hotkey still works.
+    // Instant Replay (its foot is the on/off switch), Record (the user's own recording) and Clips.
+    // Screenshot was dropped from Home; its hotkey still works.
     ActionTileControl replay_card_;
-    ActionTileControl record_card_;
+    RecordTileControl record_card_;
     ActionTileControl clips_card_;
     std::wstring      hint_keys_;         // hotkeys.save_replay
     std::wstring      hint_suffix_ = L"to save your replay";
@@ -368,6 +383,17 @@ private:
     std::wstring display_label_;       // the one recorded display's name, once list_monitors answers
     int          display_count_ = 1;
     uint64_t     display_label_generation_ = 0;
+
+    // The user's own recording (get_status.my_recording) and the Record tile's words for it.
+    void RefreshRecordTile();
+    void OnRecordClick();
+    bool        my_recording_ = false;
+    LiveElapsed my_elapsed_;
+    double      my_seconds_left_ = -1;    // until the disk runs low; -1 before the first check
+    int         buffer_seconds_ = 0;      // buffer.seconds: how far back "N s ago" reaches
+    int         record_from_ = 0;         // the segment's pick, kept while it is disabled
+    bool        record_request_pending_ = false;
+    uint64_t    record_changed_ms_ = 0;   // the last click's start or stop, answered
 };
 
 class SettingsScreen {

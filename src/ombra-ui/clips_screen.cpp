@@ -1018,14 +1018,7 @@ void ClipsScreen::CopyToClipboard(const std::wstring& path) {
 
 void ClipsScreen::ShowInFolder() {
     if (selected_ < 0) return;
-    const std::wstring path = clips_[selected_].path;
-    if (!NativeWindowBlocked(L"Explorer selecting " + path)) {
-        PIDLIST_ABSOLUTE pidl = ILCreateFromPathW(path.c_str());
-        if (pidl) {
-            SHOpenFolderAndSelectItems(pidl, 0, nullptr, 0);
-            ILFree(pidl);
-        }
-    }
+    ShowFileInExplorer(clips_[selected_].path);
     if (host_) host_->CloseOverlay();
 }
 

@@ -1047,6 +1047,288 @@ bool ActionTileControl::OnKeyDown(UINT vk) {
     return true;
 }
 
+// --- Record tile --------------------------------------------------------------------------------
+
+D2D1_SIZE_F RecordTileControl::Measure(const LayoutConstraints& c, const LayoutContext& ctx) {
+    const float w = c.BoundedWidth() ? c.max_w : 220 * ctx.dpi_scale;
+    return D2D1::SizeF(w, w);
+}
+
+void RecordTileControl::Draw(ID2D1DeviceContext* dc, const Theme& t, float s) {
+    if (!visible) return;
+    const Paint p{dc, t, s};
+    const ColorRoles& c = t.color;
+    const Sizes& z = t.size;
+    const D2D1_RECT_F& r = bounds;
+    const float rad = z.radius_card() * s, pad = z.card_padding() * s;
+    from.visible = !recording;
+    // Over the segment the tile isn't what a click acts on, so it doesn't light.
+    const float hv = Hover(hovered && !(from.visible && over_from_));
+
+    p.Fill(r, rad, c.raised);
+    p.Fill(r, rad, pressed ? c.PressedLayer() : c.HoverLayer(hv));
+    p.Stroke(r, rad, recording ? p.A(c.recording, 0.6f) : c.line_strong);
+
+    // The foot: "Start from" and its segment, or "Click to stop" and the record hotkey's keys.
+    const float foot_h = z.control_sm() * s + 2 * z.space_sm() * s, sp = z.space_sm() * s;
+    const auto row = D2D1::RectF(r.left + pad, r.bottom - foot_h, r.right - pad, r.bottom);
+    p.Line(row.left, row.top, row.right, row.top, c.line, 1.0f);
+    const std::wstring foot_label = recording ? L"Click to stop" : L"Start from";
+    float label_r = row.right;
+    if (from.visible) {
+        const LayoutContext ctx{s, &t};
+        D2D1_SIZE_F m = from.Measure(LayoutConstraints{}, ctx);
+        std::vector<std::wstring> full;
+        if (m.width > row.right - row.left && from_compact.size() == from.options.size()) {
+            full = std::exchange(from.options, from_compact);
+            m = from.Measure(LayoutConstraints{}, ctx);
+        }
+        m.width = (std::min)(m.width, row.right - row.left);
+        from.bounds = RowBox(row, row.right - m.width, m.width, m.height);
+        from.Draw(dc, t, s);
+        if (!full.empty()) from.options = std::move(full);
+        label_r = from.bounds.left - sp;
+        // A narrow tile keeps the segment and drops the words.
+        if (row.left + p.TextW(foot_label, TypeRole::Caption) > label_r) label_r = row.left;
+    } else {
+        // A narrow tile drops the keys and keeps the words.
+        const std::vector<std::wstring> keys = SplitKeys(stop_keys);
+        const float kh = z.switch_h() * s, kw = p.Keys(keys, 0, 0, kh, false, true);
+        if (!keys.empty() && row.left + p.TextW(foot_label, TypeRole::Caption) + sp + kw <= row.right) {
+            p.Keys(keys, row.right - kw, Cy(row), kh, true, true);
+            label_r = row.right - kw - sp;
+        }
+    }
+    if (label_r > row.left) p.Text(foot_label, TypeRole::Caption, D2D1::RectF(row.left, row.top, label_r, row.bottom), c.text2,
+           {TextAlign::Leading, false, true});
+
+    // Disc, title and detail as one group, centred above the foot like ActionTileControl's, so
+    // idle the title is level with the other tiles'. Recording, the title is the elapsed time.
+    const TypeRole title_role = recording ? TypeRole::Display : TypeRole::Title;
+    const float lt = LineHeight(title_role) * s, lb = LineHeight(TypeRole::Body) * s, gap = z.space_md() * s;
+    const float words = gap + lt + (detail.empty() ? 0.0f : z.space_xxs() * s + lb);
+    const float room = r.bottom - foot_h - r.top - 2 * pad - words;
+    const float d = std::clamp(room, z.control_sm() * s, 2 * z.control_sm() * s);
+    float y = r.top + (r.bottom - foot_h - r.top - d - words) * 0.5f;
+    const float cx = (r.left + r.right) * 0.5f, dcy = y + d / 2;
+    if (recording) {
+        // A stop button: the red disc with a white square.
+        p.Circle(cx, dcy, d / 2, c.recording);
+        const float q = d * 0.125f;
+        p.Fill(D2D1::RectF(cx - q, dcy - q, cx + q, dcy + q), z.radius_inner() * 0.5f * s, D2D1::ColorF(D2D1::ColorF::White));
+    } else {
+        p.Circle(cx, dcy, d / 2, c.HoverLayer(2.0f));
+        DrawIcon(dc, t, IconType::Record, cx, dcy, (std::min)(z.app_icon() * s, d / 2), p.B(c.text).Get(), nullptr);
+    }
+    y += d + gap;
+    const TextOpts centre{TextAlign::Center, false, true};
+    p.Text(title, title_role, D2D1::RectF(r.left + pad, y, r.right - pad, y + lt), c.text, centre);
+    y += lt;
+    if (!detail.empty()) {
+        y += z.space_xxs() * s;
+        p.Text(detail, TypeRole::Body, D2D1::RectF(r.left + pad, y, r.right - pad, y + lb),
+               detail_warn ? c.warning : c.text2, centre);
+    }
+}
+
+CursorKind RecordTileControl::CursorAt(D2D1_POINT_2F pt) const {
+    if (from.visible && from.HitTest(pt)) return from.CursorAt(pt);
+    return Control::CursorAt(pt);
+}
+
+bool RecordTileControl::OnMouseMove(D2D1_POINT_2F pt) {
+    bool changed = Control::OnMouseMove(pt);
+    const bool over = from.visible && hovered && PointIn(from.bounds, pt);
+    changed |= over != over_from_;
+    over_from_ = over;
+    if (from.visible) changed |= from.OnMouseMove(pt);
+    return changed;
+}
+
+bool RecordTileControl::OnMouseDown(D2D1_POINT_2F pt) {
+    // The segment sits inside the tile: picking "30 s ago" doesn't also start a recording, and a
+    // disabled segment swallows its press too.
+    if (from.visible && PointIn(from.bounds, pt)) return from.OnMouseDown(pt) || HitTest(pt);
+    return Control::OnMouseDown(pt);
+}
+
+bool RecordTileControl::OnMouseUp(D2D1_POINT_2F pt) {
+    const bool seg = from.OnMouseUp(pt);
+    return Control::OnMouseUp(pt) || seg;
+}
+
+bool RecordTileControl::QueryTooltip(std::wstring* text, D2D1_POINT_2F* anchor) const {
+    // Widget::HitTest leaves a disabled segment unhovered; its tooltip says why it is off.
+    if (from.visible && !from.enabled && over_from_ && !from.tooltip.empty()) {
+        if (text) *text = from.tooltip;
+        if (anchor) *anchor = D2D1::Point2F((from.bounds.left + from.bounds.right) * 0.5f, from.bounds.top);
+        return true;
+    }
+    return from.visible && from.QueryTooltip(text, anchor);
+}
+
+void RecordTileControl::Press(D2D1_POINT_2F) {
+    if (on_click) on_click();
+}
+
+// --- Recording pills ----------------------------------------------------------------------------
+
+namespace {
+constexpr float kPillNameMaxDip = 200.0f;  // a longer app name trims
+bool Inside(const D2D1_RECT_F& r, D2D1_POINT_2F pt) {
+    return pt.x >= r.left && pt.x <= r.right && pt.y >= r.top && pt.y <= r.bottom;
+}
+}  // namespace
+
+void RecordingPillsControl::SetEntries(std::vector<Entry> entries) {
+    entries_ = std::move(entries);
+    while (pills_.size() < entries_.size()) {
+        auto pill = std::make_unique<Pill>();
+        for (IconButtonControl* b : {&pill->find, &pill->stop}) b->glyph = IconButtonControl::Glyph::Icon;
+        pill->find.icon = IconType::Folder;
+        pill->stop.icon = IconType::Stop;
+        pills_.push_back(std::move(pill));
+    }
+    pills_.resize(entries_.size());
+    for (size_t i = 0; i < entries_.size(); ++i) {
+        const Entry& e = entries_[i];
+        Pill& pill = *pills_[i];
+        const size_t slash = e.exe.find_last_of(L"\\/");
+        pill.find.visible = !e.exe.empty();
+        pill.find.tooltip = L"Show " + (slash == std::wstring::npos ? e.exe : e.exe.substr(slash + 1)) + L" in Explorer";
+        pill.stop.tooltip = L"Stop " + e.name + L"'s recording";
+        // A copy: the callback may replace the entries.
+        pill.find.on_click = [this, i] { if (i < entries_.size() && on_find) { const Entry copy = entries_[i]; on_find(copy); } };
+        pill.stop.on_click = [this, i] { if (i < entries_.size() && on_stop) { const Entry copy = entries_[i]; on_stop(copy); } };
+    }
+    shown_ = (std::min)(shown_, entries_.size());
+}
+
+void RecordingPillsControl::Place(float left, float right, float cy, const Theme& t, float s) {
+    const Paint p{nullptr, t, s};
+    const Sizes& z = t.size;
+    const float h = z.control() * s, b = z.control_sm() * s, inset = (h - b) * 0.5f;
+    const float pad = z.space_md() * s, gap = z.space_sm() * s, dot = z.space_sm() * s;
+    const std::wstring more = L"+" + std::to_wstring(entries_.size());  // the widest "+N" can be
+    const float more_w = p.TextW(more, TypeRole::Label) + 2 * pad;
+    float x = left;
+    shown_ = 0;
+    for (size_t i = 0; i < entries_.size(); ++i) {
+        const Entry& e = entries_[i];
+        Pill& pill = *pills_[i];
+        pill.name_w = (std::min)(p.TextW(e.name, TypeRole::Label), kPillNameMaxDip * s);
+        const float buttons = (pill.find.visible ? b : 0.0f) + b;
+        const float w = pad + dot + gap + pill.name_w + gap + p.TextW(e.time, TypeRole::Mono) + gap + buttons + inset;
+        const float reserve = i + 1 < entries_.size() ? gap + more_w : 0.0f;
+        if (x + w + reserve > right) break;
+        pill.box = D2D1::RectF(x, cy - h / 2, x + w, cy + h / 2);
+        float bx = pill.box.right - inset - b;
+        pill.stop.bounds = D2D1::RectF(bx, cy - b / 2, bx + b, cy + b / 2);
+        if (pill.find.visible) {
+            bx -= b;
+            pill.find.bounds = D2D1::RectF(bx, cy - b / 2, bx + b, cy + b / 2);
+        }
+        x += w + gap;
+        ++shown_;
+    }
+    for (size_t i = shown_; i < pills_.size(); ++i) {
+        pills_[i]->box = pills_[i]->find.bounds = pills_[i]->stop.bounds = D2D1::RectF();
+        pills_[i]->find.hovered = pills_[i]->stop.hovered = false;
+    }
+    more_ = shown_ < entries_.size() && x + more_w <= right ? D2D1::RectF(x, cy - h / 2, x + more_w, cy + h / 2)
+                                                            : D2D1::RectF();
+    if (more_.right <= more_.left) more_hovered_ = false;
+    bounds = D2D1::RectF(left, cy - h / 2, (std::max)(left, x), cy + h / 2);
+}
+
+void RecordingPillsControl::Draw(ID2D1DeviceContext* dc, const Theme& t, float s) {
+    if (!visible) return;
+    const Paint p{dc, t, s};
+    const ColorRoles& c = t.color;
+    const Sizes& z = t.size;
+    const float pad = z.space_md() * s, gap = z.space_sm() * s, dot = z.space_sm() * s;
+    const auto tint = [&](const D2D1_RECT_F& box) {
+        const float rad = z.radius_full(box.bottom - box.top, s);
+        p.Fill(box, rad, p.A(c.recording, 0.14f));
+        p.Stroke(box, rad, p.A(c.recording, 0.45f));
+    };
+    for (size_t i = 0; i < shown_; ++i) {
+        const Entry& e = entries_[i];
+        Pill& pill = *pills_[i];
+        const D2D1_RECT_F& box = pill.box;
+        tint(box);
+        float x = box.left + pad;
+        p.Circle(x + dot / 2, Cy(box), dot / 2, c.recording);
+        x += dot + gap;
+        p.Text(e.name, TypeRole::Label, D2D1::RectF(x, box.top, x + pill.name_w + 1, box.bottom), c.text,
+               {TextAlign::Leading, false, true});
+        x += pill.name_w + gap;
+        const float tw = p.TextW(e.time, TypeRole::Mono);
+        p.Text(e.time, TypeRole::Mono, D2D1::RectF(x, box.top, x + tw + 1, box.bottom), c.text2);
+        if (pill.find.visible) pill.find.Draw(dc, t, s);
+        pill.stop.Draw(dc, t, s);
+    }
+    if (more_.right > more_.left) {
+        tint(more_);
+        p.Text(L"+" + std::to_wstring(entries_.size() - shown_), TypeRole::Label, more_, c.text, {TextAlign::Center});
+    }
+}
+
+bool RecordingPillsControl::HitTest(D2D1_POINT_2F pt) const {
+    if (!visible) return false;
+    for (size_t i = 0; i < shown_; ++i)
+        if (Inside(pills_[i]->box, pt)) return true;
+    return more_.right > more_.left && Inside(more_, pt);
+}
+
+CursorKind RecordingPillsControl::CursorAt(D2D1_POINT_2F pt) const {
+    for (size_t i = 0; i < shown_; ++i)
+        for (const IconButtonControl* b : {&pills_[i]->find, &pills_[i]->stop})
+            if (b->CursorAt(pt) != CursorKind::Arrow) return CursorKind::Hand;
+    return CursorKind::Arrow;
+}
+
+bool RecordingPillsControl::OnMouseMove(D2D1_POINT_2F pt) {
+    bool changed = false;
+    for (size_t i = 0; i < shown_; ++i)
+        for (IconButtonControl* b : {&pills_[i]->find, &pills_[i]->stop}) changed |= b->OnMouseMove(pt);
+    const bool over_more = more_.right > more_.left && Inside(more_, pt);
+    changed |= over_more != more_hovered_;
+    more_hovered_ = over_more;
+    return changed;
+}
+
+bool RecordingPillsControl::OnMouseDown(D2D1_POINT_2F pt) {
+    for (size_t i = 0; i < shown_; ++i)
+        for (IconButtonControl* b : {&pills_[i]->find, &pills_[i]->stop})
+            if (b->OnMouseDown(pt)) return true;
+    return HitTest(pt);  // the pill itself takes the press, so nothing under it does
+}
+
+bool RecordingPillsControl::OnMouseUp(D2D1_POINT_2F pt) {
+    bool changed = false;
+    for (auto& pill : pills_)
+        for (IconButtonControl* b : {&pill->find, &pill->stop}) changed |= b->OnMouseUp(pt);
+    return changed;
+}
+
+bool RecordingPillsControl::QueryTooltip(std::wstring* text, D2D1_POINT_2F* anchor) const {
+    // Under its button: the header has no room above.
+    for (size_t i = 0; i < shown_; ++i)
+        for (const IconButtonControl* b : {&pills_[i]->find, &pills_[i]->stop}) {
+            if (!b->visible || !b->hovered) continue;
+            if (text) *text = b->tooltip;
+            if (anchor) *anchor = D2D1::Point2F((b->bounds.left + b->bounds.right) * 0.5f, pills_[i]->box.bottom);
+            return true;
+        }
+    if (!more_hovered_) return false;
+    std::wstring names;
+    for (size_t i = shown_; i < entries_.size(); ++i) names += (names.empty() ? L"" : L"\n") + entries_[i].name + L"  " + entries_[i].time;
+    if (text) *text = names;
+    if (anchor) *anchor = D2D1::Point2F((more_.left + more_.right) * 0.5f, more_.bottom);
+    return true;
+}
+
 // --- Tile grid ----------------------------------------------------------------------------------
 
 // --- LevelDetail --------------------------------------------------------------------------------

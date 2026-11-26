@@ -843,7 +843,8 @@ void SoftShadow::Draw(ID2D1DeviceContext* dc, const Theme& t, float s, const D2D
     if (bitmap_) dc->DrawImage(bitmap_.Get(), D2D1::Point2F(r.left - margin_, r.top - margin_ + t.size.space_xs() * s));
 }
 
-void DrawTooltip(ID2D1DeviceContext* dc, const Theme& t, float s, const std::wstring& text, D2D1_POINT_2F anchor) {
+void DrawTooltip(ID2D1DeviceContext* dc, const Theme& t, float s, const std::wstring& text, D2D1_POINT_2F anchor,
+                 bool below) {
     if (!dc || text.empty()) return;
     const Sizes& z = t.size;
     const TextOpts wrap{TextAlign::Leading, true, false, false};
@@ -852,8 +853,8 @@ void DrawTooltip(ID2D1DeviceContext* dc, const Theme& t, float s, const std::wst
     const D2D1_SIZE_F m = t.MeasureText(f, text, 260 * s);
     const float px = z.space_sm() * s, py = z.space_xs() * s;
     const float w = std::ceil(m.width) + 2 * px, h = std::ceil(m.height) + 2 * py;
-    const float bottom = anchor.y - z.space_xs() * s;
-    const auto r = D2D1::RectF(anchor.x - w / 2, bottom - h, anchor.x + w / 2, bottom);
+    const float top = below ? anchor.y + z.space_xs() * s : anchor.y - z.space_xs() * s - h;
+    const auto r = D2D1::RectF(anchor.x - w / 2, top, anchor.x + w / 2, top + h);
     const Paint p{dc, t, s};
     const float rad = z.radius_control() * s;
     p.Fill(r, rad, t.color.raised);

@@ -285,6 +285,68 @@ protected:
     void Press(D2D1_POINT_2F pt) override;
 };
 
+// Home's Record tile: the user's own recording. Idle, a click starts it and the foot's segment
+// says from when (Now / N s ago); recording, a red stop disc, the elapsed time as the title, a
+// click stops it. The owner (HomeScreen) writes the words; the tile lays out and draws them.
+class RecordTileControl : public Control {
+public:
+    bool recording = false;
+    std::wstring title = L"Record", detail;
+    bool detail_warn = false;    // the detail in the warning colour (disk running low)
+    std::wstring stop_keys;      // hotkeys.toggle_record, in the recording foot; empty: none
+    SegmentedControl from;       // the idle foot's "Start from"
+    std::vector<std::wstring> from_compact;  // its options where the full words do not fit
+    std::function<void()> on_click;
+
+    D2D1_SIZE_F Measure(const LayoutConstraints& c, const LayoutContext& ctx) override;
+    void Draw(ID2D1DeviceContext* dc, const Theme& theme, float s) override;
+    CursorKind CursorAt(D2D1_POINT_2F pt) const override;
+    bool OnMouseMove(D2D1_POINT_2F pt) override;
+    bool OnMouseDown(D2D1_POINT_2F pt) override;
+    bool OnMouseUp(D2D1_POINT_2F pt) override;
+    bool QueryTooltip(std::wstring* text, D2D1_POINT_2F* anchor) const override;
+protected:
+    void Press(D2D1_POINT_2F pt) override;
+private:
+    bool over_from_ = false;  // the pointer is on the segment, enabled or not
+};
+
+// Apps' recordings in the overlay header, one pill each: a dot, the app's name, its time, a
+// folder button that shows its exe in Explorer (none without one) and Stop. Pills that don't fit
+// between `left` and `right` fold into a "+N" with their names as its tooltip.
+class RecordingPillsControl : public Widget {
+public:
+    struct Entry {
+        uint64_t     id = 0;
+        std::wstring name, exe, time;
+    };
+    std::function<void(const Entry&)> on_stop, on_find;
+
+    void SetEntries(std::vector<Entry> entries);
+    const std::vector<Entry>& Entries() const { return entries_; }
+    // Places the pills left to right from `left`, centred on `cy`, ending before `right`.
+    void Place(float left, float right, float cy, const Theme& theme, float s);
+    void Draw(ID2D1DeviceContext* dc, const Theme& theme, float s) override;
+    bool HitTest(D2D1_POINT_2F pt) const override;
+    CursorKind CursorAt(D2D1_POINT_2F pt) const override;
+    bool OnMouseMove(D2D1_POINT_2F pt) override;
+    bool OnMouseDown(D2D1_POINT_2F pt) override;
+    bool OnMouseUp(D2D1_POINT_2F pt) override;
+    bool QueryTooltip(std::wstring* text, D2D1_POINT_2F* anchor) const override;
+
+private:
+    struct Pill {
+        D2D1_RECT_F box{};
+        float name_w = 0;  // pixels, trimmed to the cap
+        IconButtonControl find, stop;
+    };
+    std::vector<Entry> entries_;
+    std::vector<std::unique_ptr<Pill>> pills_;  // one per entry; only the first `shown_` are placed
+    size_t shown_ = 0;
+    D2D1_RECT_F more_{};  // "+N", when some didn't fit
+    bool more_hovered_ = false;
+};
+
 // A toast (ombra-ui --toast): the result of a save or a buffer switch, opaque so the game doesn't
 // bleed through. The icon's disc carries the tone;
 // the card and title stay neutral. Not interactive: the toast window is click-through.

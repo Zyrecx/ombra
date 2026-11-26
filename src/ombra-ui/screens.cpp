@@ -300,6 +300,14 @@ bool NativeWindowBlocked(const std::wstring& what) {
     return true;
 }
 
+void ShowFileInExplorer(const std::wstring& path) {
+    if (NativeWindowBlocked(L"Explorer selecting " + path)) return;
+    if (PIDLIST_ABSOLUTE pidl = ILCreateFromPathW(path.c_str())) {
+        SHOpenFolderAndSelectItems(pidl, 0, nullptr, 0);
+        ILFree(pidl);
+    }
+}
+
 bool FieldFormFor(const std::string& key, FieldForm* form) {
     for (const auto& e : kFieldForms) {
         if (key == e.key) { *form = e.form; return true; }
@@ -447,7 +455,7 @@ std::vector<FieldSpec> ParseSchema(const ombra::JsonValue& schema_obj) {
 
 // =================================================================================================
 // HomeScreen -- 3 tiles (Instant Replay with its on/off switch, Record, Clips), the save hint and a
-// live stats line. Record is inert until manual record mode exists; its placeholder fills the row.
+// live stats line.
 // Screenshot has no tile; its hotkey keeps working unchanged (main.cpp).
 // =================================================================================================
 
@@ -496,12 +504,14 @@ HomeScreen::HomeScreen(ScreenHost* host) : host_(host) {
 
     output_folder_str_ = ombra::ResolveOutputRoot(ombra::Config{}.output_root);
 
-    // Record: a placeholder with no engine support yet. Disabled, so it takes no input at all.
-    record_card_.title = L"Record";
-    record_card_.detail = L"Coming soon";
-    record_card_.icon = IconType::Record;
-    record_card_.enabled = false;
-    record_card_.reserve_foot = true;  // titles in line with Instant Replay's
+    // Record: the user's own recording. A click starts or stops it; the foot picks from when.
+    record_card_.on_click = [this] { OnRecordClick(); };
+    record_card_.from.on_change = [this](int i) {
+        record_from_ = i;
+        RefreshRecordTile();
+        if (host_) host_->RequestRepaint();
+    };
+    RefreshRecordTile();
 
     // Clips: the library, preview and trim (ClipsScreen). Its own "Open folder" reaches Explorer.
     clips_card_.title = L"Clips";
@@ -513,6 +523,102 @@ HomeScreen::HomeScreen(ScreenHost* host) : host_(host) {
     };
 }
 
+namespace {
+// Under this much room left, the Record tile says so in the warning colour.
+constexpr double kLowSpaceSeconds = 10 * 60;
+// How far back the Record tile's "N s ago" starts, at most.
+constexpr int kRecordBackSeconds = 30;
+
+std::wstring SpaceLeftText(double seconds) {
+    if (seconds < 60) return L"Under a minute of space left";
+    const long long minutes = static_cast<long long>(seconds / 60), hours = minutes / 60;
+    if (hours >= 100) return L"Over 99 h of space left";
+    if (hours == 0) return std::to_wstring(minutes) + L" min of space left";
+    return std::to_wstring(hours) + L" h " + std::to_wstring(minutes % 60) + L" min of space left";
+}
+}  // namespace
+
+void HomeScreen::RefreshRecordTile() {
+    RecordTileControl& t = record_card_;
+    t.recording = my_recording_;
+    t.detail_warn = false;
+    if (my_recording_) {
+        t.title = FormatElapsed(my_elapsed_.Seconds(static_cast<double>(GetTickCount64())));
+        if (my_seconds_left_ < 0) {
+            t.detail = L"Checking the space left";
+        } else {
+            t.detail = SpaceLeftText(my_seconds_left_);
+            t.detail_warn = my_seconds_left_ < kLowSpaceSeconds;
+        }
+        return;
+    }
+    t.title = L"Record";
+    // "N s ago" reaches only into what Instant Replay holds: none while it is off or waiting, at
+    // most buffer.seconds.
+    const int back = buffer_seconds_ > 0 ? (std::min)(kRecordBackSeconds, buffer_seconds_) : kRecordBackSeconds;
+    t.from.options = {L"Now", std::to_wstring(back) + L" s ago"};
+    t.from_compact = {L"Now", L"\x2212" + std::to_wstring(back) + L" s"};
+    const bool holding = !engine_unavailable_ && is_armed_ && waiting_text_.empty();
+    t.from.enabled = holding;
+    t.from.tooltip = holding ? L"" : !is_armed_ ? L"Instant Replay is off, so recording starts now"
+                                                 : L"Nothing held yet, so recording starts now";
+    t.from.selected = holding ? record_from_ : 0;
+    t.detail = t.from.selected == 1 ? L"Starts " + std::to_wstring(back) + L" s back" : L"Click to start";
+}
+
+void HomeScreen::OnRecordClick() {
+    if (!host_ || record_request_pending_) return;
+    const bool stop = my_recording_;
+    ombra::JsonValue req = ombra::JsonValue::MakeObject();
+    req.Set("type", ombra::JsonValue::MakeStr(stop ? "my_record_stop" : "my_record_start"));
+    if (!stop && record_card_.from.enabled && record_card_.from.selected == 1) {
+        const int back = buffer_seconds_ > 0 ? (std::min)(kRecordBackSeconds, buffer_seconds_) : kRecordBackSeconds;
+        req.Set("before", ombra::JsonValue::MakeNum(back));
+    }
+    record_request_pending_ = true;
+    host_->RequestAsync(std::move(req), 3000, [this, stop](std::optional<ombra::JsonValue> resp) {
+        record_request_pending_ = false;
+        const auto* ok = resp && resp->type == ombra::JsonValue::Type::Object ? resp->Find("ok") : nullptr;
+        if (ok && ok->type == ombra::JsonValue::Type::Bool && ok->b) {
+            // Shown at once; the next status confirms it, and none asked before now undoes it.
+            record_changed_ms_ = GetTickCount64();
+            my_recording_ = !stop;
+            if (!stop) {
+                my_elapsed_ = {};
+                my_elapsed_.Report(0, static_cast<double>(record_changed_ms_));
+                my_seconds_left_ = -1;
+            }
+        } else if (host_) {
+            const auto* err = ok ? resp->Find("error") : nullptr;
+            host_->ShowModal(stop ? L"Recording didn't stop" : L"Recording didn't start",
+                             err && err->type == ombra::JsonValue::Type::String ? Utf8ToWide(err->str)
+                                                                               : L"The engine didn't answer.",
+                             false, nullptr, nullptr, ModalButtons{L"OK", L""});
+        }
+        RefreshRecordTile();
+        if (host_) {
+            host_->PollStatusNow();
+            host_->RequestRepaint();
+        }
+    });
+}
+
+void HomeScreen::UpdateRecording(const ombra::JsonValue& status_resp, uint64_t sent_ms) {
+    if (sent_ms < record_changed_ms_) return;  // asked before the last click took effect
+    const auto* mine = status_resp.Find("my_recording");
+    my_recording_ = mine && mine->type == ombra::JsonValue::Type::Object;
+    if (my_recording_) {
+        const auto* secs = mine->Find("seconds");
+        const auto* left = mine->Find("seconds_left");
+        my_elapsed_.Report(secs && secs->type == ombra::JsonValue::Type::Number ? secs->num : 0,
+                           static_cast<double>(GetTickCount64()));
+        my_seconds_left_ = left && left->type == ombra::JsonValue::Type::Number ? left->num : -1;
+    } else {
+        my_elapsed_ = {};
+    }
+    RefreshRecordTile();
+}
+
 void HomeScreen::RefreshReplayDetail() {
     // Off says so: the state line used to keep "ACTIVE" with the switch off.
     if (engine_unavailable_) replay_card_.detail = L"Not responding";
@@ -521,6 +627,7 @@ void HomeScreen::RefreshReplayDetail() {
     else replay_card_.detail = active_text_;  // empty until a config says how long: never a stale line
     const bool keeping = !engine_unavailable_ && is_armed_ && waiting_text_.empty() && !active_text_.empty();
     replay_card_.live_line = keeping ? RecordingSubject() : std::wstring{};
+    RefreshRecordTile();  // its "N s ago" follows the same state
 }
 
 // What the engine is keeping right now, in a few words. Follows the running config, not staged edits.
@@ -538,6 +645,8 @@ std::wstring HomeScreen::RecordingSubject() const {
 void HomeScreen::MarkEngineUnavailable() {
     engine_unavailable_ = true;
     live_stats_str_.clear();
+    my_recording_ = false;  // nothing to stop; the next status says otherwise
+    my_elapsed_ = {};
     RefreshReplayDetail();
 }
 
@@ -578,17 +687,22 @@ void HomeScreen::UpdateState(const ombra::JsonValue* status_resp, const ombra::J
             swprintf(buf, std::size(buf), L"Buffer: %.0f%%  •  RAM: %.0f MB  •  Encoder: %ls", v->num, private_mb, enc_info.c_str());
             live_stats_str_ = buf;
         }
+        UpdateRecording(*status_resp, 0);
     }
 
     if (config_resp) {
         if (const auto* cfg = config_resp->Find("config"); cfg && cfg->type == ombra::JsonValue::Type::Object) {
             if (const auto* v = cfg->Find("buffer.seconds"); v && v->type == ombra::JsonValue::Type::Number) {
+                buffer_seconds_ = static_cast<int>(v->num);
                 const std::wstring secs = std::to_wstring(static_cast<int>(v->num));
                 active_text_ = L"Last " + secs + L" s ready";
                 hint_suffix_ = L"to save the last " + secs + L" seconds";
             }
             if (const auto* v = cfg->Find("hotkeys.save_replay"); v && v->type == ombra::JsonValue::Type::String) {
                 hint_keys_ = Utf8ToWide(v->str);
+            }
+            if (const auto* v = cfg->Find("hotkeys.toggle_record"); v && v->type == ombra::JsonValue::Type::String) {
+                record_card_.stop_keys = Utf8ToWide(v->str);
             }
             if (const auto* v = cfg->Find("hotkeys.toggle_buffer"); v && v->type == ombra::JsonValue::Type::String) {
                 replay_card_.foot_keys = Utf8ToWide(v->str);
@@ -665,6 +779,7 @@ void HomeScreen::Draw(ID2D1DeviceContext* dc, const Theme& theme, float dpi_scal
     const paint::Paint p{dc, theme, s};
     const ColorRoles& c = theme.color;
     replay_card_.Draw(dc, theme, s);
+    if (my_recording_) RefreshRecordTile();  // the time, counted on between status replies
     record_card_.Draw(dc, theme, s);
     clips_card_.Draw(dc, theme, s);
 
@@ -3433,12 +3548,7 @@ void SettingsScreen::ExportLogs() {
             if (r.ok) {
                 // Explorer takes the foreground; the overlay goes first, as Open folder does.
                 if (host_) host_->CloseOverlay();
-                if (!NativeWindowBlocked(L"Explorer selecting " + path)) {
-                    if (PIDLIST_ABSOLUTE pidl = ILCreateFromPathW(path.c_str())) {
-                        SHOpenFolderAndSelectItems(pidl, 0, nullptr, 0);
-                        ILFree(pidl);
-                    }
-                }
+                ShowFileInExplorer(path);
                 return;
             }
             RebuildGroupRows(current_dpi_scale_);

@@ -175,9 +175,11 @@ private:
     ThemeMode mode_ = ThemeMode::Dark;
 };
 
-// A hover label above `anchor` (a control's QueryTooltip): Caption text on the raised surface,
-// wrapping past 260 DIP. OverlayHost draws it last, above everything; no delay of its own.
-void DrawTooltip(ID2D1DeviceContext* dc, const Theme& theme, float s, const std::wstring& text, D2D1_POINT_2F anchor);
+// A hover label above `anchor` (a control's QueryTooltip), or under it with `below` (the header,
+// which has no room above): Caption text on the raised surface, wrapping past 260 DIP.
+// OverlayHost draws it last, above everything; no delay of its own.
+void DrawTooltip(ID2D1DeviceContext* dc, const Theme& theme, float s, const std::wstring& text, D2D1_POINT_2F anchor,
+                 bool below = false);
 
 // One of an open-ended set of short labels (Clips' game filter): pills in a row, one chosen.
 // Unlike a segmented control the set grows with the user's data, so each pill stands alone. The

@@ -288,6 +288,16 @@ OverlayHost::OverlayHost() {
 
     close_btn_.icon = IconType::Close;
     close_btn_.on_click = [this]() { CloseOverlay(); };
+
+    rec_pills_.on_stop = [this](const RecordingPillsControl::Entry& e) { ConfirmStopAppRecording(e); };
+    rec_pills_.on_find = [this](const RecordingPillsControl::Entry& e) {
+        // After the click returns: closing clears the pills, button included. Explorer takes the
+        // foreground, so the overlay closes first.
+        UiPoster()([this, exe = e.exe] {
+            CloseOverlay();
+            ShowFileInExplorer(exe);
+        });
+    };
 }
 
 OverlayHost::~OverlayHost() {
@@ -656,6 +666,86 @@ void OverlayHost::ActivateScreen(ActiveScreen screen) {
         else if (active_screen_ == ActiveScreen::Settings) settings_screen_->StopMeters();
     }
     active_screen_ = screen;
+}
+
+void OverlayHost::PollStatusNow() {
+    // One get_status at a time; the timer only runs while the overlay is open.
+    if (!client_ || !hwnd_ || status_poll_in_flight_ || status_poll_frozen_) return;
+    status_poll_in_flight_ = true;
+    const uint64_t sent = GetTickCount64();
+    ombra::JsonValue req = ombra::JsonValue::MakeObject();
+    req.Set("type", ombra::JsonValue::MakeStr("get_status"));
+    RequestAsync(std::move(req), 1000, [this, sent](std::optional<ombra::JsonValue> resp) {
+        status_poll_in_flight_ = false;
+        if (status_poll_frozen_) return;
+        if (resp) {
+            ApplyStatus(*resp, sent);
+        } else {
+            rec_pills_.SetEntries({});  // no engine, no recordings to stop
+            pill_elapsed_.clear();
+            if (home_screen_) home_screen_->MarkEngineUnavailable();
+        }
+        RequestRepaint();
+    });
+}
+
+void OverlayHost::ApplyStatusForTest(const ombra::JsonValue& status) {
+    status_poll_frozen_ = true;
+    ApplyStatus(status, GetTickCount64());
+}
+
+void OverlayHost::ApplyStatus(const ombra::JsonValue& status, uint64_t sent_ms) {
+    if (home_screen_) home_screen_->UpdateRecording(status, sent_ms);
+    std::vector<RecordingPillsControl::Entry> entries;
+    decltype(pill_elapsed_) elapsed;
+    const double now = static_cast<double>(GetTickCount64());
+    if (const auto* apps = status.Find("app_recordings"); apps && apps->type == ombra::JsonValue::Type::Array) {
+        for (const auto& a : apps->arr) {
+            const auto* id = a.Find("recording");
+            if (!id || id->type != ombra::JsonValue::Type::Number) continue;
+            RecordingPillsControl::Entry e;
+            e.id = static_cast<uint64_t>(id->num);
+            if (const auto* v = a.Find("app"); v && v->type == ombra::JsonValue::Type::String) e.name = Utf8ToWideLocal(v->str);
+            if (const auto* v = a.Find("exe"); v && v->type == ombra::JsonValue::Type::String) e.exe = Utf8ToWideLocal(v->str);
+            const auto* secs = a.Find("seconds");
+            LiveElapsed live;
+            for (const auto& [pid, prev] : pill_elapsed_)
+                if (pid == e.id) live = prev;
+            live.Report(secs && secs->type == ombra::JsonValue::Type::Number ? secs->num : 0, now);
+            elapsed.emplace_back(e.id, live);
+            entries.push_back(std::move(e));
+        }
+    }
+    pill_elapsed_ = std::move(elapsed);
+    rec_pills_.SetEntries(std::move(entries));
+    RefreshPillTimes();
+}
+
+void OverlayHost::RefreshPillTimes() {
+    // Entries are replaced only by ApplyStatus, which keeps pill_elapsed_ in the same order.
+    std::vector<RecordingPillsControl::Entry> entries = rec_pills_.Entries();
+    const double now = static_cast<double>(GetTickCount64());
+    bool changed = false;
+    for (size_t i = 0; i < entries.size() && i < pill_elapsed_.size(); ++i) {
+        std::wstring t = FormatElapsed(pill_elapsed_[i].second.Seconds(now));
+        if (t != entries[i].time) { entries[i].time = std::move(t); changed = true; }
+    }
+    if (changed) rec_pills_.SetEntries(std::move(entries));
+}
+
+void OverlayHost::ConfirmStopAppRecording(const RecordingPillsControl::Entry& e) {
+    const uint64_t id = e.id;
+    ShowModal(L"Stop " + e.name + L"'s recording?", e.name + L" started it and is told you stopped it.", true,
+              [this, id] {
+                  ombra::JsonValue req = ombra::JsonValue::MakeObject();
+                  req.Set("type", ombra::JsonValue::MakeStr("stop_app_recording"));
+                  req.Set("recording", ombra::JsonValue::MakeNum(static_cast<double>(id)));
+                  RequestAsync(std::move(req), 3000, [this](std::optional<ombra::JsonValue>) {
+                      // Already ended or not: the next status shows which.
+                      PollStatusNow();
+                  });
+              },
+              nullptr, ModalButtons{L"Stop", L"Keep recording"});
 }
 
 void OverlayHost::SwitchScreen(ActiveScreen screen) {
@@ -1313,8 +1403,11 @@ void OverlayHost::UpdateCursor(D2D1_POINT_2F pt) {
     } else if (active_popup_ && active_popup_->visible) {
         c = active_popup_->CursorAt(pt);
     } else if (close_btn_.CursorAt(pt) != CursorKind::Arrow ||
-               NavButton().CursorAt(pt) != CursorKind::Arrow) {
+               NavButton().CursorAt(pt) != CursorKind::Arrow ||
+               rec_pills_.CursorAt(pt) != CursorKind::Arrow) {
         c = CursorKind::Hand;
+    } else if (rec_pills_.HitTest(pt)) {
+        c = CursorKind::Arrow;
     } else if (active_screen_ == ActiveScreen::Home && home_screen_) {
         c = home_screen_->CursorAt(pt);
     } else if (active_screen_ == ActiveScreen::Settings && settings_screen_) {
@@ -1543,6 +1636,17 @@ void OverlayHost::DrawFloatingHeader(float view_w, float view_h) {
     }
     close_btn_.bounds = D2D1::RectF(bx, by, bx + btn_sz, by + btn_sz);
     close_btn_.Draw(d2d_context_.Get(), theme_, dpi_scale_);
+
+    // Apps' recordings, between the wordmark and the nav pill.
+    if (!rec_pills_.Entries().empty()) {
+        RefreshPillTimes();
+        const float gap = z.space_lg() * dpi_scale_;
+        float left = logo_cx + logo_sz * 0.5f + z.space_md() * dpi_scale_;
+        if (IDWriteTextFormat* wordmark = theme_.WordmarkFont())
+            left += theme_.MeasureText(wordmark, kWordmark).width;
+        rec_pills_.Place(left + gap, pill_rect.left - gap, logo_cy, theme_, dpi_scale_);
+        rec_pills_.Draw(d2d_context_.Get(), theme_, dpi_scale_);
+    }
 }
 
 void OverlayHost::RenderFrame() {
@@ -1582,6 +1686,10 @@ void OverlayHost::RenderFrame() {
 
         home_screen_->Layout(place.content, dpi_scale_);
         home_screen_->Draw(d2d_context_.Get(), theme_, dpi_scale_);
+        std::wstring tooltip_text;
+        D2D1_POINT_2F tooltip_pos{};
+        if (home_screen_->QueryHoverTooltip(&tooltip_text, &tooltip_pos))
+            DrawTooltip(d2d_context_.Get(), theme_, dpi_scale_, tooltip_text, tooltip_pos);
     } else if (active_screen_ == ActiveScreen::Settings && settings_screen_) {
         // Rail + content card sit directly below the floating header -- OverlayHost
         // only computes the combined row's bounds, same role it plays for Home's tile row above.
@@ -1667,6 +1775,14 @@ void OverlayHost::RenderFrame() {
         if (setup_screen_->QueryHoverTooltip(&tooltip_text, &tooltip_pos)) {
             DrawTooltip(d2d_context_.Get(), theme_, dpi_scale_, tooltip_text, tooltip_pos);
         }
+    }
+
+    // The header pills' tooltip, over the screen under it.
+    {
+        std::wstring tip;
+        D2D1_POINT_2F at{};
+        const bool covered = (active_modal_ && active_modal_->visible) || (active_popup_ && active_popup_->visible);
+        if (!covered && rec_pills_.QueryTooltip(&tip, &at)) DrawTooltip(d2d_context_.Get(), theme_, dpi_scale_, tip, at, true);
     }
 
     if (active_modal_ && active_modal_->visible) {
@@ -1867,6 +1983,7 @@ void OverlayHost::ApplyEngineState(const std::optional<ombra::JsonValue>& schema
     home_screen_->UpdateState(status_resp ? &*status_resp : nullptr,
                               config_resp ? &*config_resp : nullptr);
     if (!status_resp) home_screen_->MarkEngineUnavailable();
+    else ApplyStatus(*status_resp, 0);  // the header pills, before the first poll
 
     // engine.autotune's result is latched (main.cpp's AutotuneContext) until acked, so this
     // fires once per completed run no matter how many times the overlay is opened/closed while
@@ -1962,6 +2079,11 @@ void OverlayHost::Hide() {
     if (settings_screen_) settings_screen_->StopMeters();
     if (setup_screen_) setup_screen_->CancelShortcutRecording();
     if (clips_screen_) clips_screen_->Leave();
+    // Replies still in flight are dropped with the window; the next open starts clean.
+    status_poll_in_flight_ = false;
+    rec_pills_.SetEntries({});
+    pill_elapsed_.clear();
+    if (home_screen_) home_screen_->OnOverlayHidden();
     if (hwnd_) {
         ombra::Log::Info("OverlayHost: dismissing and destroying overlay window");
         CleanupWindowResources();
@@ -2149,6 +2271,9 @@ LRESULT OverlayHost::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             bool rep = gear_btn_.OnMouseMove(pt);
             rep |= back_btn_.OnMouseMove(pt);
             rep |= close_btn_.OnMouseMove(pt);
+            // Under a modal or an open flyout the pills don't light.
+            const bool covered = (active_modal_ && active_modal_->visible) || (active_popup_ && active_popup_->visible);
+            rep |= rec_pills_.OnMouseMove(covered ? D2D1::Point2F(-1e6f, -1e6f) : pt);
             if (active_modal_ && active_modal_->visible) {
                 rep |= active_modal_->OnMouseMove(pt);
             } else if (active_popup_ && active_popup_->visible) {
@@ -2196,6 +2321,9 @@ LRESULT OverlayHost::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             } else if (NavButton().OnMouseDown(pt)) {
                 RenderFrame();
                 return 0;
+            } else if (rec_pills_.OnMouseDown(pt)) {
+                RenderFrame();
+                return 0;
             } else if (active_screen_ == ActiveScreen::Home && home_screen_) {
                 if (home_screen_->OnMouseDown(pt)) {
                     RenderFrame();
@@ -2228,6 +2356,13 @@ LRESULT OverlayHost::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const D2D1_POINT_2F pt = D2D1::Point2F(static_cast<float>(static_cast<short>(LOWORD(lp))),
                                                    static_cast<float>(static_cast<short>(HIWORD(lp))));
             for (IconButtonControl* b : {&gear_btn_, &back_btn_, &close_btn_}) b->OnMouseUp(pt);
+            // A pill's Stop opens its confirm here: that release isn't the modal's.
+            const bool had_modal = active_modal_ && active_modal_->visible;
+            rec_pills_.OnMouseUp(pt);
+            if (!had_modal && active_modal_ && active_modal_->visible) {
+                RenderFrame();
+                break;
+            }
             if (active_modal_ && active_modal_->visible) {
                 active_modal_->OnMouseUp(pt);
                 RenderFrame();
@@ -2289,6 +2424,7 @@ LRESULT OverlayHost::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
 
         case WM_TIMER:
+            if (wp == kStatusTimerId) PollStatusNow();
             if (wp == kStatusTimerId && active_screen_ == ActiveScreen::Settings && settings_screen_)
                 settings_screen_->OnStatusTick();
             // Paints only when a meter lights or drops a block: silence costs no frames.

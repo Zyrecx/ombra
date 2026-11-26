@@ -389,6 +389,14 @@ std::wstring FormatWhen(const FILETIME& written) {
     return buf;
 }
 
+std::wstring FormatElapsed(double seconds) {
+    const long long t = seconds > 0 ? static_cast<long long>(seconds) : 0;
+    wchar_t buf[32];
+    if (t >= 3600) swprintf(buf, std::size(buf), L"%lld:%02lld:%02lld", t / 3600, t / 60 % 60, t % 60);
+    else swprintf(buf, std::size(buf), L"%lld:%02lld", t / 60, t % 60);
+    return buf;
+}
+
 std::wstring FormatWhen(int64_t unix_seconds) {
     const ULONGLONG ticks = static_cast<ULONGLONG>(unix_seconds) * 10000000ull + 116444736000000000ull;
     FILETIME ft{static_cast<DWORD>(ticks), static_cast<DWORD>(ticks >> 32)};

@@ -77,6 +77,10 @@ public:
     void RenderForDriver() { RenderFrame(); }
     void ForceRenderResultForTest(HRESULT hr) { forced_render_hr_ = hr; }
     bool MousePressedForTest() const { return mouse_pressed_; }
+    // Driver fixtures: applies a get_status reply as the poll would, and stops the poll so the
+    // fixture stays.
+    void ApplyStatusForTest(const ombra::JsonValue& status);
+    const RecordingPillsControl& RecordingPillsForTest() const { return rec_pills_; }
     bool HeadlessOpen() const { return hwnd_ != nullptr; }  // false once Esc/close hid it
     ActiveScreen ActiveScreenForDriver() const { return active_screen_; }
     SetupScreen* GetSetupScreen() { return setup_screen_.get(); }
@@ -89,6 +93,7 @@ public:
     void RequestRepaint() override;
     HWND OwnerWindow() const override { return hwnd_; }
     void SwitchScreen(ActiveScreen screen) override;
+    void PollStatusNow() override;
     void ShowModal(const std::wstring& title, const std::wstring& msg,
                    bool is_danger, std::function<void()> on_confirm,
                    std::function<void()> on_cancel = nullptr,
@@ -316,6 +321,16 @@ private:
     IconButtonControl gear_btn_;
     IconButtonControl back_btn_;
     IconButtonControl close_btn_;
+
+    // Apps' recordings, as pills in the header on every screen (get_status.app_recordings, asked
+    // once a second while the overlay is open). Times count on locally between replies.
+    void ApplyStatus(const ombra::JsonValue& status, uint64_t sent_ms);
+    void RefreshPillTimes();
+    void ConfirmStopAppRecording(const RecordingPillsControl::Entry& e);
+    RecordingPillsControl rec_pills_;
+    std::vector<std::pair<uint64_t, LiveElapsed>> pill_elapsed_;  // by recording id
+    bool status_poll_in_flight_ = false;
+    bool status_poll_frozen_ = false;  // ApplyStatusForTest
 
     ComPtr<ID3D11Device>        d3d_device_;
     ComPtr<ID3D11DeviceContext> d3d_context_;

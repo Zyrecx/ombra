@@ -48,9 +48,10 @@ enum class IconType {
     VolumeOff,
     Scissors,
     Power,     // Setup: Start with Windows
-    Bug        // Setup: the Reports step
+    Bug,       // Setup: the Reports step
+    Stop       // a recording's stop: an app's, in the overlay header
 };
-constexpr int kIconTypeCount = static_cast<int>(IconType::Bug) + 1;
+constexpr int kIconTypeCount = static_cast<int>(IconType::Stop) + 1;
 
 // Mirrors ombra::ApplyTier (config.h) without pulling the engine header into the UI layer --
 // screens.cpp maps the schema's "apply" string onto this.
@@ -72,6 +73,19 @@ std::wstring FormatMemory(double bytes);
 // "Today 23:29", "Yesterday 21:17", "Oct 12 21:17", "Oct 12 2025" for another year; local time.
 std::wstring FormatWhen(const FILETIME& written);
 std::wstring FormatWhen(int64_t unix_seconds);
+// A recording's running time: "0:40", "12:34", "1:02:15".
+std::wstring FormatElapsed(double seconds);
+
+// A running time the engine reports about once a second, counted on locally between reports so
+// it ticks evenly; a report moves it only when it drifts past 1.5 s (a stall, a late reply).
+struct LiveElapsed {
+    double zero_ms = -1;  // GetTickCount64 when the time was 0; -1 before the first report
+    void Report(double seconds, double now_ms) {
+        const double zero = now_ms - seconds * 1000.0;
+        if (zero_ms < 0 || zero - zero_ms > 1500.0 || zero_ms - zero > 1500.0) zero_ms = zero;
+    }
+    double Seconds(double now_ms) const { return zero_ms < 0 || now_ms < zero_ms ? 0.0 : (now_ms - zero_ms) / 1000.0; }
+};
 
 
 // What the pointer should look like over a spot: a hand over anything a click acts on, a move

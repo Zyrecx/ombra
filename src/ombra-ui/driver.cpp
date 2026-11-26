@@ -38,6 +38,8 @@
 //   fixture games: 14 detected games (two switched off), two that looked like one, three added by hand
 //   fixture home [on|off|waiting] [SECONDS] [game:NAME|window:NAME|displays:N]: Home with an engine's
 //     status and config (hotkeys, folder, stats), recording that subject ("game:A B" for spaces)
+//   fixture rec MINE|- [LEFT|-] [APPS] [KEYS]: after `fixture home`, the user's recording MINE s in
+//     with LEFT s of space left, APPS (0-5) sample apps' recordings as header pills, KEYS the record hotkey
 //   fixture run GAME|"GAME"|- TARGET MODE [off]: the status Capture > Video reads (- = no game running)
 //   fixture export PCT: the open clip shows a frame-exact save at PCT%
 //   fixture sent [empty]: nine made-up records of what was sent (every kind; failed, unconfirmed)
@@ -426,6 +428,7 @@ private:
         if (c == "fixture") {
             if (opt_.engine) return Fail("fixtures require no engine");
             if (arg(1) == "home") return HomeFixture(arg(2), arg(3), Unquote(arg(4)));
+            if (arg(1) == "rec") return RecFixture(arg(2), arg(3), arg(4), Unquote(arg(5)));
             if (arg(1) == "run") return RunFixture(Unquote(arg(2)), arg(3), arg(4), arg(5));
             if (arg(1) == "export") {  // fixture export PCT: the open clip shows a frame-exact save at PCT
                 ClipsScreen* cs = host_.GetClipsScreen();
@@ -459,7 +462,7 @@ private:
             if (arg(1) != "settings" && arg(1) != "windows" && arg(1) != "audio" && arg(1) != "games" &&
                 arg(1) != "update" && arg(1) != "monitors")
                 return Fail("fixture: settings | windows [SAVED] | audio [perapp] | monitors [plain] | meters | games"
-                            " | home [on|off|waiting] | setup | update STATE [KIND] | sent [empty] | ask");
+                            " | home [on|off|waiting] | rec MINE [LEFT] [APPS] [KEYS] | setup | update STATE [KIND] | sent [empty] | ask");
             host_.SwitchScreen(ActiveScreen::Settings);
             auto* s = host_.GetSettingsScreen();
             if (!s) return Fail("no settings screen");
@@ -731,6 +734,51 @@ private:
         config.Set("config", std::move(cfg));
         host_.SwitchScreen(ActiveScreen::Home);
         home->UpdateState(&status, &config);
+        Settle();
+    }
+
+    // Recordings on top of `fixture home`: the user's own (MINE seconds in, LEFT seconds of space
+    // left, - for none / not checked yet), APPS apps' recordings from a fixed sample (one with no
+    // exe, one long name), and KEYS as the record hotkey. The status poll stops so they stay.
+    void RecFixture(const std::string& mine, const std::string& left, const std::string& apps, const std::string& keys) {
+        auto* home = host_.GetHomeScreen();
+        if (!home) return Fail("no home screen");
+        using ombra::JsonValue;
+        JsonValue status = JsonValue::MakeObject();
+        if (!mine.empty() && mine != "-") {
+            JsonValue m = JsonValue::MakeObject();
+            m.Set("recording", JsonValue::MakeNum(1));
+            m.Set("seconds", JsonValue::MakeNum(std::atof(mine.c_str())));
+            m.Set("seconds_left", left.empty() || left == "-" ? JsonValue{} : JsonValue::MakeNum(std::atof(left.c_str())));
+            status.Set("my_recording", std::move(m));
+        }
+        struct Sample { const char* app; const char* exe; double seconds; };
+        static const Sample kSamples[] = {
+            {"LeagueTool", "C:\\Program Files\\LeagueTool\\LeagueTool.exe", 754},
+            {"Command line", nullptr, 42},
+            {"Tournament Highlights Recorder Pro Edition", "D:\\Apps\\THR\\thr.exe", 3725},
+            {"Coach", "C:\\Users\\Public\\Coach\\coach.exe", 8},
+            {"Streamer Tools", "C:\\Tools\\st.exe", 91},
+        };
+        JsonValue list = JsonValue::MakeArray();
+        const int n = (std::min)(std::atoi(apps.c_str()), static_cast<int>(std::size(kSamples)));
+        for (int i = 0; i < n; ++i) {
+            JsonValue a = JsonValue::MakeObject();
+            a.Set("recording", JsonValue::MakeNum(10 + i));
+            a.Set("app", JsonValue::MakeStr(kSamples[i].app));
+            a.Set("exe", kSamples[i].exe ? JsonValue::MakeStr(kSamples[i].exe) : JsonValue{});
+            a.Set("seconds", JsonValue::MakeNum(kSamples[i].seconds));
+            list.arr.push_back(std::move(a));
+        }
+        status.Set("app_recordings", std::move(list));
+        if (!keys.empty()) {
+            JsonValue cfg = JsonValue::MakeObject();
+            cfg.Set("hotkeys.toggle_record", JsonValue::MakeStr(keys));
+            JsonValue config = JsonValue::MakeObject();
+            config.Set("config", std::move(cfg));
+            home->UpdateState(nullptr, &config);
+        }
+        host_.ApplyStatusForTest(status);
         Settle();
     }
 
