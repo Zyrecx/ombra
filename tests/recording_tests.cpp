@@ -10,6 +10,7 @@
 #include "support/test_env.h"
 
 #include "ombra/audio_tracks.h"
+#include "ombra/clip.h"
 #include "ombra/clip_file.h"
 #include "ombra/config.h"
 #include "ombra/controller.h"
@@ -396,6 +397,66 @@ TEST_CASE("recording: a buffer reallocation is refused until it stops, and one i
     CHECK_FALSE(rig.Open(3.0, 1.0, &why));
     CHECK(why == SaveOutcome::kBusy);
     CHECK_FALSE(Listed(rig.ctx));
+}
+
+TEST_CASE("replay reach: a recording's footage with the switch off is its own; switching on floors saves") {
+    RecordRig rig(L"reach");
+    rig.ctx.output_root = NarrowUtf8(DirOf(rig.ctx.out_path));
+    const int64_t long_age = RingMaxAgeQpc(rig.ctx.buffer_seconds);
+    rig.ring.SetMaxAge(long_age);
+    rig.FeedTo(300);  // 0..5 s with the switch on
+    std::vector<SaveContext*> ctxs{&rig.ctx};
+    ReplayReachState state;
+
+    // A clip open when the switch goes off ends there, and with a recording the ring keeps little.
+    ClipRequest clip;
+    clip.event_qpc     = rig.At(4);
+    clip.after_seconds = 20;
+    SaveOutcome why = SaveOutcome::kFailed;
+    std::shared_ptr<ClipSession> open;
+    {
+        StdoutSilencer quiet;
+        open = ClipSession::Open(&rig.ctx, clip, nullptr, &why);
+    }
+    REQUIRE(open);
+    ApplyReplayReach(ctxs, state, false, true, rig.At(5));
+    CHECK_FALSE(open->Extend(rig.At(10)));  // stopped
+    open.reset();
+    clip.event_qpc = rig.At(5.5);
+    {
+        StdoutSilencer quiet;
+        CHECK_FALSE(ClipSession::Open(&rig.ctx, clip, nullptr, &why));  // nor does one open meanwhile
+    }
+    CHECK(why == SaveOutcome::kNothingNew);
+    CHECK(rig.ring.MaxAge() == RingMaxAgeQpc(kRecordOnlyRingSeconds));
+    CHECK(rig.ctx.replay_off_qpc.load() == rig.At(5));
+    // The recording stops with the switch still off: the ceiling stays where the switch went off.
+    rig.FeedTo(600);  // 5..10 s, the recording's
+    ApplyReplayReach(ctxs, state, false, false, rig.At(10));
+    CHECK(rig.ctx.replay_off_qpc.load() == rig.At(5));
+    CHECK(rig.ring.MaxAge() == long_age);
+
+    // On again: saves start after the recording's footage, not buffer.seconds back.
+    ApplyReplayReach(ctxs, state, true, false, rig.At(10));
+    CHECK(rig.ctx.replay_off_qpc.load() == 0);
+    CHECK(rig.ctx.replay_floor_qpc.load() == rig.At(10));
+    rig.FeedTo(900);  // 10..15 s
+    std::wstring path;
+    double seconds = 0;
+    {
+        StdoutSilencer quiet;
+        rig.ctx.save_in_flight.store(true);
+        REQUIRE(DoSave(&rig.ctx, rig.At(15), nullptr, &path, nullptr, &seconds) == SaveOutcome::kSaved);
+    }
+    CHECK(seconds <= 5.0 + 1e-6);
+    CHECK(seconds >= 4.0);  // from the first keyframe at or after the floor
+    DeleteFileW(path.c_str());
+
+    // Off and on with no recording between moves no floor.
+    ReplayReachState quiet_state;
+    ApplyReplayReach(ctxs, quiet_state, false, false, rig.At(16));
+    ApplyReplayReach(ctxs, quiet_state, true, false, rig.At(17));
+    CHECK(rig.ctx.replay_floor_qpc.load() == rig.At(10));
 }
 
 }  // namespace ombra::test

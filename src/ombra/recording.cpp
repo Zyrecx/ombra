@@ -1,6 +1,7 @@
 #include "ombra/recording.h"
 
 #include "ombra/audio_tracks.h"
+#include "ombra/clip.h"
 #include "ombra/crash_upload.h"
 #include "ombra/log.h"
 #include "ombra/marker.h"
@@ -44,6 +45,27 @@ std::wstring StemOf(const std::wstring& path) {
 }
 
 }  // namespace
+
+void ApplyReplayReach(const std::vector<SaveContext*>& contexts, ReplayReachState& state, bool replay_on,
+                      bool recording, int64_t now) {
+    if (!replay_on && recording) state.off_footage = true;
+    for (SaveContext* ctx : contexts) {
+        if (replay_on) {
+            // The floor before the ceiling goes: no save sees the switch's footage end lifted
+            // with the recording's still in reach.
+            if (state.off_footage) ctx->replay_floor_qpc.store(now, std::memory_order_release);
+            ctx->replay_off_qpc.store(0, std::memory_order_release);
+        } else {
+            int64_t none = 0;
+            ctx->replay_off_qpc.compare_exchange_strong(none, now, std::memory_order_acq_rel);
+            std::lock_guard<std::mutex> lock(ctx->clip_mutex);
+            for (ClipSession* s : ctx->open_clips) s->Stop();
+        }
+        if (ctx->ring)
+            ctx->ring->SetMaxAge(RingMaxAgeQpc(!replay_on && recording ? kRecordOnlyRingSeconds : ctx->buffer_seconds));
+    }
+    if (replay_on) state.off_footage = false;
+}
 
 const char* RecordEndName(RecordEnd end) {
     switch (end) {

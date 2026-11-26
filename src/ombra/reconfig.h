@@ -92,6 +92,12 @@ struct SaveContext {
     std::vector<RecordingSession*> open_recordings;
     bool                      clips_blocked = false;
 
+    // Instant Replay's reach (ApplyReplayReach, recording.h). A recording keeps capture armed with
+    // the switch off, and that footage is the recording's alone: saves and clips take nothing
+    // before replay_floor_qpc, and while the switch is off (replay_off_qpc, else 0) nothing after it.
+    std::atomic<int64_t>      replay_floor_qpc{0};
+    std::atomic<int64_t>      replay_off_qpc{0};
+
     std::mutex           last_save_mutex;
     std::wstring         last_save_path;
     int64_t              last_save_qpc = -1;

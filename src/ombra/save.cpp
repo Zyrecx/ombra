@@ -99,7 +99,10 @@ SaveOutcome DoSaveImpl(SaveContext* ctx, int64_t t_end, const std::wstring* grou
     const int64_t qpc_freq    = QpcFrequency();
     const int64_t t_start_min = t_end - static_cast<int64_t>(ctx->buffer_seconds * qpc_freq);
 
-    SavePin pin(ctx->ring->PinCovering(t_start_min, t_end, TruncateFloor::kRespect));
+    // Nothing before Instant Replay's floor (ApplyReplayReach): from the first keyframe after it.
+    const int64_t replay_floor = ctx->replay_floor_qpc.load(std::memory_order_acquire);
+    SavePin pin(replay_floor > t_start_min ? ctx->ring->Pin(replay_floor, t_end, TruncateFloor::kRespect)
+                                           : ctx->ring->PinCovering(t_start_min, t_end, TruncateFloor::kRespect));
     const std::vector<AuDescriptor>& descriptors = pin.Pin().Aus();  // kept after the pin is released
     std::printf("\n  save            %zu access units pinned\n", descriptors.size());
 
@@ -470,7 +473,10 @@ std::future<ReplaySaveResults> SaveReplay(const std::vector<SaveContext*>& conte
     };
     auto op = std::make_shared<Operation>();
     auto future = op->promise.get_future();
-    const int64_t t_end = QpcNow();
+    // With the switch off, footage ends where it went off: a recording may still be capturing.
+    int64_t t_end = QpcNow();
+    if (!contexts.empty())
+        if (const int64_t off = contexts.front()->replay_off_qpc.load(std::memory_order_acquire)) t_end = (std::min)(t_end, off);
     op->contexts = contexts;
     std::wstring folder;
     if (contexts.size() > 1) {

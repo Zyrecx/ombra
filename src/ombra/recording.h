@@ -33,6 +33,21 @@ inline constexpr double kRecordStartSeconds = 10.0;
 inline constexpr double kRecordDiskCheckSeconds = 5.0;
 inline constexpr double kRecordDiskReserveSeconds = 60.0;
 
+// The ring's age while the switch is off and only a recording keeps capture armed: enough for the
+// recording's tail (RingMaxAgeQpc adds its margin), because that footage is no replay's to keep.
+inline constexpr double kRecordOnlyRingSeconds = 3.0;
+
+// What ApplyReplayReach remembers between calls.
+struct ReplayReachState {
+    bool off_footage = false;  // capture ran with the switch off: switching on floors the saves there
+};
+// Applies the Instant Replay switch and whether a recording runs to every pipeline (the controller's
+// reach sink), as they change at `now`: SaveContext's replay_floor_qpc and replay_off_qpc, the video
+// rings' age (kRecordOnlyRingSeconds while only a recording keeps capture), and switching off ends
+// the open clips, which would otherwise go on taking the recording's footage.
+void ApplyReplayReach(const std::vector<SaveContext*>& contexts, ReplayReachState& state, bool replay_on,
+                      bool recording, int64_t now);
+
 struct RecordRequest {
     int64_t      start_qpc      = 0;  // when it was asked for
     double       before_seconds = 0;  // capped at buffer.seconds: the ring holds no more

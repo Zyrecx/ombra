@@ -35,6 +35,7 @@
 #include "ombra/ring.h"
 #include "ombra/supervisor.h"
 #include "ombra/reconfig.h"
+#include "ombra/recording.h"
 #include "ombra/clip.h"
 #include "ombra/save.h"
 #include "ombra/save_toast.h"
@@ -1128,11 +1129,17 @@ int RunEngine(int argc, wchar_t** argv) {
     std::string event_game;  // the game game_start last named; the controller's worker only
     std::vector<SaveContext*> marker_ctxs;
     for (auto& mp : pipelines) marker_ctxs.push_back(&mp->save_ctx);
+    // The reach sink's state: under the controller's lock, so it needs none of its own. Before the
+    // controller, so a recording hold dropped while it's torn down still finds it.
+    ReplayReachState replay_reach;
     BufferController controller(cfg.capture_mode, cfg.capture_target, cfg.capture_target_window,
                                 all_supervisors, &games);
     // Events as status reports them (no debounce: an event, unlike a marker, can't be taken back).
     controller.SetReplaySink([&events](bool on) {
         events.PublishIfActive("replay", [on](JsonValue& f, JsonValue&) { f.Set("replay", JsonValue::MakeBool(on)); });
+    });
+    controller.SetReachSink([&replay_reach, marker_ctxs](bool replay_on, bool recording) {
+        ApplyReplayReach(marker_ctxs, replay_reach, replay_on, recording, QpcNow());
     });
     controller.SetBufferingSink([&events](bool on) {
         events.PublishIfActive("buffering", [on](JsonValue& f, JsonValue&) { f.Set("buffering", JsonValue::MakeBool(on)); });

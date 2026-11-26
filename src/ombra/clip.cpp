@@ -67,6 +67,9 @@ std::shared_ptr<ClipSession> ClipSession::Open(SaveContext* ctx, const ClipReque
         // has already blocked it here.
         std::lock_guard<std::mutex> lock(ctx->clip_mutex);
         if (ctx->clips_blocked) return refuse(SaveOutcome::kBusy);
+        // Instant Replay off: what capture takes now is a recording's. Checked here, as switching
+        // off sets it before it stops the clips listed, so none slips in between.
+        if (ctx->replay_off_qpc.load(std::memory_order_acquire)) return refuse(SaveOutcome::kNothingNew);
         ctx->open_clips.push_back(s.get());
         s->listed_ = true;
     }
@@ -75,8 +78,11 @@ std::shared_ptr<ClipSession> ClipSession::Open(SaveContext* ctx, const ClipReque
     const double after  = std::clamp(request.after_seconds, 0.0, kClipMaxAfterSeconds);
     s->until_   = request.event_qpc + SecondsToQpc(after, s->qpc_freq_);
     s->cap_qpc_ = request.event_qpc + SecondsToQpc(kClipMaxAfterSeconds, s->qpc_freq_);
-    s->pin_ = ctx->ring->PinCovering(request.event_qpc - SecondsToQpc(before, s->qpc_freq_), s->until_,
-                                     TruncateFloor::kIgnore);
+    // Nothing before Instant Replay's floor (ApplyReplayReach): from the first keyframe after it.
+    const int64_t from = request.event_qpc - SecondsToQpc(before, s->qpc_freq_);
+    const int64_t replay_floor = ctx->replay_floor_qpc.load(std::memory_order_acquire);
+    s->pin_ = replay_floor > from ? ctx->ring->Pin(replay_floor, s->until_, TruncateFloor::kIgnore)
+                                  : ctx->ring->PinCovering(from, s->until_, TruncateFloor::kIgnore);
     if (s->pin_.empty()) return refuse(SaveOutcome::kNothingNew);
     // Held from the pin on, before the disk checks: a marker added meanwhile mustn't prune ours.
     s->first_qpc_ = s->pin_.front().qpc;
