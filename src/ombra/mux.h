@@ -1,12 +1,12 @@
-// MP4 muxer: H.264 or AV1
-// video plus an optional AAC audio track, both non-fragmented — see the provenance note at the top
-// of mux.cpp for what this adapts from OBS's mp4-mux.c (GPL-2.0-or-later) and why it doesn't port OBS's
-// fragmented/soft-remux machinery.
+// MP4 muxer: H.264 or AV1 video plus AAC audio tracks, written plain in one pass (clips) or
+// fragmented as footage arrives and made plain at the end (recordings). See the provenance note at
+// the top of mux.cpp for what this adapts from OBS's mp4-mux.c (GPL-2.0-or-later).
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -143,6 +143,50 @@ bool MuxWriteMp4(const std::wstring& path, const std::vector<uint8_t>& codec_hea
                   uint32_t width, uint32_t height, uint32_t fps, const std::vector<MuxAu>& aus,
                   const std::vector<MuxAudioTrack>& audio_tracks = {},
                   VideoCodec codec = VideoCodec::H264, MuxPicture picture = {}, const MuxMarkers& markers = {});
+
+// A recording's MP4, written as footage arrives (OBS's "hybrid MP4"): fragmented while open, a moof
+// and its mdat about every second, each on the disk (FlushFileBuffers) before the next starts, so
+// a crash of the engine or the system leaves a file players open up to the last whole fragment. Finish makes it a plain MP4 in place, without a copy: the full moov goes at the end
+// and a 16-byte placeholder after ftyp becomes one mdat header over everything before it.
+//
+// Holds the sample tables (about 4 bytes a video frame and 4 an AAC frame, plus one entry per
+// fragment per track) and one fragment's samples (about a second of video). Not thread-safe.
+class Mp4FragmentedWriter {
+public:
+    Mp4FragmentedWriter();
+    ~Mp4FragmentedWriter();  // without Finish: the file stays as written, fragmented
+    Mp4FragmentedWriter(const Mp4FragmentedWriter&) = delete;
+    Mp4FragmentedWriter& operator=(const Mp4FragmentedWriter&) = delete;
+
+    // Creates the file and writes its header. `audio` gives each track's format (its `frames` are
+    // ignored; frames come through AddAudio), skip_samples included: the track set is fixed here.
+    // False when the file can't be created or a codec header doesn't parse.
+    bool Open(const std::wstring& path, const std::vector<uint8_t>& codec_header, uint32_t width,
+              uint32_t height, uint32_t fps, VideoCodec codec, MuxPicture picture,
+              const std::vector<MuxAudioTrack>& audio);
+
+    // The next video sample: rising tick_index, the first a keyframe. Writes the fragment before
+    // it once that holds a second, or when this is a keyframe. False, and every later Add false,
+    // on a sample that can't follow the last or a failed write; Finish keeps what was written.
+    bool AddVideo(const MuxVideoSample& sample, const std::vector<uint8_t>& bytes);
+    // The next AAC frame of audio track `track` (Open's order), written with the next fragment,
+    // or on its own once two seconds of it wait (video stalled).
+    bool AddAudio(size_t track, const MuxAudioFrame& frame);
+
+    // Writes the last fragment, then the full moov with `markers`, and makes the file plain.
+    // `last_sample_ticks` as MuxWriteMp4. False leaves the file fragmented (still playable up to
+    // its last whole fragment), or deletes it if it holds no video.
+    bool Finish(uint32_t last_sample_ticks, const MuxMarkers& markers);
+    // Deletes the file, unless Finish already made it plain.
+    void Discard();
+
+    uint64_t FileBytes() const;   // written so far, buffered bytes included
+    uint64_t VideoTicks() const;  // video written so far, in ticks (1/fps), the pending sample excluded
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 // ISO/IEC 14496-15 AVCDecoderConfigurationRecord built from Encoder::SequenceParams()'s Annex-B
 // SPS/PPS. Exported for mux_tests.cpp, which checks it against a real x264 fixture.

@@ -5,13 +5,11 @@
 // OBS's serializer.h/array-serializer.c, whose original author is Lain Bailey <lain@obsproject.com>
 // under a permissive ISC-style notice.
 //
-// What's deliberately NOT ported: OBS's fragmented moof/traf/trun writer and its "soft remux"
-// finalize step. That machinery exists because OBS writes an MP4 continuously while a recording is
-// live, so a mid-recording crash must leave a recoverable file. Ombra's save path is different:
-// the whole clip already exists, encoded, in the Ring (a save pins it and the mux reads it out one
-// sample at a time), so there is no partial-write-during-capture window for the hybrid trick to
-// protect. What OBS's soft-remux produces at finalization time — a plain, non-fragmented moov with
-// full sample tables — is exactly what this file writes directly in one pass. The chapter track
+// Clips and saves are written in one pass (the footage is already encoded in the Ring), straight
+// to the plain layout. Recordings use Mp4FragmentedWriter, a port of OBS's hybrid MP4: the
+// fragmented moof/mfhd/traf/tfhd/tfdt/trun writer (mp4_flush_fragment), mvex/trex, and the
+// finalize that appends the full moov and turns the placeholder after ftyp into an mdat header
+// (mp4_mux_finalise). Fragment sizing and the per-chunk sample tables are Ombra's. The chapter track
 // (text trak, gmhd, tref/chap, and the TEXT_STUB_HEADER / CHAPTER_PKT_FOOTER bytes from
 // mp4-mux-internal.h) is ported too. Not ported: OBS's mdta metadata boxes. Audio tracks, the audio
 // edit list, Nero `chpl` and the freeform metadata tag are Ombra's own.
@@ -240,6 +238,11 @@ struct TrackTiming {
     std::vector<DeltaRun> deltas;         // run-length compressed, per 8.6.1.2
     uint64_t               mdat_data_offset = 0;  // absolute file offset of first sample byte
     uint64_t               total_sample_bytes = 0;
+    // A fragmented write's chunks, one per fragment the track had samples in. `chunked` false: one
+    // chunk at mdat_data_offset holding every sample.
+    struct Chunk { uint64_t offset; uint32_t samples; };
+    std::vector<Chunk>     chunks;
+    bool                   chunked = false;
 };
 
 // 12.1.3 Visual Sample Entry (shared header all codec-specific sample entries start with).
@@ -338,15 +341,33 @@ void WriteStss(ByteWriter& w, const TrackTiming& t) {
     WriteBoxSize(w, start);
 }
 
-// 8.7.4 Sample To Chunk Box — one chunk holds every sample (no interleaving to do with a single
-// video-only track), so this is always a single-entry table.
+// 8.7.4 Sample To Chunk Box. A save holds each track in one chunk: a single-entry table. A
+// fragmented write has a chunk per fragment, run-length compressed by samples per chunk.
 void WriteStsc(ByteWriter& w, const TrackTiming& t) {
     const size_t start = w.Pos();
     WriteFullBox(w, 0, "stsc", 0, 0);
-    w.WB32(1);  // entry_count
-    w.WB32(1);  // first_chunk
-    w.WB32(static_cast<uint32_t>(t.sample_sizes.size()));  // samples_per_chunk
-    w.WB32(1);  // sample_description_index
+    if (!t.chunked) {
+        w.WB32(1);  // entry_count
+        w.WB32(1);  // first_chunk
+        w.WB32(static_cast<uint32_t>(t.sample_sizes.size()));  // samples_per_chunk
+        w.WB32(1);  // sample_description_index
+        WriteBoxSize(w, start);
+        return;
+    }
+    const size_t count_pos = w.Pos();
+    w.WB32(0);
+    uint32_t entries = 0;
+    for (size_t i = 0; i < t.chunks.size(); ++i) {
+        if (i > 0 && t.chunks[i].samples == t.chunks[i - 1].samples) continue;
+        w.WB32(static_cast<uint32_t>(i + 1));  // first_chunk, 1-indexed
+        w.WB32(t.chunks[i].samples);
+        w.WB32(1);                             // sample_description_index
+        ++entries;
+    }
+    const size_t end = w.Pos();
+    w.Seek(count_pos);
+    w.WB32(entries);
+    w.Seek(end);
     WriteBoxSize(w, start);
 }
 
@@ -360,14 +381,25 @@ void WriteStsz(ByteWriter& w, const TrackTiming& t) {
     WriteBoxSize(w, start);
 }
 
-// 8.7.5 Chunk Offset Box; co64 once the chunk starts past 4 GB.
+// 8.7.5 Chunk Offset Box; co64 once a chunk starts past 4 GB.
 void WriteStco(ByteWriter& w, const TrackTiming& t) {
     const size_t start = w.Pos();
-    const bool   wide  = t.mdat_data_offset > UINT32_MAX;
+    if (!t.chunked) {
+        const bool wide = t.mdat_data_offset > UINT32_MAX;
+        WriteFullBox(w, 0, wide ? "co64" : "stco", 0, 0);
+        w.WB32(1);  // entry_count — one chunk
+        if (wide) w.WB64(t.mdat_data_offset);
+        else w.WB32(static_cast<uint32_t>(t.mdat_data_offset));
+        WriteBoxSize(w, start);
+        return;
+    }
+    const bool wide = !t.chunks.empty() && t.chunks.back().offset > UINT32_MAX;  // offsets rise
     WriteFullBox(w, 0, wide ? "co64" : "stco", 0, 0);
-    w.WB32(1);  // entry_count — one chunk
-    if (wide) w.WB64(t.mdat_data_offset);
-    else w.WB32(static_cast<uint32_t>(t.mdat_data_offset));
+    w.WB32(static_cast<uint32_t>(t.chunks.size()));
+    for (const auto& c : t.chunks) {
+        if (wide) w.WB64(c.offset);
+        else w.WB32(static_cast<uint32_t>(c.offset));
+    }
     WriteBoxSize(w, start);
 }
 
@@ -377,7 +409,8 @@ void WriteStbl(ByteWriter& w, uint32_t width, uint32_t height, const VideoEntry&
     WriteBox(w, 0, "stbl");
     WriteStsd(w, width, height, entry);
     WriteStts(w, t);
-    WriteStss(w, t);
+    // A fragmented file's opening moov has no samples: its fragments say which are sync samples.
+    if (!t.chunked || !t.sample_sizes.empty()) WriteStss(w, t);
     WriteStsc(w, t);
     WriteStsz(w, t);
     WriteStco(w, t);
@@ -428,12 +461,21 @@ void WriteHdlr(ByteWriter& w) {
 }
 
 // 8.4.2 Media Header Box. `lang_packed` defaults to "und" (21956) — see PackIso639Lang.
+// Version 1 (64-bit times) once the duration outgrows 32 bits: 48 kHz audio does past 24 hours.
 void WriteMdhd(ByteWriter& w, uint64_t creation_time, const TrackTiming& t, uint16_t lang_packed = 21956) {
-    WriteFullBox(w, 32, "mdhd", 0, 0);
-    w.WB32(static_cast<uint32_t>(creation_time));
-    w.WB32(static_cast<uint32_t>(creation_time));
-    w.WB32(t.timescale);
-    w.WB32(static_cast<uint32_t>(t.duration));
+    if (t.duration > UINT32_MAX) {
+        WriteFullBox(w, 44, "mdhd", 1, 0);
+        w.WB64(creation_time);
+        w.WB64(creation_time);
+        w.WB32(t.timescale);
+        w.WB64(t.duration);
+    } else {
+        WriteFullBox(w, 32, "mdhd", 0, 0);
+        w.WB32(static_cast<uint32_t>(creation_time));
+        w.WB32(static_cast<uint32_t>(creation_time));
+        w.WB32(t.timescale);
+        w.WB32(static_cast<uint32_t>(t.duration));
+    }
     w.WB16(lang_packed);
     w.WB16(0);       // pre_defined
 }
@@ -864,13 +906,16 @@ void WriteMvhd(ByteWriter& w, uint64_t creation_time, uint64_t movie_duration_ms
     w.WB32(next_track_id);
 }
 
-void WriteFtyp(ByteWriter& w, VideoCodec codec) {
+// `fragments`: the file has movie fragments at some point (iso6). A fragmented write keeps the
+// brand once it's made plain: a plain file is still valid iso6, and the header keeps its size.
+void WriteFtyp(ByteWriter& w, VideoCodec codec, bool fragments = false) {
     const size_t start = w.Pos();
     WriteBox(w, 0, "ftyp");
     w.WriteBytes("isom", 4);  // major_brand
     w.WB32(512);               // minor_version
     w.WriteBytes("isom", 4);
     w.WriteBytes("iso2", 4);
+    if (fragments) w.WriteBytes("iso6", 4);
     w.WriteBytes(codec == VideoCodec::AV1 ? "av01" : "avc1", 4);
     w.WriteBytes("mp41", 4);
     WriteBoxSize(w, start);
@@ -889,11 +934,23 @@ struct AudioMoovParams {
     uint32_t                    skip_samples = 0;     // MuxAudioTrack::skip_samples
 };
 
-// `chapter_t` null: no chapter track.
+// 8.8.3 Track Extends Box: a fragmented track's defaults, all given per fragment instead.
+void WriteTrex(ByteWriter& w, uint32_t track_id) {
+    WriteFullBox(w, 32, "trex", 0, 0);
+    w.WB32(track_id);
+    w.WB32(1);  // default_sample_description_index
+    w.WB32(0);  // default_sample_duration
+    w.WB32(0);  // default_sample_size
+    w.WB32(0);  // default_sample_flags
+}
+
+// `chapter_t` null: no chapter track. `fragmented`: a fragmented write's opening moov (empty
+// sample tables, mvex), without chapters or the tag, which only the final moov knows.
 void WriteMoov(ByteWriter& w, uint64_t creation_time, uint32_t width, uint32_t height,
                const VideoEntry& entry, const TrackTiming& video_t,
                const std::vector<AudioMoovParams>& audio, const TrackTiming* chapter_t,
-               const std::vector<MuxChapter>& chapters, const std::string& markers_json) {
+               const std::vector<MuxChapter>& chapters, const std::string& markers_json,
+               bool fragmented = false) {
     auto duration_ms = [](const TrackTiming& t) {
         return t.timescale ? (t.duration * 1000 / t.timescale) : 0;
     };
@@ -916,6 +973,12 @@ void WriteMoov(ByteWriter& w, uint64_t creation_time, uint32_t width, uint32_t h
                        a.skip_samples);
     }
     if (chapter_t) WriteTrakChapters(w, creation_time, chapter_track_id, *chapter_t, movie_duration_ms);
+    if (fragmented) {
+        const size_t mvex = w.Pos();
+        WriteBox(w, 0, "mvex");
+        for (uint32_t id = 1; id <= 1 + audio.size(); ++id) WriteTrex(w, id);
+        WriteBoxSize(w, mvex);
+    }
     WriteUdta(w, chapters, markers_json);
     WriteBoxSize(w, start);
 }
@@ -934,7 +997,7 @@ public:
     ~Mp4FileSink() {
         const bool created = handle_ != INVALID_HANDLE_VALUE;
         if (created) CloseHandle(handle_);
-        if (created && !ok_) DeleteFileW(path_.c_str());  // no half-written clip left behind
+        if (created && !ok_ && !keep_) DeleteFileW(path_.c_str());  // no half-written clip left behind
     }
     Mp4FileSink(const Mp4FileSink&) = delete;
     Mp4FileSink& operator=(const Mp4FileSink&) = delete;
@@ -965,22 +1028,47 @@ public:
     }
 
     // The file is deleted on destruction instead of kept.
-    void Discard() { ok_ = false; }
+    void Discard() {
+        ok_   = false;
+        keep_ = false;
+    }
+    // A failed write keeps what reached the file (a fragmented recording plays up to there).
+    void KeepOnFailure() { keep_ = true; }
+    bool Ok() const { return ok_; }
 
     bool Finish() {
         Flush();
         return ok_;
     }
 
-private:
-    static constexpr size_t kBufferBytes = 4u << 20;
-
+    // Hands the buffered bytes to the system, so a crash of this process loses none of them.
     void Flush() {
         if (!ok_ || buf_.empty()) return;
         WriteRaw(buf_.data(), buf_.size());
         flushed_ += buf_.size();
         buf_.clear();
     }
+
+    // Flush, then waits until the bytes and the file's size are on the disk, so a power cut or a
+    // system crash loses none of them either.
+    bool Sync() {
+        Flush();
+        if (ok_ && !FlushFileBuffers(handle_)) ok_ = false;
+        return ok_;
+    }
+
+    // Cuts the file back to `pos` (at most what was written) and appends from there.
+    bool Truncate(uint64_t pos) {
+        if (handle_ == INVALID_HANDLE_VALUE || pos > Pos()) return false;
+        Flush();
+        buf_.clear();
+        if (!SeekTo(pos) || !SetEndOfFile(handle_)) return false;
+        flushed_ = pos;
+        return true;
+    }
+
+private:
+    static constexpr size_t kBufferBytes = 4u << 20;
     void WriteRaw(const uint8_t* p, size_t n) {
         while (ok_ && n > 0) {
             const DWORD chunk = static_cast<DWORD>((std::min)(n, size_t{1} << 30));
@@ -1002,6 +1090,7 @@ private:
     std::wstring         path_;
     HANDLE               handle_ = INVALID_HANDLE_VALUE;
     bool                 ok_ = false;
+    bool                 keep_ = false;
     std::vector<uint8_t> buf_;
     uint64_t             flushed_ = 0;  // bytes already handed to WriteFile
 };
@@ -1017,21 +1106,92 @@ bool AudioTracksFit(const std::vector<MuxAudioTrack>& tracks) {
     return true;
 }
 
+// The video sample entry for `codec_header`; its config is empty when the header doesn't parse.
+VideoEntry MakeVideoEntry(const std::vector<uint8_t>& codec_header, uint32_t width, uint32_t height,
+                          VideoCodec codec, MuxPicture picture) {
+    const bool av1 = codec == VideoCodec::AV1;
+    VideoEntry entry = av1 ? VideoEntry{"av01", "av1C", BuildAv1C(codec_header.data(), codec_header.size()), {}}
+                           : VideoEntry{"avc1", "avcC", BuildAvcC(codec_header), {}};
+    entry.picture.width = picture.width ? (std::min)(picture.width, width) : width;
+    entry.picture.height = picture.height ? (std::min)(picture.height, height) : height;
+    if (entry.config.empty())
+        Log::Error("mux: %s codec header did not parse (%zu bytes)", av1 ? "AV1" : "H.264", codec_header.size());
+    return entry;
+}
+
+// One video sample as MP4 stores it, handed to `write` in pieces: H.264's NALs length-prefixed
+// without SPS/PPS (avcC carries them), AV1's temporal unit minus the OBUs MP4 keeps out of samples
+// (through `obus`, reused). Returns the sample's size; false on a malformed AV1 sample.
+template <class Write>
+bool WriteVideoSample(bool av1, const std::vector<uint8_t>& annexb, std::vector<uint8_t>& obus,
+                      const Write& write, uint32_t& size) {
+    size = 0;
+    if (av1) {
+        obus.clear();
+        if (!FilterAv1Sample(annexb.data(), annexb.size(), obus)) return false;
+        write(obus.data(), obus.size());
+        size = static_cast<uint32_t>(obus.size());
+        return true;
+    }
+    for (const auto& n : SplitAnnexB(annexb.data(), annexb.size())) {
+        const uint8_t type = NalType(annexb.data(), n);
+        if (type == 7 || type == 8) continue;  // SPS / PPS
+        const uint8_t len_be[4] = {uint8_t(n.length >> 24), uint8_t(n.length >> 16),
+                                   uint8_t(n.length >> 8), uint8_t(n.length)};
+        write(len_be, 4);
+        write(annexb.data() + n.offset, n.length);
+        size += static_cast<uint32_t>(4 + n.length);
+    }
+    return true;
+}
+
+// Chapter samples (OBS writes them at the final flush): a 16-bit length, the UTF-8 title, the encd
+// footer. Each lasts until the next; the last until the video ends.
+TrackTiming WriteChapterSamples(Mp4FileSink& sink, const std::vector<MuxChapter>& chapters, uint64_t video_ms) {
+    TrackTiming chapter_t;
+    chapter_t.timescale        = 1000;
+    chapter_t.duration         = video_ms;
+    chapter_t.mdat_data_offset = sink.Pos();
+    for (size_t i = 0; i < chapters.size(); ++i) {
+        const MuxChapter& c   = chapters[i];
+        const size_t      len = Utf8Prefix(c.title, UINT16_MAX);
+        const uint8_t     len_be[2] = {uint8_t(len >> 8), uint8_t(len)};
+        sink.Write(len_be, 2);
+        sink.Write(reinterpret_cast<const uint8_t*>(c.title.data()), len);
+        sink.Write(kChapterSampleFooter, sizeof(kChapterSampleFooter));
+        chapter_t.sample_sizes.push_back(static_cast<uint32_t>(2 + len + sizeof(kChapterSampleFooter)));
+        const uint64_t until = i + 1 < chapters.size() ? chapters[i + 1].ms : video_ms;
+        const uint32_t delta = static_cast<uint32_t>(until - c.ms);
+        if (!chapter_t.deltas.empty() && chapter_t.deltas.back().delta == delta) chapter_t.deltas.back().count++;
+        else chapter_t.deltas.push_back({1, delta});
+    }
+    return chapter_t;
+}
+
+AudioMoovParams MakeAudioMoovParams(const MuxAudioTrack& track, const TrackTiming& timing) {
+    AudioMoovParams p;
+    p.sample_rate  = track.sample_rate;
+    p.asc          = &track.asc;
+    p.bitrate_bps  = track.bitrate_bps;  // esds's maxBitrate/avgBitrate: informative, not used to decode
+    p.timing       = &timing;
+    p.name         = track.name;
+    p.lang_packed  = PackIso639Lang(track.language);
+    p.skip_samples = track.skip_samples;
+    return p;
+}
+
+// MP4 timestamps are seconds since 1904-01-01; 2082844800 is the offset to the Unix epoch.
+uint64_t Mp4Now() { return static_cast<uint64_t>(std::time(nullptr)) + 2082844800ULL; }
+
 }  // namespace
 
 bool MuxWriteMp4Stream(const std::wstring& path, const std::vector<uint8_t>& codec_header,
                         uint32_t width, uint32_t height, uint32_t fps, const MuxPullSample& next,
                         const MuxTakeTail& take_tail, VideoCodec codec, uint32_t last_sample_ticks,
                         MuxPicture picture) {
-    const bool av1 = codec == VideoCodec::AV1;
-    VideoEntry entry = av1 ? VideoEntry{"av01", "av1C", BuildAv1C(codec_header.data(), codec_header.size())}
-                           : VideoEntry{"avc1", "avcC", BuildAvcC(codec_header)};
-    entry.picture.width = picture.width ? (std::min)(picture.width, width) : width;
-    entry.picture.height = picture.height ? (std::min)(picture.height, height) : height;
-    if (entry.config.empty()) {
-        Log::Error("mux: %s codec header did not parse (%zu bytes)", av1 ? "AV1" : "H.264", codec_header.size());
-        return false;
-    }
+    const bool       av1   = codec == VideoCodec::AV1;
+    const VideoEntry entry = MakeVideoEntry(codec_header, width, height, codec, picture);
+    if (entry.config.empty()) return false;
     Mp4FileSink sink(path);
     {
         ByteWriter ftyp;
@@ -1099,25 +1259,11 @@ bool MuxWriteMp4Stream(const std::wstring& path, const std::vector<uint8_t>& cod
         }
         prev_tick = sample.tick_index;
         uint32_t sample_size = 0;
-        if (av1) {
-            obus.clear();
-            if (!FilterAv1Sample(annexb.data(), annexb.size(), obus)) {
-                Log::Error("mux: malformed AV1 OBU in sample %zu", i);
-                sink.Discard();
-                return false;
-            }
-            sink.Write(obus);
-            sample_size = static_cast<uint32_t>(obus.size());
-        } else {
-            for (const auto& n : SplitAnnexB(annexb.data(), annexb.size())) {
-                const uint8_t type = NalType(annexb.data(), n);
-                if (type == 7 || type == 8) continue;  // SPS / PPS: avcC carries them
-                const uint8_t len_be[4] = {uint8_t(n.length >> 24), uint8_t(n.length >> 16),
-                                           uint8_t(n.length >> 8), uint8_t(n.length)};
-                sink.Write(len_be, 4);
-                sink.Write(annexb.data() + n.offset, n.length);
-                sample_size += static_cast<uint32_t>(4 + n.length);
-            }
+        if (!WriteVideoSample(av1, annexb, obus, [&](const uint8_t* p, size_t n) { sink.Write(p, n); },
+                              sample_size)) {
+            Log::Error("mux: malformed AV1 OBU in sample %zu", i);
+            sink.Discard();
+            return false;
         }
         t.sample_sizes.push_back(sample_size);
         if (sample.is_keyframe) t.sync_samples.push_back(static_cast<uint32_t>(i + 1));  // 1-indexed
@@ -1170,29 +1316,11 @@ bool MuxWriteMp4Stream(const std::wstring& path, const std::vector<uint8_t>& cod
         audio_t.duration = static_cast<uint64_t>(track.frames.size()) * kSamplesPerAacFrame;
     }
 
-    // Chapter samples last (OBS writes them at the final flush): a 16-bit length, the UTF-8 title,
-    // the encd footer. Each lasts until the next; the last until the video ends.
+    // Chapter samples last.
     const uint64_t video_ms = t.duration * 1000 / fps;
     const std::vector<MuxChapter> chapters = FileChapters(tail.markers, video_ms);
     TrackTiming chapter_t;
-    if (!chapters.empty()) {
-        chapter_t.timescale        = 1000;
-        chapter_t.duration         = video_ms;
-        chapter_t.mdat_data_offset = sink.Pos();
-        for (size_t i = 0; i < chapters.size(); ++i) {
-            const MuxChapter& c   = chapters[i];
-            const size_t      len = Utf8Prefix(c.title, UINT16_MAX);
-            const uint8_t     len_be[2] = {uint8_t(len >> 8), uint8_t(len)};
-            sink.Write(len_be, 2);
-            sink.Write(reinterpret_cast<const uint8_t*>(c.title.data()), len);
-            sink.Write(kChapterSampleFooter, sizeof(kChapterSampleFooter));
-            chapter_t.sample_sizes.push_back(static_cast<uint32_t>(2 + len + sizeof(kChapterSampleFooter)));
-            const uint64_t until = i + 1 < chapters.size() ? chapters[i + 1].ms : video_ms;
-            const uint32_t delta = static_cast<uint32_t>(until - c.ms);
-            if (!chapter_t.deltas.empty() && chapter_t.deltas.back().delta == delta) chapter_t.deltas.back().count++;
-            else chapter_t.deltas.push_back({1, delta});
-        }
-    }
+    if (!chapters.empty()) chapter_t = WriteChapterSamples(sink, chapters, video_ms);
 
     const uint64_t mdat_end = sink.Pos();
     if (mdat_end - mdat_start <= UINT32_MAX) {
@@ -1207,24 +1335,11 @@ bool MuxWriteMp4Stream(const std::wstring& path, const std::vector<uint8_t>& cod
         sink.Patch(free_start, wide.Data().data(), wide.Data().size());
     }
 
-    // MP4 timestamps are seconds since 1904-01-01; 2082844800 is the offset to the Unix epoch.
-    const uint64_t creation_time = static_cast<uint64_t>(std::time(nullptr)) + 2082844800ULL;
-
-    std::vector<AudioMoovParams> audio_moov_params(audio_tracks.size());
-    for (size_t i = 0; i < audio_tracks.size(); ++i) {
-        const auto& track = audio_tracks[i];
-        AudioMoovParams& p = audio_moov_params[i];
-        p.sample_rate = track.sample_rate;
-        p.asc         = &track.asc;
-        p.bitrate_bps = track.bitrate_bps;  // esds's maxBitrate/avgBitrate — informative metadata
-                                              // only, not used to decode
-        p.timing      = &audio_track_timings[i];
-        p.name        = track.name;
-        p.lang_packed = PackIso639Lang(track.language);
-        p.skip_samples = track.skip_samples;
-    }
+    std::vector<AudioMoovParams> audio_moov_params;
+    for (size_t i = 0; i < audio_tracks.size(); ++i)
+        audio_moov_params.push_back(MakeAudioMoovParams(audio_tracks[i], audio_track_timings[i]));
     ByteWriter moov;
-    WriteMoov(moov, creation_time, width, height, entry, t, audio_moov_params,
+    WriteMoov(moov, Mp4Now(), width, height, entry, t, audio_moov_params,
               chapters.empty() ? nullptr : &chapter_t, chapters, tail.markers.json);
     sink.Write(moov.Data());
     return sink.Finish();
@@ -1264,6 +1379,366 @@ bool MuxWriteMp4(const std::wstring& path, const std::vector<uint8_t>& codec_hea
     return MuxWriteMp4(path, codec_header, width, height, fps, samples,
                        MuxReadSample([&](size_t i, std::vector<uint8_t>& out) { out = aus[i].annexb; return true; }),
                        audio_tracks, codec, 1, picture, markers);
+}
+
+// --- fragmented write (OBS mp4-mux.c's mp4_flush_fragment / mp4_mux_finalise) --------------------
+
+namespace {
+
+// 8.8.7/8.8.8 flags (OBS mp4-mux-internal.h).
+constexpr uint32_t kTfhdBaseDataOffset      = 0x000001;
+constexpr uint32_t kTfhdDefaultDuration     = 0x000008;
+constexpr uint32_t kTfhdDefaultFlags        = 0x000020;
+constexpr uint32_t kTrunDataOffset          = 0x000001;
+constexpr uint32_t kTrunSampleDuration      = 0x000100;
+constexpr uint32_t kTrunSampleSize          = 0x000200;
+constexpr uint32_t kTrunSampleFlags         = 0x000400;
+constexpr uint32_t kSampleNonSync           = 0x00010000;
+constexpr uint32_t kSampleDependsYes        = 0x01000000;
+constexpr uint32_t kSampleDependsNo         = 0x02000000;
+constexpr uint32_t kAacFrameSamples         = 1024;  // AacEncoder::kSamplesPerFrame
+constexpr uint64_t kPlaceholderBytes        = 16;    // a free box a 64-bit mdat header fits in
+
+void AddDelta(TrackTiming& t, uint32_t delta, uint32_t count = 1) {
+    if (!t.deltas.empty() && t.deltas.back().delta == delta) t.deltas.back().count += count;
+    else t.deltas.push_back({count, delta});
+    t.duration += static_cast<uint64_t>(delta) * count;
+}
+
+}  // namespace
+
+struct Mp4FragmentedWriter::Impl {
+    struct PendingVideo {
+        uint32_t size = 0;
+        uint32_t duration = 0;  // set when the next sample arrives, or by Finish
+        bool     keyframe = false;
+    };
+    struct PendingAudio {
+        std::vector<uint32_t> sizes;
+        std::vector<uint8_t>  bytes;
+    };
+
+    std::unique_ptr<Mp4FileSink> sink;
+    VideoEntry                   entry{};
+    uint32_t                     width = 0, height = 0, fps = 0;
+    bool                         av1 = false;
+    std::vector<MuxAudioTrack>   audio;  // formats; frames unused
+    uint64_t                     placeholder = 0;
+    uint32_t                     fragments = 0;
+
+    TrackTiming              video;
+    std::vector<TrackTiming> audio_t;
+
+    std::vector<PendingVideo> pending_video;
+    std::vector<uint8_t>      pending_bytes;
+    uint64_t                  pending_ticks = 0;  // durations of the pending samples but the newest
+    std::vector<PendingAudio> pending_audio;
+
+    uint64_t             prev_tick = 0;
+    bool                 failed = false;
+    bool                 finished = false;
+    std::vector<uint8_t> obus;
+
+    void WriteTraf(ByteWriter& w, uint32_t track_id, uint64_t moof_start, uint64_t decode_time,
+                   bool is_video, const std::vector<uint32_t>& audio_sizes, std::vector<size_t>& offset_fields) {
+        const size_t traf = w.Pos();
+        WriteBox(w, 0, "traf");
+        const uint32_t tfhd_flags = kTfhdBaseDataOffset | (is_video ? 0 : kTfhdDefaultDuration | kTfhdDefaultFlags);
+        WriteFullBox(w, 0, "tfhd", 0, tfhd_flags);
+        const size_t tfhd = traf + 8;
+        w.WB32(track_id);
+        w.WB64(moof_start);  // base_data_offset
+        if (!is_video) {
+            w.WB32(kAacFrameSamples);  // default_sample_duration
+            w.WB32(kSampleDependsNo);  // default_sample_flags
+        }
+        WriteBoxSize(w, tfhd);
+
+        WriteFullBox(w, 20, "tfdt", 1, 0);
+        w.WB64(decode_time);  // baseMediaDecodeTime: the track's duration before this fragment
+
+        const size_t trun = w.Pos();
+        const uint32_t trun_flags =
+            kTrunDataOffset | kTrunSampleSize | (is_video ? kTrunSampleDuration | kTrunSampleFlags : 0);
+        WriteFullBox(w, 0, "trun", 0, trun_flags);
+        w.WB32(static_cast<uint32_t>(is_video ? pending_video.size() : audio_sizes.size()));
+        offset_fields.push_back(w.Pos());
+        w.WB32(0);  // data_offset, patched once the moof's size is known
+        if (is_video) {
+            for (const PendingVideo& s : pending_video) {
+                w.WB32(s.duration);
+                w.WB32(s.size);
+                w.WB32(s.keyframe ? kSampleDependsNo : kSampleDependsYes | kSampleNonSync);
+            }
+        } else {
+            for (uint32_t size : audio_sizes) w.WB32(size);
+        }
+        WriteBoxSize(w, trun);
+        WriteBoxSize(w, traf);
+    }
+
+    // Writes the pending samples as one fragment: moof, then an mdat with the video, then each
+    // audio track. Each track's run becomes a chunk of the final moov. Without `with_video`, audio
+    // only: the newest video sample's duration isn't known yet.
+    bool FlushFragment(bool with_video = true) {
+        bool any = with_video && !pending_video.empty();
+        for (const PendingAudio& a : pending_audio) any = any || !a.sizes.empty();
+        if (!any) return true;
+        const bool video_run = with_video && !pending_video.empty();
+
+        const uint64_t moof_start = sink->Pos();
+        ByteWriter     moof;
+        WriteBox(moof, 0, "moof");
+        WriteFullBox(moof, 16, "mfhd", 0, 0);
+        moof.WB32(++fragments);  // sequence_number, from 1
+
+        // Each track's run, in mdat order, and the trun field that points at it.
+        std::vector<size_t>   offset_fields;
+        std::vector<uint64_t> run_offsets;  // from the start of the mdat's data
+        uint64_t              data_bytes = 0;
+        if (video_run) {
+            WriteTraf(moof, 1, moof_start, video.duration, true, {}, offset_fields);
+            run_offsets.push_back(data_bytes);
+            data_bytes += pending_bytes.size();
+        }
+        for (size_t i = 0; i < pending_audio.size(); ++i) {
+            if (pending_audio[i].sizes.empty()) continue;
+            WriteTraf(moof, static_cast<uint32_t>(2 + i), moof_start, audio_t[i].duration, false,
+                      pending_audio[i].sizes, offset_fields);
+            run_offsets.push_back(data_bytes);
+            data_bytes += pending_audio[i].bytes.size();
+        }
+        const size_t   moof_size  = WriteBoxSize(moof, 0);
+        const bool     large      = 8 + data_bytes > UINT32_MAX;
+        const uint64_t mdat_hdr   = large ? 16 : 8;
+        for (size_t k = 0; k < offset_fields.size(); ++k) {
+            moof.Seek(offset_fields[k]);
+            moof.WB32(static_cast<uint32_t>(moof_size + mdat_hdr + run_offsets[k]));
+        }
+
+        sink->Write(moof.Data());
+        ByteWriter mdat;
+        if (large) {
+            mdat.WB32(1);
+            mdat.WriteBytes("mdat", 4);
+            mdat.WB64(mdat_hdr + data_bytes);
+        } else {
+            WriteBox(mdat, static_cast<uint32_t>(mdat_hdr + data_bytes), "mdat");
+        }
+        sink->Write(mdat.Data());
+        const uint64_t data_start = sink->Pos();
+
+        size_t run = 0;
+        if (video_run) {
+            sink->Write(pending_bytes);
+            video.chunks.push_back({data_start + run_offsets[run++], static_cast<uint32_t>(pending_video.size())});
+            for (const PendingVideo& s : pending_video) {
+                video.sample_sizes.push_back(s.size);
+                if (s.keyframe) video.sync_samples.push_back(static_cast<uint32_t>(video.sample_sizes.size()));
+                AddDelta(video, s.duration);
+            }
+        }
+        for (size_t i = 0; i < pending_audio.size(); ++i) {
+            PendingAudio& a = pending_audio[i];
+            if (a.sizes.empty()) continue;
+            sink->Write(a.bytes);
+            TrackTiming& t = audio_t[i];
+            t.chunks.push_back({data_start + run_offsets[run++], static_cast<uint32_t>(a.sizes.size())});
+            t.sample_sizes.insert(t.sample_sizes.end(), a.sizes.begin(), a.sizes.end());
+            AddDelta(t, kAacFrameSamples, static_cast<uint32_t>(a.sizes.size()));
+            a.sizes.clear();
+            a.bytes.clear();
+        }
+        if (video_run) {
+            pending_video.clear();
+            pending_bytes.clear();
+            pending_ticks = 0;
+        }
+        // On the disk before the next fragment starts: a crash, of the engine or of the system,
+        // loses at most the fragment being collected.
+        if (!sink->Sync()) {
+            failed = true;
+            sink->Truncate(moof_start);  // no torn fragment at the end
+        }
+        return !failed;
+    }
+};
+
+Mp4FragmentedWriter::Mp4FragmentedWriter() : impl_(std::make_unique<Impl>()) {}
+Mp4FragmentedWriter::~Mp4FragmentedWriter() = default;
+
+bool Mp4FragmentedWriter::Open(const std::wstring& path, const std::vector<uint8_t>& codec_header,
+                               uint32_t width, uint32_t height, uint32_t fps, VideoCodec codec,
+                               MuxPicture picture, const std::vector<MuxAudioTrack>& audio) {
+    Impl& m = *impl_;
+    if (m.sink || fps == 0) return false;
+    m.entry = MakeVideoEntry(codec_header, width, height, codec, picture);
+    if (m.entry.config.empty() || !AudioTracksFit(audio)) return false;
+    m.width  = width;
+    m.height = height;
+    m.fps    = fps;
+    m.av1    = codec == VideoCodec::AV1;
+    m.audio  = audio;
+    for (MuxAudioTrack& a : m.audio) a.frames.clear();
+    m.video.timescale = fps;
+    m.video.chunked   = true;
+    m.audio_t.assign(m.audio.size(), TrackTiming{});
+    for (size_t i = 0; i < m.audio.size(); ++i) {
+        m.audio_t[i].timescale = m.audio[i].sample_rate;
+        m.audio_t[i].chunked   = true;
+    }
+    m.pending_audio.assign(m.audio.size(), Impl::PendingAudio{});
+
+    m.sink = std::make_unique<Mp4FileSink>(path);
+    if (!m.sink->Ok()) {
+        m.sink.reset();
+        return false;
+    }
+    m.sink->KeepOnFailure();
+    ByteWriter head;
+    WriteFtyp(head, codec, /*fragments=*/true);
+    m.placeholder = head.Pos();
+    head.WB32(static_cast<uint32_t>(kPlaceholderBytes));
+    head.WriteBytes("free", 4);
+    head.WB64(0);
+    std::vector<AudioMoovParams> params;
+    for (size_t i = 0; i < m.audio.size(); ++i) params.push_back(MakeAudioMoovParams(m.audio[i], m.audio_t[i]));
+    WriteMoov(head, Mp4Now(), width, height, m.entry, m.video, params, nullptr, {}, {}, /*fragmented=*/true);
+    m.sink->Write(head.Data());
+    m.sink->Flush();
+    if (!m.sink->Ok()) {
+        m.sink->Discard();
+        m.sink.reset();
+        return false;
+    }
+    return true;
+}
+
+bool Mp4FragmentedWriter::AddVideo(const MuxVideoSample& sample, const std::vector<uint8_t>& bytes) {
+    Impl& m = *impl_;
+    if (!m.sink || m.failed || m.finished) return false;
+    const bool first = m.video.sample_sizes.empty() && m.pending_video.empty();
+    if (first && !sample.is_keyframe) {
+        Log::Error("mux: a recording's first video sample isn't a keyframe");
+        m.failed = true;
+        return false;
+    }
+    if (!first) {
+        if (sample.tick_index < m.prev_tick || sample.tick_index - m.prev_tick > UINT32_MAX) {
+            Log::Error("mux: recording tick %llu can't follow %llu", static_cast<unsigned long long>(sample.tick_index),
+                       static_cast<unsigned long long>(m.prev_tick));
+            m.failed = true;
+            return false;
+        }
+        const auto delta = static_cast<uint32_t>(sample.tick_index - m.prev_tick);
+        m.pending_video.back().duration = delta;
+        m.pending_ticks += delta;
+        // A fragment a second long, or one GOP when that's shorter: what a crash can lose.
+        if (m.pending_ticks >= m.fps || sample.is_keyframe) {
+            if (!m.FlushFragment()) return false;
+        }
+    }
+    uint32_t size = 0;
+    if (!WriteVideoSample(m.av1, bytes, m.obus,
+                          [&](const uint8_t* p, size_t n) { m.pending_bytes.insert(m.pending_bytes.end(), p, p + n); },
+                          size)) {
+        Log::Error("mux: malformed AV1 OBU in a recording");
+        m.failed = true;
+        return false;
+    }
+    m.pending_video.push_back({size, 0, sample.is_keyframe});
+    m.prev_tick = sample.tick_index;
+    return true;
+}
+
+bool Mp4FragmentedWriter::AddAudio(size_t track, const MuxAudioFrame& frame) {
+    Impl& m = *impl_;
+    if (!m.sink || m.failed || m.finished || track >= m.pending_audio.size()) return false;
+    Impl::PendingAudio& a = m.pending_audio[track];
+    a.sizes.push_back(static_cast<uint32_t>(frame.data.size()));
+    a.bytes.insert(a.bytes.end(), frame.data.begin(), frame.data.end());
+    // Video normally flushes audio along with it; when video stops coming (a stalled capture),
+    // audio goes out on its own every couple of seconds instead of piling up.
+    const uint64_t pending_samples = static_cast<uint64_t>(a.sizes.size()) * kAacFrameSamples;
+    if (pending_samples >= 2ull * m.audio[track].sample_rate) return m.FlushFragment(/*with_video=*/false);
+    return true;
+}
+
+bool Mp4FragmentedWriter::Finish(uint32_t last_sample_ticks, const MuxMarkers& markers) {
+    Impl& m = *impl_;
+    if (!m.sink || m.finished) return false;
+    m.finished = true;
+    if (m.video.sample_sizes.empty() && m.pending_video.empty()) {
+        m.sink->Discard();  // nothing to play
+        m.sink.reset();
+        return false;
+    }
+    if (m.failed) return false;  // left fragmented as written
+    if (!m.pending_video.empty()) m.pending_video.back().duration = last_sample_ticks ? last_sample_ticks : 1;
+    if (!m.FlushFragment()) return false;
+
+    Mp4FileSink&   sink         = *m.sink;
+    const uint64_t fragment_end = sink.Pos();
+    const uint64_t video_ms     = m.video.duration * 1000 / m.fps;
+    const std::vector<MuxChapter> chapters = FileChapters(markers, video_ms);
+    TrackTiming chapter_t;
+    if (!chapters.empty()) chapter_t = WriteChapterSamples(sink, chapters, video_ms);
+    const uint64_t data_end = sink.Pos();
+
+    // A track that never got a frame isn't in the plain file.
+    std::vector<AudioMoovParams> params;
+    for (size_t i = 0; i < m.audio.size(); ++i)
+        if (!m.audio_t[i].sample_sizes.empty()) params.push_back(MakeAudioMoovParams(m.audio[i], m.audio_t[i]));
+    ByteWriter moov;
+    WriteMoov(moov, Mp4Now(), m.width, m.height, m.entry, m.video, params, chapters.empty() ? nullptr : &chapter_t,
+              chapters, markers.json);
+    sink.Write(moov.Data());
+    sink.Flush();
+    if (!sink.Ok()) {
+        // Out of room for the moov: back to the fragmented file, whole up to its last fragment.
+        sink.Truncate(fragment_end);
+        return false;
+    }
+
+    // The placeholder becomes the header of one mdat holding everything up to the moov: the opening
+    // moov and every moof inside it are opaque data to a reader of the plain file.
+    ByteWriter     hdr;
+    const uint64_t size = data_end - m.placeholder;
+    if (size > UINT32_MAX) {
+        hdr.WB32(1);
+        hdr.WriteBytes("mdat", 4);
+        hdr.WB64(size);
+    } else {
+        WriteBox(hdr, static_cast<uint32_t>(size), "mdat");
+    }
+    sink.Patch(m.placeholder, hdr.Data().data(), hdr.Data().size());
+    if (!sink.Sync()) {
+        sink.Truncate(fragment_end);  // not two moovs
+        return false;
+    }
+    m.sink.reset();  // done: closed, and Discard no longer reaches it
+    return true;
+}
+
+void Mp4FragmentedWriter::Discard() {
+    Impl& m = *impl_;
+    if (!m.sink) return;  // never opened, or finished into a plain file
+    m.sink->Discard();
+    m.sink.reset();
+    m.finished = true;
+}
+
+uint64_t Mp4FragmentedWriter::FileBytes() const {
+    const Impl& m = *impl_;
+    if (!m.sink) return 0;
+    uint64_t bytes = m.sink->Pos() + m.pending_bytes.size();
+    for (const auto& a : m.pending_audio) bytes += a.bytes.size();
+    return bytes;
+}
+
+uint64_t Mp4FragmentedWriter::VideoTicks() const {
+    const Impl& m = *impl_;
+    return m.video.duration + m.pending_ticks;
 }
 
 }  // namespace ombra

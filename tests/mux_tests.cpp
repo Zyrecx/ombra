@@ -14,6 +14,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <utility>
@@ -352,6 +353,288 @@ TEST_CASE("mux: markers become chapters and a metadata tag that ffprobe reads") 
     CHECK(none_info.chapters.empty());
     CHECK(none_info.streams.size() == 1);
     CHECK(none_info.format_tags.count("markers") == 0);
+}
+
+// --- Mp4FragmentedWriter ------------------------------------------------------------------------
+
+// The file's top-level box types, in order (a 64-bit largesize understood).
+std::vector<std::string> TopLevelBoxes(const std::wstring& path) {
+    std::vector<std::string> boxes;
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"rb") != 0 || !f) return boxes;
+    uint64_t pos = 0;
+    for (;;) {
+        uint8_t h[16];
+        if (_fseeki64(f, static_cast<long long>(pos), SEEK_SET) != 0 || fread(h, 1, 8, f) != 8) break;
+        uint64_t size = (uint64_t(h[0]) << 24) | (uint64_t(h[1]) << 16) | (uint64_t(h[2]) << 8) | h[3];
+        if (size == 1) {
+            if (fread(h + 8, 1, 8, f) != 8) break;
+            size = 0;
+            for (int k = 8; k < 16; ++k) size = (size << 8) | h[k];
+        }
+        boxes.emplace_back(reinterpret_cast<const char*>(h + 4), 4);
+        if (size < 8) break;
+        pos += size;
+    }
+    fclose(f);
+    return boxes;
+}
+
+bool FileExists(const std::wstring& path) { return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES; }
+
+MuxAudioTrack FakeAacTrack(const char* name) {
+    MuxAudioTrack track;
+    track.name = name;
+    track.asc  = {0x11, 0x90};  // AAC-LC, 48 kHz, stereo
+    return track;
+}
+
+// Not AAC that decodes: bytes that tell frames apart, sizes varying so a slot mixup shows.
+MuxAudioFrame FakeAacFrame(size_t i) {
+    MuxAudioFrame f;
+    f.data.assign(32 + i % 7, static_cast<uint8_t>(i));
+    return f;
+}
+
+// Feeds the fixture's first `frames` AUs (ticks from `ticks`, or the index), plus one fake AAC
+// frame to audio track 0 every other video frame when the writer has audio.
+void Feed(Mp4FragmentedWriter& w, const H264Fixture& fx, size_t frames, bool audio,
+          const std::vector<uint64_t>& ticks = {}) {
+    for (size_t i = 0; i < frames; ++i) {
+        const uint64_t tick = ticks.empty() ? i : ticks[i];
+        REQUIRE(w.AddVideo({fx.aus[i].idr, tick}, fx.aus[i].annexb));
+        if (audio && i % 2 == 0)
+            REQUIRE(w.AddAudio(0, FakeAacFrame(i)));
+    }
+}
+
+TEST_CASE("mux: a finished fragmented recording is the plain file a save writes") {
+    const H264Fixture& fx = StandardFixture();
+    REQUIRE(fx.aus.size() >= 200);
+    std::vector<uint64_t> ticks;
+    for (uint64_t i = 0; i < 200; ++i) ticks.push_back(i < 130 ? i : i + 2);  // a gap mid-fragment
+    std::vector<MuxAu> aus;
+    MuxAudioTrack listed_track = FakeAacTrack("Game");
+    for (size_t i = 0; i < 200; ++i) {
+        aus.push_back({fx.aus[i].annexb, fx.aus[i].idr, ticks[i]});
+        if (i % 2 == 0) listed_track.frames.push_back(FakeAacFrame(i));
+    }
+    const std::wstring listed = TestOutputPath(L"mux_frag_listed.mp4");
+    REQUIRE(MuxWriteMp4(listed, fx.sps_pps, fx.width, fx.height, fx.fps, aus, {listed_track}));
+
+    const std::wstring path = TestOutputPath(L"mux_frag_finished.mp4");
+    {
+        Mp4FragmentedWriter w;
+        // A second track that never gets a frame is left out of the finished file.
+        REQUIRE(w.Open(path, fx.sps_pps, fx.width, fx.height, fx.fps, VideoCodec::H264, {},
+                       {FakeAacTrack("Game"), FakeAacTrack("Mic")}));
+        Feed(w, fx, 200, true, ticks);
+        CHECK(w.VideoTicks() == ticks.back());
+        CHECK(w.FileBytes() > 0);
+        REQUIRE(w.Finish(1, {}));
+    }
+    CHECK(TopLevelBoxes(path) == std::vector<std::string>{"ftyp", "mdat", "moov"});
+
+    ClipInfo a, b;
+    REQUIRE(ReadClipInfo(listed, a));
+    REQUIRE(ReadClipInfo(path, b));
+    CHECK(b.duration_s == doctest::Approx(202.0 / fx.fps));
+    CHECK(b.duration_s == a.duration_s);
+    CHECK(b.video_bytes == a.video_bytes);
+    CHECK(b.keyframes_s == a.keyframes_s);
+    CHECK(b.audio_track_names == std::vector<std::string>{"Game"});
+
+    const ProbeInfo info = Probe(path);
+    REQUIRE_MESSAGE(info.ok, info.error);
+    CHECK(info.Of("video").size() == 1);
+    CHECK(info.Of("audio").size() == 1);
+    // Every packet's bytes and time, read through the final moov's chunk tables.
+    const std::vector<std::string> video_packets = PacketHashes(listed, L"v:0");
+    const std::vector<std::string> audio_packets = PacketHashes(listed, L"a:0");
+    CHECK(video_packets.size() == 200);
+    CHECK(audio_packets.size() == 100);
+    CHECK(PacketHashes(path, L"v:0") == video_packets);
+    CHECK(PacketHashes(path, L"a:0") == audio_packets);
+
+    // Discard after a Finish that worked leaves the file alone.
+    Mp4FragmentedWriter again;
+    const std::wstring kept = TestOutputPath(L"mux_frag_kept.mp4");
+    REQUIRE(again.Open(kept, fx.sps_pps, fx.width, fx.height, fx.fps, VideoCodec::H264, {}, {}));
+    Feed(again, fx, 30, false);
+    REQUIRE(again.Finish(1, {}));
+    again.Discard();
+    CHECK(FileExists(kept));
+}
+
+TEST_CASE("mux: an abandoned fragmented recording's audio is the start of the finished one's") {
+    const H264Fixture& fx = StandardFixture();
+    const std::wstring finished = TestOutputPath(L"mux_frag_av_finished.mp4");
+    const std::wstring abandoned = TestOutputPath(L"mux_frag_av_abandoned.mp4");
+    for (const std::wstring* path : {&finished, &abandoned}) {
+        Mp4FragmentedWriter w;
+        REQUIRE(w.Open(*path, fx.sps_pps, fx.width, fx.height, fx.fps, VideoCodec::H264, {}, {FakeAacTrack("Game")}));
+        Feed(w, fx, 150, true);
+        if (path == &finished) REQUIRE(w.Finish(1, {}));
+    }
+    const std::vector<std::string> video_all = PacketHashes(finished, L"v:0");
+    const std::vector<std::string> audio_all = PacketHashes(finished, L"a:0");
+    const std::vector<std::string> video_part = PacketHashes(abandoned, L"v:0");
+    const std::vector<std::string> audio_part = PacketHashes(abandoned, L"a:0");
+    REQUIRE(video_all.size() == 150);
+    REQUIRE(audio_all.size() == 75);
+    // Two fragments of 60 frames went out, each with the 30 audio frames that came with it.
+    REQUIRE(video_part.size() == 120);
+    REQUIRE(audio_part.size() == 60);
+    CHECK(std::equal(video_part.begin(), video_part.end(), video_all.begin()));
+    CHECK(std::equal(audio_part.begin(), audio_part.end(), audio_all.begin()));
+}
+
+TEST_CASE("mux: a fragmented recording writes audio on its own when video stops") {
+    const H264Fixture& fx = StandardFixture();
+    const std::wstring path = TestOutputPath(L"mux_frag_stalled.mp4");
+    {
+        Mp4FragmentedWriter w;
+        REQUIRE(w.Open(path, fx.sps_pps, fx.width, fx.height, fx.fps, VideoCodec::H264, {}, {FakeAacTrack("Game")}));
+        Feed(w, fx, 61, false);  // one fragment out; frame 60 waits for its duration
+        // Two seconds at 48 kHz is 93.75 frames: the 94th goes out with the 93 before it.
+        for (size_t i = 0; i < 100; ++i) REQUIRE(w.AddAudio(0, FakeAacFrame(i)));
+    }
+    CHECK(PacketHashes(path, L"a:0").size() == 94);
+    CHECK(PacketHashes(path, L"v:0").size() == 60);
+}
+
+TEST_CASE("mux: a fragmented recording's per-fragment sync to disk (timing)") {
+    // About 6 MB a second, a high-bitrate 1080p60 recording: fake 100 KB slices, never decoded.
+    const H264Fixture& fx = StandardFixture();
+    std::vector<uint8_t> key = {0, 0, 0, 1, 0x65}, delta = {0, 0, 0, 1, 0x41};
+    key.resize(100 * 1024, 0x5A);
+    delta.resize(100 * 1024, 0x5A);
+    const std::wstring path = TestOutputPath(L"mux_frag_sync.mp4");
+    Mp4FragmentedWriter w;
+    REQUIRE(w.Open(path, fx.sps_pps, fx.width, fx.height, fx.fps, VideoCodec::H264, {}, {}));
+    std::vector<double> flush_ms;
+    LARGE_INTEGER freq, a, b;
+    QueryPerformanceFrequency(&freq);
+    for (uint64_t i = 0; i < 600; ++i) {
+        const bool idr = i % 120 == 0;
+        QueryPerformanceCounter(&a);
+        REQUIRE(w.AddVideo({idr, i}, idr ? key : delta));
+        QueryPerformanceCounter(&b);
+        if (i > 0 && i % 60 == 0) flush_ms.push_back(1000.0 * double(b.QuadPart - a.QuadPart) / double(freq.QuadPart));
+    }
+    REQUIRE(w.Finish(1, {}));
+    std::sort(flush_ms.begin(), flush_ms.end());
+    MESSAGE("fragment write + FlushFileBuffers of ~6 MB: p50 " << flush_ms[flush_ms.size() / 2] << " ms, worst "
+                                                               << flush_ms.back() << " ms (" << flush_ms.size() << ")");
+    CHECK(flush_ms.back() < 1000.0);  // well inside the second the next fragment takes to fill
+}
+
+TEST_CASE("mux: a fragmented recording decodes, finished or abandoned mid-write") {
+    const H264Fixture& fx = StandardFixture();
+    REQUIRE(fx.aus.size() >= 150);
+
+    const std::wstring finished = TestOutputPath(L"mux_frag_video.mp4");
+    {
+        Mp4FragmentedWriter w;
+        REQUIRE(w.Open(finished, fx.sps_pps, fx.width, fx.height, fx.fps, VideoCodec::H264, {}, {}));
+        Feed(w, fx, 150, false);
+        REQUIRE(w.Finish(1, {}));
+    }
+    CHECK(DecodeErrors(finished).empty());
+    const VideoFrames all = ProbeVideoFrames(finished);
+    CHECK(all.count == 150);
+    CHECK(all.first_is_key);
+
+    // A crash: the writer goes away without Finish. Fragments end before each IDR (every 60
+    // frames), so the last 30 frames were never written; the rest plays.
+    const std::wstring abandoned = TestOutputPath(L"mux_frag_abandoned.mp4");
+    {
+        Mp4FragmentedWriter w;
+        REQUIRE(w.Open(abandoned, fx.sps_pps, fx.width, fx.height, fx.fps, VideoCodec::H264, {}, {}));
+        Feed(w, fx, 150, false);
+    }
+    REQUIRE(FileExists(abandoned));
+    const std::vector<std::string> boxes = TopLevelBoxes(abandoned);
+    CHECK(boxes == std::vector<std::string>{"ftyp", "free", "moov", "moof", "mdat", "moof", "mdat"});
+    CHECK(DecodeErrors(abandoned).empty());
+    const VideoFrames part = ProbeVideoFrames(abandoned);
+    CHECK(part.count == 120);
+    CHECK(part.first_is_key);
+    CHECK(part.last_pts_s == doctest::Approx(119.0 / fx.fps));
+}
+
+TEST_CASE("mux: a fragmented recording keeps chapters and the markers tag") {
+    const H264Fixture& fx = StandardFixture();
+    const std::wstring path = TestOutputPath(L"mux_frag_chapters.mp4");
+    MuxMarkers markers;
+    markers.chapters = {{0, "Start"}, {1500, "Kill"}};
+    markers.json     = R"({"v":1})";
+    {
+        Mp4FragmentedWriter w;
+        REQUIRE(w.Open(path, fx.sps_pps, fx.width, fx.height, fx.fps, VideoCodec::H264, {}, {FakeAacTrack("Game")}));
+        Feed(w, fx, 180, true);
+        REQUIRE(w.Finish(1, markers));
+    }
+    const ProbeInfo info = Probe(path);
+    REQUIRE_MESSAGE(info.ok, info.error);
+    REQUIRE(info.chapters.size() == 2);
+    CHECK(info.chapters[1].title == "Kill");
+    CHECK(info.chapters[1].start_s == doctest::Approx(1.5));
+    CHECK(info.chapters[1].end_s == doctest::Approx(3.0));
+    REQUIRE(info.format_tags.count("markers") == 1);
+    CHECK(info.format_tags.at("markers") == markers.json);
+    CHECK(TopLevelBoxes(path) == std::vector<std::string>{"ftyp", "mdat", "moov"});
+}
+
+TEST_CASE("mux: a fragmented recording that can't go on keeps what it wrote") {
+    const H264Fixture& fx = StandardFixture();
+    const std::wstring path = TestOutputPath(L"mux_frag_back.mp4");
+    {
+        Mp4FragmentedWriter w;
+        REQUIRE(w.Open(path, fx.sps_pps, fx.width, fx.height, fx.fps, VideoCodec::H264, {}, {}));
+        Feed(w, fx, 70, false);
+        CHECK_FALSE(w.AddVideo({false, 10}, fx.aus[70].annexb));  // a tick going back
+        CHECK_FALSE(w.AddVideo({false, 71}, fx.aus[71].annexb));  // and nothing after it
+        CHECK_FALSE(w.Finish(1, {}));
+    }
+    REQUIRE(FileExists(path));
+    CHECK(ProbeVideoFrames(path).count == 60);  // the fragment before the IDR at 60
+
+    // The first sample must be a keyframe.
+    const std::wstring nokey = TestOutputPath(L"mux_frag_nokey.mp4");
+    {
+        Mp4FragmentedWriter w;
+        REQUIRE(w.Open(nokey, fx.sps_pps, fx.width, fx.height, fx.fps, VideoCodec::H264, {}, {}));
+        CHECK_FALSE(w.AddVideo({false, 0}, fx.aus[1].annexb));
+        CHECK_FALSE(w.Finish(1, {}));
+    }
+    CHECK_FALSE(FileExists(nokey));
+}
+
+TEST_CASE("mux: a fragmented recording with no video, or discarded, leaves no file") {
+    const H264Fixture& fx = StandardFixture();
+    const std::wstring empty = TestOutputPath(L"mux_frag_empty.mp4");
+    {
+        Mp4FragmentedWriter w;
+        REQUIRE(w.Open(empty, fx.sps_pps, fx.width, fx.height, fx.fps, VideoCodec::H264, {}, {FakeAacTrack("Game")}));
+        REQUIRE(w.AddAudio(0, {std::vector<uint8_t>(32, 1)}));
+        CHECK_FALSE(w.Finish(1, {}));
+    }
+    CHECK_FALSE(FileExists(empty));
+
+    const std::wstring dropped = TestOutputPath(L"mux_frag_dropped.mp4");
+    {
+        Mp4FragmentedWriter w;
+        REQUIRE(w.Open(dropped, fx.sps_pps, fx.width, fx.height, fx.fps, VideoCodec::H264, {}, {}));
+        Feed(w, fx, 90, false);
+        w.Discard();
+        CHECK_FALSE(w.AddVideo({false, 90}, fx.aus[90].annexb));
+    }
+    CHECK_FALSE(FileExists(dropped));
+
+    Mp4FragmentedWriter bad;
+    CHECK_FALSE(bad.Open(TestOutputPath(L"mux_frag_bad.mp4"), {0, 0, 0, 1}, fx.width, fx.height, fx.fps,
+                         VideoCodec::H264, {}, {}));
 }
 
 }  // namespace ombra::test

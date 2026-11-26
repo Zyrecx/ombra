@@ -57,6 +57,10 @@ struct VideoFrames {
 };
 VideoFrames ProbeVideoFrames(const std::wstring& file);
 
+// Every packet of one stream (`stream` an ffprobe specifier: L"v:0", L"a:0") as "pts,size,MD5:hex",
+// read without decoding: compares what two files store, fake audio included.
+std::vector<std::string> PacketHashes(const std::wstring& file, const wchar_t* stream);
+
 // Decodes the `ordinal`-th audio stream (0-based, audio streams only) to s16 stereo 48 kHz.
 Pcm DecodeAudio(const std::wstring& file, int ordinal);
 

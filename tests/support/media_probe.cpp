@@ -126,6 +126,20 @@ std::string DecodeErrors(const std::wstring& file) {
     return errors;
 }
 
+std::vector<std::string> PacketHashes(const std::wstring& file, const wchar_t* stream) {
+    const ProcessResult r = RunProcess(Quote(FfprobePath()) + L" -v quiet -select_streams " + stream +
+                                       L" -show_data_hash MD5 -show_entries packet=pts,size,data_hash"
+                                       L" -of csv=p=0 " + Quote(file));
+    std::vector<std::string> packets;
+    std::istringstream lines(r.out);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (!line.empty()) packets.push_back(line);
+    }
+    return packets;
+}
+
 VideoFrames ProbeVideoFrames(const std::wstring& file) {
     VideoFrames frames;
     const ProcessResult r = RunProcess(Quote(FfprobePath()) +
