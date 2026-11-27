@@ -375,6 +375,7 @@ private:
     float BelowTiles(float s) const;       // the gap, hint and stats lines under the tiles
     float HintPlateWidth(float s) const;   // the wider of the hint and stats lines, plate included
     float ColumnTileHeight(bool with_foot, float s) const;
+    float RowTileMinWidth(float s) const;  // Replay's title, and its foot label beside the switch, untrimmed
 
     // Instant Replay (its foot is the on/off switch), Record (the user's own recording) and Clips.
     // Screenshot was dropped from Home; its hotkey still works.

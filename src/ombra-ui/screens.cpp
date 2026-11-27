@@ -802,13 +802,24 @@ float HomeScreen::ColumnTileHeight(bool with_foot, float s) const {
     return (2 * z.card_padding() + (std::max)(2 * z.control_sm(), words) + foot) * s;
 }
 
+float HomeScreen::RowTileMinWidth(float s) const {
+    if (!host_) return 0.0f;
+    const Theme& t = host_->GetTheme();
+    const paint::Paint p{nullptr, t, s};
+    const Sizes& z = t.size;
+    const float foot = p.TextW(replay_card_.foot_label, TypeRole::Caption) + (z.space_sm() + z.switch_w()) * s;
+    return (std::max)(foot, p.TextW(replay_card_.title, TypeRole::Title)) + 2 * z.card_padding() * s;
+}
+
 D2D1_SIZE_F HomeScreen::Measure(float max_w, float max_h, float s) const {
     const Sizes z = host_ ? host_->GetTheme().size : Sizes{};
     const float gap = z.space_lg() * s, below = BelowTiles(s);
     if (column_)
         return D2D1::SizeF((std::min)(max_w, (std::max)(kColumnTileWidthDip * s, HintPlateWidth(s))), ColumnHeight(s));
     const float tile_h = (std::max)(0.0f, (std::min)((max_w - gap * 2) / 3, max_h - below) * kTileShrink);
-    return D2D1::SizeF(tile_h * kTileAspect * 3 + gap * 2, tile_h + below);
+    // A short screen leaves the tiles narrower than their words: they widen, up to the room there is.
+    const float tile_w = (std::max)(tile_h * kTileAspect, (std::min)(RowTileMinWidth(s), (max_w - gap * 2) / 3));
+    return D2D1::SizeF(tile_w * 3 + gap * 2, tile_h + below);
 }
 
 void HomeScreen::Layout(const D2D1_RECT_F& bounds, float dpi_scale) {
@@ -836,7 +847,7 @@ void HomeScreen::Layout(const D2D1_RECT_F& bounds, float dpi_scale) {
         clips_card_.bounds  = D2D1::RectF(x, top + (full + gap) * 2, x + tiles_w, top + (full + gap) * 2 + shrt);
     } else {
         const float tile_h = (std::max)(0.0f, (std::min)((avail_w - gap * 2) / (3 * kTileAspect), avail_h - below));
-        const float tile_w = tile_h * kTileAspect;
+        const float tile_w = (std::max)(tile_h * kTileAspect, (std::min)(RowTileMinWidth(s), (avail_w - gap * 2) / 3));
         tiles_w = tile_w * 3 + gap * 2;
         tiles_h = tile_h;
         const float x = area.left + (avail_w - tiles_w) * 0.5f, top = area.top + (avail_h - tiles_h - below) * 0.5f;
