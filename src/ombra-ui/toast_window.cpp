@@ -307,6 +307,7 @@ public:
     void SetCompact(bool compact) { compact_ = compact; }
     void SetDetails(bool on) { details_ = on; }    // ui.toast_details
     void SetTimeBar(bool on) { time_bar_ = on; }   // ui.toast_time_bar
+    void SetInCaptures(bool on) { in_captures_ = on; }  // ui.toast_in_captures; before InitGraphics
     void SetHoldMs(ULONGLONG ms) { hold_ms_ = ms; }  // ui.toast_duration
     // The live toast's sound: `event`'s as the card shows (a pending save's comes with its result),
     // if its row's Sound is on in `cfg`. Never set by --toasttest or --drive: those stay silent.
@@ -344,6 +345,7 @@ private:
     bool compact_ = false;
     bool details_ = true;
     bool time_bar_ = true;
+    bool in_captures_ = true;
     ULONGLONG hold_ms_ = 3000;
     bool pending_ = false;
     const ombra::Config* sound_cfg_ = nullptr;
@@ -489,9 +491,9 @@ bool ToastWindow::CreateHostWindow(int x, int y, int width, int height) {
     // card's alpha is DirectComposition's.
     SetLayeredWindowAttributes(hwnd_, 0, 255, LWA_ALPHA);
 
-    // Never let this popup get burned into the desktop capture that's the whole point of the app --
-    // (the overlay panel has this same latent gap today, not fixed here).
-    SetWindowDisplayAffinity(hwnd_, WDA_EXCLUDEFROMCAPTURE);
+    // ui.toast_in_captures off: screen capture (Ombra's own, OBS, Discord) never sees the popup.
+    // On, nothing is set: the default affinity lets capture see it.
+    if (!in_captures_) SetWindowDisplayAffinity(hwnd_, WDA_EXCLUDEFROMCAPTURE);
 
     dpi_scale = static_cast<float>(GetDpiForWindow(hwnd_)) / 96.0f;
     theme_.SetFontScale(dpi_scale);
@@ -1035,6 +1037,7 @@ int RunToast(const std::wstring& event, std::vector<HANDLE> save_waits, HANDLE s
     toast.SetCompact(cfg.ui_toast_style == "compact");
     toast.SetDetails(cfg.ui_toast_details);
     toast.SetTimeBar(cfg.ui_toast_time_bar);
+    toast.SetInCaptures(cfg.ui_toast_in_captures);
     toast.SetHoldMs(static_cast<ULONGLONG>((std::clamp)(static_cast<int>(cfg.ui_toast_duration), 1, 15)) * 1000);
     toast.SetSound(&cfg, event);  // a pending save's becomes its result's
     if (!toast.InitGraphics(/*warp=*/false, mon)) return 1;

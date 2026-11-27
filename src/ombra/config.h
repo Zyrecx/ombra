@@ -112,6 +112,13 @@ struct SettingMeta {
     X(ui_toast_time_bar, "ui.toast_time_bar", true, Tier::Common, "Notifications", \
       "", "", ApplyTier::Free, true, \
       "Time bar", "A thin bar along the popup's foot that runs down until it leaves.", "") \
+    /* On by default: a popup seen in streams, screen shares and later clips shows what Ombra did.
+       A buffer save never holds its own popup (it saves what came before); a recording's start
+       and a clip still recording (--after) do. The overlay stays hidden. */ \
+    X(ui_toast_in_captures, "ui.toast_in_captures", true, Tier::Common, "Notifications", \
+      "", "", ApplyTier::Free, true, \
+      "Show in recordings and streams", "Screen capture sees popups: OBS, Discord, and " OMBRA_PRODUCT_NAME "'s own recordings.", \
+      "A saved clip never shows its own popup; a recording shows its start. A recorded game window shows none.") \
     X(ui_screen_frame, "ui.screen_frame", false, Tier::Common, "Appearance", \
       "", "", ApplyTier::Free, true, \
       "Screen frame", "Round off the screen's corners while the overlay is open, so it reads as one " \

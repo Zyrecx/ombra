@@ -284,6 +284,7 @@ const FieldFormEntry kFieldForms[] = {
     { "ui.toast_details",          FieldForm::Custom },
     { "ui.toast_time_bar",         FieldForm::Custom },
     { "ui.toast_duration",         FieldForm::Custom },
+    { "ui.toast_in_captures",      FieldForm::Custom },
     // Advanced
     { "games.list",                FieldForm::Custom },
     { "capture.capture_cursor",    FieldForm::Custom },
@@ -2335,6 +2336,10 @@ void SettingsScreen::BuildAppearanceNotificationsPage() {
         if (const FieldSpec* s = FindSpec("ui.toast_duration"))
             AddRow(*card, AppearanceRow(L"Duration", L"How long a popup stays once it has its result.",
                                         MakeSegmented(*s, [](const std::string& v) { return Utf8ToWide(v) + L" s"; })));
+        if (const FieldSpec* s = FindSpec("ui.toast_in_captures"))
+            AddRow(*card, AppearanceRow(L"Show in recordings and streams",
+                                        L"OBS, Discord and " OMBRA_PRODUCT_NAME "'s recordings see popups. A saved clip never shows its own.",
+                                        MakeSwitch(*s)));
         card->rows.push_back(MakeToastEventTable());
     } else {
         card->help = L"No popups. Saves and the buffer work the same; you just aren't told on screen.";
