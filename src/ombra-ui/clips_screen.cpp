@@ -466,6 +466,9 @@ void ClipsScreen::LoadDetails(uint64_t gen, std::vector<std::wstring> paths) {
                         if (c.path != d.path) continue;
                         c.info_loaded = true;
                         if (d.info_ok) {
+                            // Opened before its details came: the end it was given was 0.
+                            if (selected_ >= 0 && &c == &clips_[selected_] && trim_out_ <= 0.0)
+                                trim_out_ = d.info.duration_s;
                             c.duration_s = d.info.duration_s;
                             c.keyframes_s = std::move(d.info.keyframes_s);
                         }
