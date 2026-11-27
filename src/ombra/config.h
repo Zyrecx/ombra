@@ -338,6 +338,10 @@ struct SettingMeta {
       "left|right|top|bottom", "", ApplyTier::Free, true, \
       "Tab bar position", "Which side of the Settings panel the tab bar sits on.", \
       "Left/right stack the tabs vertically; top/bottom lay them out in a row.") \
+    X(ui_home_layout, "ui.home_layout", "row", "row|column", Tier::Common, "Appearance", \
+      "row|column", "", ApplyTier::Free, true, \
+      "Home layout", "How the overlay's three tiles line up: side by side, or stacked as wide tiles.", \
+      "Column suits a panel on the left or right edge.") \
     X(ui_corners, "ui.corners", "default", "sharp|default|round", Tier::Common, "Appearance", \
       "sharp|default|round", "", ApplyTier::Free, true, \
       "Corners", "How rounded cards, rows and controls are.", "") \

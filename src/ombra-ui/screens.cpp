@@ -162,6 +162,8 @@ const OptionLabel kOptionLabels[] = {
     { "ui.rail_position",   "right",    L"Right" },
     { "ui.rail_position",   "top",      L"Top" },
     { "ui.rail_position",   "bottom",   L"Bottom" },
+    { "ui.home_layout",     "row",      L"Row" },
+    { "ui.home_layout",     "column",   L"Column" },
     { "ui.screen_frame_color", "match",    L"Match" },
     { "ui.screen_frame_color", "contrast", L"Contrast" },
     { "ui.screen_frame_color", "accent",   L"Accent" },
@@ -260,6 +262,7 @@ const FieldFormEntry kFieldForms[] = {
     { "ui.panel_position",         FieldForm::Custom },     // PanelPositionControl (Appearance > Layout)
     { "ui.panel_attach",           FieldForm::Custom },
     { "ui.rail_position",          FieldForm::Custom },
+    { "ui.home_layout",            FieldForm::Custom },
     { "ui.memory_card",            FieldForm::Custom },
     { "ui.screen_frame",           FieldForm::Custom },
     { "ui.screen_frame_radius",    FieldForm::Custom },
@@ -758,6 +761,56 @@ void HomeScreen::UpdateState(const ombra::JsonValue* status_resp, const ombra::J
     RefreshReplayDetail();
 }
 
+namespace {
+// Row tiles read as slightly smaller boxes than the room allows, a little narrower than tall.
+constexpr float kTileShrink = 0.92f;
+constexpr float kTileAspect = 0.90f;  // width / height
+constexpr float kColumnTileWidthDip = 400.0f;
+}  // namespace
+
+float HomeScreen::ColumnHeight(float s) const {
+    // Replay and Record carry a foot; Clips has none, so it is shorter.
+    const Sizes z = host_ ? host_->GetTheme().size : Sizes{};
+    return ColumnTileHeight(true, s) * 2 + ColumnTileHeight(false, s) + z.space_lg() * s * 2 + BelowTiles(s);
+}
+
+float HomeScreen::BelowTiles(float s) const {
+    const Sizes z = host_ ? host_->GetTheme().size : Sizes{};
+    return z.space_lg() * s + z.control_xs() * s + z.space_xs() * s + LineHeight(TypeRole::Caption) * s +
+           2 * z.space_sm() * s;
+}
+
+float HomeScreen::HintPlateWidth(float s) const {
+    if (!host_) return 0.0f;
+    const Theme& t = host_->GetTheme();
+    const paint::Paint p{nullptr, t, s};
+    const float sp = t.size.space_sm() * s;
+    const std::vector<std::wstring> keys = paint::SplitKeys(hint_keys_.empty() ? std::wstring(L"—") : hint_keys_);
+    const float hint_w = p.TextW(L"Press", TypeRole::Body) + sp + p.Keys(keys, 0, 0, t.size.control_xs() * s, false) +
+                         sp + p.TextW(hint_suffix_, TypeRole::Body);
+    const float stats_w = live_stats_str_.empty() ? 0.0f : p.TextW(live_stats_str_, TypeRole::Caption);
+    return (std::max)(hint_w, stats_w) + 2 * t.size.space_md() * s;
+}
+
+float HomeScreen::ColumnTileHeight(bool with_foot, float s) const {
+    const Sizes z = host_ ? host_->GetTheme().size : Sizes{};
+    // As tall as the disc or the words beside it, whichever is taller (a recording's time is Display).
+    const float words = (std::max)(LineHeight(TypeRole::Title) + z.space_xxs() + LineHeight(TypeRole::Body) +
+                                       z.space_xxs() + LineHeight(TypeRole::Caption),
+                                   LineHeight(TypeRole::Display) + z.space_xxs() + LineHeight(TypeRole::Body));
+    const float foot = with_foot ? z.control_sm() + 2 * z.space_sm() : 0.0f;
+    return (2 * z.card_padding() + (std::max)(2 * z.control_sm(), words) + foot) * s;
+}
+
+D2D1_SIZE_F HomeScreen::Measure(float max_w, float max_h, float s) const {
+    const Sizes z = host_ ? host_->GetTheme().size : Sizes{};
+    const float gap = z.space_lg() * s, below = BelowTiles(s);
+    if (column_)
+        return D2D1::SizeF((std::min)(max_w, (std::max)(kColumnTileWidthDip * s, HintPlateWidth(s))), ColumnHeight(s));
+    const float tile_h = (std::max)(0.0f, (std::min)((max_w - gap * 2) / 3, max_h - below) * kTileShrink);
+    return D2D1::SizeF(tile_h * kTileAspect * 3 + gap * 2, tile_h + below);
+}
+
 void HomeScreen::Layout(const D2D1_RECT_F& bounds, float dpi_scale) {
     bounds_ = bounds;
     const float s = dpi_scale;
@@ -766,29 +819,37 @@ void HomeScreen::Layout(const D2D1_RECT_F& bounds, float dpi_scale) {
     const D2D1_RECT_F& area = bounds;
     const float gap = z.space_lg() * s;
     const float hint_h = z.control_xs() * s, stats_h = LineHeight(TypeRole::Caption) * s;
-    const float below = z.space_lg() * s + hint_h + z.space_xs() * s + stats_h + 2 * z.space_sm() * s;
+    const float below = BelowTiles(s);
     const float avail_w = area.right - area.left;
     const float avail_h = area.bottom - area.top;
-    // Tiles fill the content area rather than a fixed size. They read as slightly smaller boxes
-    // than a square, a little narrower than tall.
-    constexpr float kTileShrink = 0.92f;
-    constexpr float kTileAspect = 0.90f;  // width / height
-    const float tile = (std::min)((avail_w - gap * 2.0f) / 3.0f, avail_h - below);
-    const float tile_h = tile * kTileShrink;
-    const float tile_w = tile_h * kTileAspect;
-    const float total_w = tile_w * 3.0f + gap * 2.0f;
-    const float x = area.left + (avail_w - total_w) * 0.5f;
-    const float top = area.top;
+    // Fills the box Measure gave exactly; a bigger box (a test's) centres the same shape in it.
+    const bool column = column_;
+    replay_card_.wide = clips_card_.wide = record_card_.wide = column;
+    float tiles_w = 0, tiles_h = 0;
+    if (column) {
+        const float full = ColumnTileHeight(true, s), shrt = ColumnTileHeight(false, s);
+        tiles_w = avail_w;
+        tiles_h = full * 2 + shrt + gap * 2;
+        const float x = area.left, top = area.top + (std::max)(0.0f, avail_h - tiles_h - below) * 0.5f;
+        replay_card_.bounds = D2D1::RectF(x, top, x + tiles_w, top + full);
+        record_card_.bounds = D2D1::RectF(x, top + full + gap, x + tiles_w, top + full * 2 + gap);
+        clips_card_.bounds  = D2D1::RectF(x, top + (full + gap) * 2, x + tiles_w, top + (full + gap) * 2 + shrt);
+    } else {
+        const float tile_h = (std::max)(0.0f, (std::min)((avail_w - gap * 2) / (3 * kTileAspect), avail_h - below));
+        const float tile_w = tile_h * kTileAspect;
+        tiles_w = tile_w * 3 + gap * 2;
+        tiles_h = tile_h;
+        const float x = area.left + (avail_w - tiles_w) * 0.5f, top = area.top + (avail_h - tiles_h - below) * 0.5f;
+        replay_card_.bounds = D2D1::RectF(x, top, x + tile_w, top + tile_h);
+        record_card_.bounds = D2D1::RectF(x + tile_w + gap, top, x + tile_w * 2 + gap, top + tile_h);
+        clips_card_.bounds  = D2D1::RectF(x + tile_w * 2 + gap * 2, top, x + tiles_w, top + tile_h);
+    }
 
-    replay_card_.bounds = D2D1::RectF(x, top, x + tile_w, top + tile_h);
-    record_card_.bounds = D2D1::RectF(x + tile_w + gap, top, x + tile_w * 2 + gap, top + tile_h);
-    clips_card_.bounds  = D2D1::RectF(x + tile_w * 2 + gap * 2, top, x + total_w, top + tile_h);
-
-    // Both span exactly the tile row, so they centre under the tiles rather than under the panel.
-    // They sit on a plate space_sm round them, a tile gap below the tiles.
-    const float hint_top = top + tile_h + z.space_lg() * s + z.space_sm() * s;
-    hint_bounds_  = D2D1::RectF(x, hint_top, x + total_w, hint_top + hint_h);
-    stats_bounds_ = D2D1::RectF(x, hint_bounds_.bottom + z.space_xs() * s, x + total_w,
+    // Centred under the tiles rather than the panel, on a plate space_sm round them, a tile gap below.
+    const float lx = area.left + (avail_w - tiles_w) * 0.5f;
+    const float hint_top = replay_card_.bounds.top + tiles_h + z.space_lg() * s + z.space_sm() * s;
+    hint_bounds_  = D2D1::RectF(lx, hint_top, lx + tiles_w, hint_top + hint_h);
+    stats_bounds_ = D2D1::RectF(lx, hint_bounds_.bottom + z.space_xs() * s, lx + tiles_w,
                                 hint_bounds_.bottom + z.space_xs() * s + stats_h);
 }
 
@@ -2103,9 +2164,19 @@ void SettingsScreen::BuildAppearanceLayoutPage() {
         add_beside(AppearanceRow(L"Tabs", L"Which side the page list sits on.", MakeSegmented(*s, label(s->key))));
     if (const FieldSpec* s = FindSpec("ui.memory_card"))
         add_beside(AppearanceRow(L"Memory card", L"Memory use beside Settings.", MakeSwitch(*s)));
+    // Home's tiles sit under the picture, in the room the taller rows beside it leave; a fourth
+    // row beside it would make the tab scroll.
+    auto under = FlexWidget::MakeColumn();
+    if (picker) under->Add(picker);
+    if (const FieldSpec* s = FindSpec("ui.home_layout")) {
+        if (auto row = AppearanceRow(L"Home tiles", L"Side by side, or stacked.", MakeSegmented(*s, label(s->key)))) {
+            row->divider_above = picker != nullptr;
+            under->Add(row);
+        }
+    }
     auto hero = FlexWidget::MakeRow(gap);
     hero->align = FlexAlign::Start;
-    if (picker) hero->Add(picker);
+    if (!under->items.empty()) hero->Add(under).basis_dip = picker ? picker->max_width_dip : -1.0f;
     FlexItem& rest = hero->Add(beside);
     rest.basis_dip = 0.0f;  // the rest of the line, not the rows' unbounded width
     rest.grow = 1.0f;

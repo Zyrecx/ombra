@@ -239,7 +239,7 @@ inline constexpr const char* kUsageSettingsSent[] = {
     "ui.screen_frame_thickness", "buffer.seconds", "encode.preset", "encode.quality_preset", "capture.mode",
     "capture.target", "capture.resolution", "encode.adapter", "encode.video_codec", "encode.amf_av1_unaligned", "encode.rate_control",
     "buffer.storage", "audio.codec", "save.overlap_policy", "hotkeys.backend", "ui.theme", "ui.accent",
-    "ui.panel_position", "ui.panel_attach", "ui.screen_frame_color", "ui.rail_position", "ui.corners",
+    "ui.panel_position", "ui.panel_attach", "ui.screen_frame_color", "ui.rail_position", "ui.home_layout", "ui.corners",
     "log.level", "ui.font", "ui.density", "ui.toast_position", "ui.toast_style",
     "ui.toast_details", "ui.toast_time_bar", "ui.toast_duration"};
 // Sent only as whether they differ from the default (`<key>.changed`): typed or picked by the user.

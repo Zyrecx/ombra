@@ -151,6 +151,8 @@ enum class PanelPosition { Top, Center, Bottom, Left, Right };
 // vertically beside the content card; Top/Bottom lay it out as a horizontal strip above/below.
 enum class RailPosition { Left, Right, Top, Bottom };
 enum class PanelAttach { Floating, Attached };
+// ui.home_layout: Home's three tiles side by side, or stacked as wide tiles.
+enum class HomeLayout { Row, Column };
 // ui.theme: the whole palette (surfaces, borders, text, semantic hues), not just the accent.
 enum class ThemeMode { Dark, Light };
 // ui.screen_frame_color: Match is the panel surface (they fuse into one); Contrast is white on dark /
@@ -181,6 +183,7 @@ struct Theme {
     PanelPosition panel_position = PanelPosition::Top;
     PanelAttach panel_attach = PanelAttach::Floating;
     RailPosition rail_position = RailPosition::Left;
+    HomeLayout home_layout = HomeLayout::Row;
     // Screen frame (ui.screen_frame*): only drawn while the overlay is open. Radius/thickness in DIPs.
     bool  screen_frame = false;
     // ui.memory_card: the RAM-cost card beside the Settings card (SettingsScreen::Layout).

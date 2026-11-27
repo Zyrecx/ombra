@@ -311,6 +311,7 @@ public:
     SwitchControl toggle;
     bool reserve_foot = false;  // no foot, but centre as if there were, so a row's titles line up
     std::wstring live_line;     // under the detail after a green dot: what is being recorded
+    bool wide = false;          // wide and short: the disc at the leading edge, the words beside it
 
     D2D1_SIZE_F Measure(const LayoutConstraints& c, const LayoutContext& ctx) override;
     void Draw(ID2D1DeviceContext* dc, const Theme& theme, float s) override;
@@ -334,6 +335,7 @@ public:
     SegmentedControl from;       // the idle foot's "Start from"
     std::vector<std::wstring> from_compact;  // its options where the full words do not fit
     std::function<void()> on_click;
+    bool wide = false;           // as ActionTileControl::wide
 
     D2D1_SIZE_F Measure(const LayoutConstraints& c, const LayoutContext& ctx) override;
     void Draw(ID2D1DeviceContext* dc, const Theme& theme, float s) override;

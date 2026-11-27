@@ -2067,13 +2067,37 @@ TEST_CASE("ui: HomeScreen lays its three tiles on one centered row, stats clear 
     CHECK(a.bottom == doctest::Approx(b.bottom));
     CHECK(a.right - a.left == doctest::Approx(b.right - b.left));
     CHECK(b.left > a.right);
-    CHECK(a.left == doctest::Approx(1280.0f - b.right));  // row centered in the 1280 bounds
+    CHECK(std::abs(a.left - (1280.0f - b.right)) < 0.01f);  // row centered in the 1280 bounds
 
     // The live stats line was drawn at a hardcoded bounds_.top + 210dip, which landed inside the
     // tile row and ran through the Buffer On/Off toggle. It belongs below the tiles.
     const D2D1_RECT_F stats = screen.StatsBoundsForTest();
     CHECK(stats.top > a.bottom);
     CHECK(stats.top > screen.HintBarBoundsForTest().bottom - 0.5f);
+}
+
+TEST_CASE("ui: HomeScreen's column layout stacks wide tiles and fills the box it measured") {
+    FakeScreenHost host;
+    HomeScreen screen(&host);
+    screen.UpdateState(nullptr, nullptr);
+    screen.SetColumn(true);
+    for (const float s : {1.0f, 1.5f}) {
+        CAPTURE(s);
+        const D2D1_SIZE_F box = screen.Measure(1100.0f * s, 300.0f * s, s);
+        CHECK(box.width < box.height);  // a column suits the panel on a side edge
+        CHECK(box.height == doctest::Approx(screen.ColumnHeight(s)));  // what the overlay checks fits
+        screen.Layout(D2D1::RectF(0, 0, box.width, box.height), s);
+        const D2D1_RECT_F a = screen.ReplayCardBoundsForTest();
+        const D2D1_RECT_F c = screen.OpenRecordingsCardBoundsForTest();
+        CHECK(a.left == doctest::Approx(0.0f));
+        CHECK(a.right == doctest::Approx(box.width));
+        CHECK(c.left == doctest::Approx(a.left));
+        CHECK(c.top > a.bottom);
+        CHECK(a.right - a.left > 2 * (a.bottom - a.top));  // wide, short tiles
+        CHECK(c.bottom - c.top < a.bottom - a.top);       // Clips has no foot
+        CHECK(a.top >= -0.01f);
+        CHECK(screen.StatsBoundsForTest().bottom <= box.height + 0.01f);
+    }
 }
 
 TEST_CASE("ui: replay reports an unconfirmed save without offering an automatic retry") {

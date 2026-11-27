@@ -1519,6 +1519,11 @@ float OverlayHost::PanelPadding() const {
     return IsPanelAttached() ? theme_.size.card_padding() * dpi_scale_ : 0.0f;
 }
 
+float OverlayHost::MaxContentHeight(float view_h) const {
+    // ComputePlacement's bounds: under the header, a margin above the screen's bottom edge.
+    return view_h - 32.0f * dpi_scale_ - kContentMinTopDip * dpi_scale_ - 2.0f * PanelPadding();
+}
+
 void OverlayHost::DrawScreenFrame(float view_w, float view_h) {
     if (!d2d_context_ || !d2d_factory_ || !theme_.screen_frame) return;
     auto geo = BuildScreenFramePath(d2d_factory_.Get(), D2D1::RectF(0.0f, 0.0f, view_w, view_h),
@@ -1697,7 +1702,13 @@ void OverlayHost::RenderFrame() {
         const float pad = PanelPadding();
         const float row_w = ContentWidth(view_w) - 2.0f * pad;
         const float row_h = std::clamp(row_w * kHomeBodyAspect, kHomeBodyMinDip * dpi_scale_, kHomeBodyMaxDip * dpi_scale_);
-        const Placement place = ComputePlacement(row_w, row_h, view_w, view_h);
+        // The panel wraps what Home measures, not the whole width it may take. A row keeps the
+        // body's aspect; a column may take the height under the header.
+        // A column too tall for the screen (a short display at a big scale) falls back to the row.
+        home_screen_->SetColumn(theme_.home_layout == HomeLayout::Column &&
+                                home_screen_->ColumnHeight(dpi_scale_) <= MaxContentHeight(view_h));
+        const D2D1_SIZE_F box = home_screen_->Measure(row_w, row_h, dpi_scale_);
+        const Placement place = ComputePlacement(box.width, box.height, view_w, view_h);
         if (place.attached) DrawAttachedPanel(place.panel);
 
         home_screen_->Layout(place.content, dpi_scale_);
@@ -1727,8 +1738,7 @@ void OverlayHost::RenderFrame() {
             show_card = row_w + card_extra <= view_w - 56.0f * dpi_scale_ - 2.0f * pad;
             if (show_card) row_w += card_extra;
         }
-        const float margin = 32.0f * dpi_scale_;
-        const float max_row_h = (view_h - margin) - kContentMinTopDip * dpi_scale_ - 2.0f * pad;
+        const float max_row_h = MaxContentHeight(view_h);
         // One height for every page, deliberately. Sizing the card to each page's own content
         // removed the empty band below short pages but made the whole panel -- rail included --
         // jump when switching to a tall page like Monitors.
@@ -1757,9 +1767,7 @@ void OverlayHost::RenderFrame() {
         const float row_w = (std::min)(std::clamp(view_w * kClipsWidthPercent, kSettingsMinWidthDip * dpi_scale_,
                                                   kClipsMaxWidthDip * dpi_scale_),
                                        view_w - 56.0f * dpi_scale_) - 2.0f * pad;
-        const float margin = 32.0f * dpi_scale_;
-        const float row_h = (std::min)((view_h - margin) - kContentMinTopDip * dpi_scale_ - 2.0f * pad,
-                                       ClipsScreen::PanelHeightFor(row_w, theme_, dpi_scale_));
+        const float row_h = (std::min)(MaxContentHeight(view_h), ClipsScreen::PanelHeightFor(row_w, theme_, dpi_scale_));
         const Placement place = ComputePlacement(row_w, row_h, view_w, view_h);
         if (place.attached) DrawAttachedPanel(place.panel);
         clips_screen_->Layout(place.content, dpi_scale_);
@@ -1772,9 +1780,7 @@ void OverlayHost::RenderFrame() {
         // Settings' box: the same panel size on every page, and no rail or memory card.
         const float pad = PanelPadding();
         const float row_w = ContentWidth(view_w) - 2.0f * pad;
-        const float margin = 32.0f * dpi_scale_;
-        const float row_h = (std::min)(kSettingsRowMaxHeightDip * dpi_scale_,
-                                       (view_h - margin) - kContentMinTopDip * dpi_scale_ - 2.0f * pad);
+        const float row_h = (std::min)(kSettingsRowMaxHeightDip * dpi_scale_, MaxContentHeight(view_h));
         const Placement place = ComputePlacement(row_w, row_h, view_w, view_h);
         if (place.attached) DrawAttachedPanel(place.panel);
         // A step is laid out to a fixed height with its buttons at the foot, and setup doesn't

@@ -359,6 +359,7 @@ void Theme::ApplyUiConfig(const std::function<const ombra::JsonValue*(const char
     if (const auto* s = str("ui.panel_position")) panel_position = PanelPositionFromKey(*s);
     if (const auto* s = str("ui.panel_attach")) panel_attach = PanelAttachFromKey(*s);
     if (const auto* s = str("ui.rail_position")) rail_position = RailPositionFromKey(*s);
+    if (const auto* s = str("ui.home_layout")) home_layout = *s == "column" ? HomeLayout::Column : HomeLayout::Row;
     if (const auto* s = str("ui.screen_frame_color")) screen_frame_color = ScreenFrameColorFromKey(*s);
     if (const auto* v = get("ui.screen_frame"); v && v->type == T::Bool) screen_frame = v->b;
     if (const auto* v = get("ui.memory_card"); v && v->type == T::Bool) memory_card = v->b;

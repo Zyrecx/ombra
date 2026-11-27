@@ -332,6 +332,14 @@ public:
         return my_recording_ && my_seconds_left_ < 0 && my_elapsed_.Seconds(static_cast<double>(GetTickCount64())) < 15;
     }
     void TickRecording() { RefreshRecordTile(); }
+    // A row of three tiles, or a column of wide ones (ui.home_layout). The overlay picks the
+    // column only where ColumnHeight fits; otherwise the row.
+    void SetColumn(bool column) { column_ = column; }
+    float ColumnHeight(float dpi_scale) const;
+    // The box the tiles and the lines under them fill, given at most `max_w` x `max_h` (a column
+    // takes its own height). The overlay sizes its panel to it, then hands the box to Layout,
+    // which fills it exactly.
+    D2D1_SIZE_F Measure(float max_w, float max_h, float dpi_scale) const;
     void Layout(const D2D1_RECT_F& bounds, float dpi_scale);
     void Draw(ID2D1DeviceContext* dc, const Theme& theme, float dpi_scale);
 
@@ -363,6 +371,10 @@ public:
 private:
     ScreenHost* host_ = nullptr;
     D2D1_RECT_F bounds_{};
+    bool  column_ = false;
+    float BelowTiles(float s) const;       // the gap, hint and stats lines under the tiles
+    float HintPlateWidth(float s) const;   // the wider of the hint and stats lines, plate included
+    float ColumnTileHeight(bool with_foot, float s) const;
 
     // Instant Replay (its foot is the on/off switch), Record (the user's own recording) and Clips.
     // Screenshot was dropped from Home; its hotkey still works.

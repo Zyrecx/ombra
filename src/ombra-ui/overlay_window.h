@@ -199,6 +199,7 @@ private:
     Placement ComputePlacement(float w, float h, float view_w, float view_h) const;
     D2D1_COLOR_F SurfaceFill() const;
     float PanelPadding() const;             // an attached panel's padding around the content, 0 floating
+    float MaxContentHeight(float view_h) const;  // the tallest content ComputePlacement fits
     void DrawScreenFrame(float view_w, float view_h);
     void DrawAttachedPanel(const AttachedPanelGeometry& g);
     void DrawBrandLogo(float cx, float cy, float size);

@@ -1067,7 +1067,8 @@ void ActionTileControl::Draw(ID2D1DeviceContext* dc, const Theme& t, float s) {
 
     // The foot: a rule, the label, the shortcut's keys and the switch at the trailing edge.
     const bool foot = !foot_label.empty();
-    const float foot_h = foot || reserve_foot ? z.control_sm() * s + 2 * z.space_sm() * s : 0.0f;
+    // reserve_foot levels titles across a row of tiles; stacked wide tiles have none to level with.
+    const float foot_h = foot || (reserve_foot && !wide) ? z.control_sm() * s + 2 * z.space_sm() * s : 0.0f;
     toggle.visible = foot;
     if (foot) {
         const auto row = D2D1::RectF(r.left + pad, r.bottom - foot_h, r.right - pad, r.bottom);
@@ -1090,9 +1091,41 @@ void ActionTileControl::Draw(ID2D1DeviceContext* dc, const Theme& t, float s) {
         toggle.Draw(dc, t, s);
     }
 
-    // Icon disc, title and state as one group, centred above the foot.
     const float lt = LineHeight(TypeRole::Title) * s, lb = LineHeight(TypeRole::Body) * s, gap = z.space_md() * s;
     const float lc = LineHeight(TypeRole::Caption) * s;
+    if (wide) {
+        // The disc at the leading edge, the words beside it, both centred on the space above the foot.
+        const float cy = (r.top + r.bottom - foot_h) * 0.5f;
+        const float d = std::clamp(r.bottom - foot_h - r.top - 2 * pad, 0.0f, 2 * z.control_sm() * s);
+        const float cx = r.left + pad + d / 2;
+        if (primary) p.Circle(cx, cy, d / 2, pressed ? c.accent_pressed : Mix(c.accent, c.accent_hover, hv));
+        else p.Circle(cx, cy, d / 2, c.HoverLayer(2.0f));
+        const D2D1_COLOR_F dot = p.A(c.recording);
+        DrawIcon(dc, t, icon, cx, cy, (std::min)(z.app_icon() * s, d / 2), p.B(primary ? c.on_accent : c.text).Get(),
+                 dot_active ? &dot : nullptr);
+        const float tx = cx + d / 2 + gap, tr = r.right - pad;
+        const float block = lt + (detail.empty() ? 0.0f : z.space_xxs() * s + lb) +
+                            (live_line.empty() ? 0.0f : z.space_xxs() * s + lc);
+        float y = cy - block / 2;
+        const TextOpts lead{TextAlign::Leading, false, true};
+        p.Text(title, TypeRole::Title, D2D1::RectF(tx, y, tr, y + lt), c.text, lead);
+        y += lt;
+        if (!detail.empty()) {
+            y += z.space_xxs() * s;
+            p.Text(detail, TypeRole::Body, D2D1::RectF(tx, y, tr, y + lb), c.text2, lead);
+            y += lb;
+        }
+        if (!live_line.empty()) {
+            y += z.space_xxs() * s;
+            const float dr = z.space_xs() * 0.75f * s, lead_w = 2 * dr + z.space_xs() * s;
+            p.Circle(tx + dr, y + lc / 2, dr, c.success);
+            p.Text(live_line, TypeRole::Caption, D2D1::RectF(tx + lead_w, y, tr, y + lc), c.text2, lead);
+        }
+        if (focus_visible) p.Focus(r, rad);
+        return;
+    }
+
+    // Icon disc, title and state as one group, centred above the foot.
     const float words = gap + lt + (detail.empty() ? 0.0f : z.space_xxs() * s + lb) +
                         (live_line.empty() ? 0.0f : z.space_xxs() * s + lc);
     // The disc gives way first on a small tile (720p, Comfortable), down to one control high.
@@ -1218,10 +1251,13 @@ void RecordTileControl::Draw(ID2D1DeviceContext* dc, const Theme& t, float s) {
     const TypeRole title_role = recording ? TypeRole::Display : TypeRole::Title;
     const float lt = LineHeight(title_role) * s, lb = LineHeight(TypeRole::Body) * s, gap = z.space_md() * s;
     const float words = gap + lt + (detail.empty() ? 0.0f : z.space_xxs() * s + lb);
-    const float room = r.bottom - foot_h - r.top - 2 * pad - words;
-    const float d = std::clamp(room, z.control_sm() * s, 2 * z.control_sm() * s);
-    float y = r.top + (r.bottom - foot_h - r.top - d - words) * 0.5f;
-    const float cx = (r.left + r.right) * 0.5f, dcy = y + d / 2;
+    // Row: the disc at the leading edge and the words beside it, centred on the space above the foot.
+    const float above = r.bottom - foot_h - r.top - 2 * pad;
+    const float d = wide ? std::clamp(above, 0.0f, 2 * z.control_sm() * s)
+                        : std::clamp(above - words, z.control_sm() * s, 2 * z.control_sm() * s);
+    float y = wide ?(r.top + r.bottom - foot_h - (words - gap)) * 0.5f : r.top + (r.bottom - foot_h - r.top - d - words) * 0.5f;
+    const float cx = wide ?r.left + pad + d / 2 : (r.left + r.right) * 0.5f;
+    const float dcy = wide ?(r.top + r.bottom - foot_h) * 0.5f : y + d / 2;
     if (recording) {
         // A stop button: the red disc with a white square.
         p.Circle(cx, dcy, d / 2, c.recording);
@@ -1231,14 +1267,15 @@ void RecordTileControl::Draw(ID2D1DeviceContext* dc, const Theme& t, float s) {
         p.Circle(cx, dcy, d / 2, c.HoverLayer(2.0f));
         DrawIcon(dc, t, IconType::Record, cx, dcy, (std::min)(z.app_icon() * s, d / 2), p.B(c.text).Get(), nullptr);
     }
-    y += d + gap;
-    const TextOpts centre{TextAlign::Center, false, true};
-    p.Text(title, title_role, D2D1::RectF(r.left + pad, y, r.right - pad, y + lt), c.text, centre);
+    if (!wide) y += d + gap;
+    const float tx = wide ?cx + d / 2 + gap : r.left + pad;
+    const TextOpts opts{wide ?TextAlign::Leading : TextAlign::Center, false, true};
+    p.Text(title, title_role, D2D1::RectF(tx, y, r.right - pad, y + lt), c.text, opts);
     y += lt;
     if (!detail.empty()) {
         y += z.space_xxs() * s;
-        p.Text(detail, TypeRole::Body, D2D1::RectF(r.left + pad, y, r.right - pad, y + lb),
-               detail_warn ? c.warning : c.text2, centre);
+        p.Text(detail, TypeRole::Body, D2D1::RectF(tx, y, r.right - pad, y + lb),
+               detail_warn ? c.warning : c.text2, opts);
     }
 }
 
