@@ -98,6 +98,21 @@ MuxMarkers MarkersForFile(const std::vector<Marker>& markers, const FileClock& c
 // none.
 MuxMarkers CutFileMarkers(const std::string& json, double start_s, double end_s, uint32_t fps);
 
+// The type's name as people read it ("Round start").
+const char* MarkerTypeTitle(MarkerType type);
+
+// A marker as a saved file's tag holds it, for showing (the Clips timeline).
+struct FileMarker {
+    double      at_s = 0.0;  // from the file's first video sample (add ClipInfo::video_offset_s for presentation time)
+    MarkerType  type = MarkerType::kGeneric;  // a kind this build doesn't know reads as generic
+    std::string label;
+    std::string app;
+    bool        important = false;
+};
+// The markers in `json` (ClipInfo::markers_json), oldest first; none for a tag this can't read,
+// as CutFileMarkers.
+std::vector<FileMarker> ReadFileMarkers(const std::string& json);
+
 // Every marker on the engine's timeline. Keeps a marker while it's within the buffer's reach or a
 // file being written (a Hold) still covers it. Thread-safe.
 class MarkerTimeline {

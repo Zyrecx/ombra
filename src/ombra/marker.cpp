@@ -141,19 +141,66 @@ MuxMarkers MarkersForFile(const std::vector<Marker>& markers, const FileClock& c
     return out;
 }
 
-MuxMarkers CutFileMarkers(const std::string& json, double start_s, double end_s, uint32_t fps) {
-    MuxMarkers out;
-    if (json.empty() || end_s <= start_s) return out;
-    JsonValue root;
+namespace {
+
+// The tag's root and its marker list; false for a tag this build can't read (another version,
+// malformed).
+bool ParseMarkersTag(const std::string& json, JsonValue& root, const JsonValue*& list) {
+    if (json.empty()) return false;
     try {
         root = ParseJson(json);
     } catch (const std::string&) {
-        return out;
+        return false;
     }
     const JsonValue* v = root.Find("v");
-    if (!v || v->type != JsonValue::Type::Number || v->num != 1) return out;
-    const JsonValue* list = root.Find("markers");
-    if (!list || list->type != JsonValue::Type::Array) return out;
+    if (!v || v->type != JsonValue::Type::Number || v->num != 1) return false;
+    list = root.Find("markers");
+    return list && list->type == JsonValue::Type::Array;
+}
+
+// One tag item's type, label, app and flag. A kind this build doesn't know reads as generic.
+Marker MarkerFromTagItem(const JsonValue& item) {
+    Marker m;
+    const auto text = [&](const char* key) {
+        const JsonValue* f = item.Find(key);
+        if (!f || f->type != JsonValue::Type::String) return std::string();
+        return CleanMarkerLabel(f->str).value_or(std::string());
+    };
+    const std::string kind = text("kind");
+    for (const TypeInfo& t : kTypes)
+        if (kind == t.name) m.type = t.type;
+    m.label = text("label");
+    m.owner = text("app");
+    const JsonValue* imp = item.Find("important");
+    m.important = imp && imp->type == JsonValue::Type::Bool && imp->b;
+    return m;
+}
+
+}  // namespace
+
+const char* MarkerTypeTitle(MarkerType type) { return InfoOf(type).title; }
+
+std::vector<FileMarker> ReadFileMarkers(const std::string& json) {
+    std::vector<FileMarker> out;
+    JsonValue root;
+    const JsonValue* list = nullptr;
+    if (!ParseMarkersTag(json, root, list)) return out;
+    for (const JsonValue& item : list->arr) {
+        const JsonValue* ms = item.Find("ms");
+        if (!ms || ms->type != JsonValue::Type::Number || !(ms->num >= 0.0) || !std::isfinite(ms->num)) continue;
+        Marker m = MarkerFromTagItem(item);
+        out.push_back({ms->num / 1000.0, m.type, std::move(m.label), std::move(m.owner), m.important});
+    }
+    std::stable_sort(out.begin(), out.end(), [](const FileMarker& a, const FileMarker& b) { return a.at_s < b.at_s; });
+    return out;
+}
+
+MuxMarkers CutFileMarkers(const std::string& json, double start_s, double end_s, uint32_t fps) {
+    MuxMarkers out;
+    if (end_s <= start_s) return out;
+    JsonValue root;
+    const JsonValue* list = nullptr;
+    if (!ParseMarkersTag(json, root, list)) return out;
 
     const double slack_ms = 500.0 / (fps ? fps : 1);
     const double start_ms = start_s * 1000.0, length_ms = (end_s - start_s) * 1000.0;
@@ -165,19 +212,8 @@ MuxMarkers CutFileMarkers(const std::string& json, double start_s, double end_s,
         if (at < -slack_ms || at >= length_ms - slack_ms) continue;
         const uint64_t new_ms = static_cast<uint64_t>((std::max)(0LL, std::llround(at)));
 
-        // The chapter as MarkersForFile names it. A kind this build doesn't know reads as generic.
-        Marker m;
-        const auto text = [&](const char* key) {
-            const JsonValue* f = item.Find(key);
-            if (!f || f->type != JsonValue::Type::String) return std::string();
-            return CleanMarkerLabel(f->str).value_or(std::string());
-        };
-        const std::string kind = text("kind");
-        for (const TypeInfo& t : kTypes)
-            if (kind == t.name) m.type = t.type;
-        m.label = text("label");
-        m.owner = text("app");
-        out.chapters.push_back({new_ms, MarkerChapterTitle(m)});
+        // The chapter as MarkersForFile names it.
+        out.chapters.push_back({new_ms, MarkerChapterTitle(MarkerFromTagItem(item))});
 
         JsonValue moved = item;
         moved.Set("ms", JsonValue::MakeNum(static_cast<double>(new_ms)));

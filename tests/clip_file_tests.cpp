@@ -239,6 +239,27 @@ TEST_CASE("clip file: a cut's markers need a frame of theirs inside it and a tag
     CHECK(CutFileMarkers(R"({"v":1,"markers":[{"kind":"kill"},7]})", 0.0, 4.0, 60).json.empty());
 }
 
+TEST_CASE("clip file: a file's markers read back for showing, oldest first") {
+    const std::vector<FileMarker> m =
+        ReadFileMarkers(R"({"v":1,"markers":[{"ms":2183,"kind":"kill","app":"Tool","important":true},)"
+                        R"({"ms":500,"kind":"ace","label":"Clutch","app":"Tool"},{"kind":"kill"},7,{"ms":-4},)"
+                        R"({"ms":2000,"kind":"game_start","label":"VALORANT","app":"Ombra","important":"yes"}]})");
+    REQUIRE(m.size() == 3);
+    CHECK(m[0].at_s == doctest::Approx(0.5));
+    CHECK(m[0].type == MarkerType::kGeneric);  // a kind this build doesn't know
+    CHECK(m[0].label == "Clutch");
+    CHECK(m[1].type == MarkerType::kGameStart);
+    CHECK(m[1].app == "Ombra");
+    CHECK(!m[1].important);
+    CHECK(m[2].at_s == doctest::Approx(2.183));
+    CHECK(m[2].type == MarkerType::kKill);
+    CHECK(m[2].label.empty());
+    CHECK(m[2].important);
+    CHECK(ReadFileMarkers(R"({"v":2,"markers":[{"ms":0,"kind":"kill"}]})").empty());
+    CHECK(ReadFileMarkers(R"({"v":1,"markers":[{"ms":0,)").empty());
+    CHECK(ReadFileMarkers("").empty());
+}
+
 // Clips' "End here" ends the range at the end of the frame on screen: the frame starting exactly at
 // the end time is left out, the one before it kept.
 TEST_CASE("clip file: a trim ending on a frame boundary keeps the frames before it and not the one at it") {
