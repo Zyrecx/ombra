@@ -1,5 +1,6 @@
 #include "ombra/cli.h"
 
+#include "ombra/app_name.h"
 #include "ombra/brand.h"
 #include "ombra/events.h"
 #include "ombra/json.h"
@@ -269,6 +270,12 @@ std::optional<Args> ParseArgs(int argc, wchar_t** argv, std::initializer_list<co
             *exit_code = UsageError(L"unknown option " + arg + L" for " + argv[1]);
             return std::nullopt;
         }
+    }
+    // The engine refuses such a hello too; said here, before connecting, as the option it is.
+    if (const std::wstring* as = args.Value(L"--as"); as && !ValidAppName(Utf8(*as))) {
+        *exit_code = UsageError(L"--as needs a name of 1-64 bytes (UTF-8) with something visible, and no "
+                                L"spaces at the ends, control or format characters");
+        return std::nullopt;
     }
     return args;
 }

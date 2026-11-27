@@ -1,4 +1,5 @@
 #include "ombra/pipe.h"
+#include "ombra/app_name.h"
 #include "ombra/brand.h"
 
 #include "ombra/log.h"
@@ -162,13 +163,6 @@ JsonValue ErrorReply(const std::string& type, const char* code, const std::strin
 std::string StringField(const JsonValue& obj, const char* key) {
     const JsonValue* v = obj.Find(key);
     return (v && v->type == JsonValue::Type::String) ? v->str : std::string{};
-}
-
-// An "app" name: 1-64 bytes, no control characters (it lands in logs and toasts).
-bool ValidAppName(const std::string& app) {
-    if (app.empty() || app.size() > 64) return false;
-    return std::none_of(app.begin(), app.end(),
-                        [](char c) { return static_cast<unsigned char>(c) < 0x20 || c == 0x7f; });
 }
 
 // `timeout_ms` bounds each write call: a client that stops reading fills the pipe's buffer.
@@ -404,7 +398,8 @@ std::optional<PipeSurface> PipeServer::Hello(const JsonValue& req, HANDLE pipe, 
             return refuse("bad_request", "every request needs an \"id\" (number or string)");
         caller.app = StringField(req, "app");
         if (!ValidAppName(caller.app))
-            return refuse("bad_request", "\"app\" must name the caller: 1-64 characters, no control characters");
+            return refuse("bad_request", "\"app\" must name the caller: 1-64 bytes of UTF-8 with something "
+                                          "visible, no spaces at the ends, control or format characters");
         if (!api_handler_) return refuse("not_allowed", "this engine takes no API connections");
         // The user's own scripts (a few `ombra watch`es, say) have places of their own: apps
         // holding every one can't lock the command line out, nor it them.

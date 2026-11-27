@@ -7,6 +7,7 @@
 
 #include "support/test_env.h"
 
+#include "ombra/app_name.h"
 #include "ombra/json.h"
 #include "ombra/paths.h"
 #include "ombra/pipe.h"
@@ -511,6 +512,40 @@ TEST_CASE("pipe api: a request without an id is refused and the connection stays
     CHECK(s.api.load() == 1);
 }
 
+TEST_CASE("app names: visible UTF-8, no control or format characters") {
+    CHECK(ValidAppName("LeagueTool"));
+    CHECK(ValidAppName("Command line"));
+    CHECK(ValidAppName("\xE5\xBD\xB1"));                                  // a CJK character
+    CHECK(ValidAppName("\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x92\xBB"));  // man, ZWJ, laptop
+    CHECK(ValidAppName("x y"));
+    CHECK(ValidAppName("\xE2\x9D\xA4\xEF\xB8\x8F"));                      // a heart, then VS16
+    CHECK_FALSE(ValidAppName(" x"));
+    CHECK_FALSE(ValidAppName("x\xE3\x80\x80"));       // a trailing ideographic space
+    CHECK_FALSE(ValidAppName("\xE2\xA0\x80"));        // BRAILLE PATTERN BLANK
+    CHECK(ValidAppName(std::string(64, 'a')));
+    CHECK_FALSE(ValidAppName(std::string(65, 'a')));
+    CHECK_FALSE(ValidAppName(""));
+    CHECK_FALSE(ValidAppName("a\tb"));
+    CHECK_FALSE(ValidAppName("a\x7F"));
+    CHECK_FALSE(ValidAppName("a\xC2\x85"));          // NEL, a C1 control
+    CHECK_FALSE(ValidAppName("Tool\xE2\x80\xAE"));   // RIGHT-TO-LEFT OVERRIDE
+    CHECK_FALSE(ValidAppName("To\xE2\x81\xA6ol"));   // LEFT-TO-RIGHT ISOLATE
+    CHECK_FALSE(ValidAppName("To\xE2\x80\x8Bol"));   // ZERO WIDTH SPACE
+    CHECK_FALSE(ValidAppName("a\xF3\xA0\x81\x81"));  // TAG LATIN CAPITAL LETTER A: hidden text
+    CHECK_FALSE(ValidAppName("a\xE2\x80\xA8" "b"));  // LINE SEPARATOR
+    // Nothing visible.
+    CHECK_FALSE(ValidAppName("   "));
+    CHECK_FALSE(ValidAppName("\xE3\x85\xA4"));       // HANGUL FILLER
+    CHECK_FALSE(ValidAppName("\xE2\x80\x8D"));       // ZWJ alone
+    CHECK_FALSE(ValidAppName("\xEF\xB8\x8F\xE3\x80\x80"));  // a variation selector, an ideographic space
+    // Not UTF-8.
+    CHECK_FALSE(ValidAppName("\xFF"));
+    CHECK_FALSE(ValidAppName("a\xC3"));              // cut short
+    CHECK_FALSE(ValidAppName("\xC0\xAF"));           // overlong '/'
+    CHECK_FALSE(ValidAppName("\xED\xA0\x80"));       // a surrogate
+    CHECK_FALSE(ValidAppName("\xF4\x90\x80\x80"));   // past U+10FFFF
+}
+
 TEST_CASE("pipe api: refused hellos say why and close the connection") {
     TwoSurfaceServer s;
     REQUIRE(s.server_.Start());
@@ -526,6 +561,7 @@ TEST_CASE("pipe api: refused hellos say why and close the connection") {
     SUBCASE("no app") { REQUIRE(client.Send(ApiHello(kApiVersionMax, nullptr))); }
     SUBCASE("empty app") { REQUIRE(client.Send(ApiHello(kApiVersionMax, ""))); }
     SUBCASE("app with a newline") { REQUIRE(client.Send(ApiHello(kApiVersionMax, "a\nb"))); }
+    SUBCASE("app with a bidi override") { REQUIRE(client.Send(ApiHello(kApiVersionMax, "Tool\xE2\x80\xAE"))); }
     SUBCASE("neither api nor v") { REQUIRE(client.Send(Request("hello", 1))); }
 
     const JsonValue resp = client.Receive();
