@@ -1149,7 +1149,8 @@ int RunUi() {
     }
     if (argv && argc > 1 && std::wstring(argv[1]) == L"--toasttest") {
         const std::wstring out_png = (argc > 2) ? argv[2] : L"out\\ombra_toast_test.png";
-        // --toasttest [PNG] [EVENT] [card|compact] [SECONDS] [alpha|opaque] [SCALE] [APP] [CLIPS] [TITLE] [GAME]
+        // --toasttest [PNG] [EVENT] [card|compact] [SECONDS] [alpha|opaque] [SCALE] [APP] [CLIPS] [TITLE] [GAME] [BAR]
+        // BAR: the time bar's part left, 0..1 (default 0.6, a still from mid-hold).
         const std::wstring event = (argc > 3) ? argv[3] : L"save_ok";
         const bool compact = argc > 4 && std::wstring(argv[4]) == L"compact";
         const double seconds = argc > 5 ? _wtof(argv[5]) : 0.0;
@@ -1159,7 +1160,8 @@ int RunUi() {
         const uint32_t clips = argc > 9 ? static_cast<uint32_t>((std::max)(1, _wtoi(argv[9]))) : 1;
         const std::wstring title = argc > 10 ? argv[10] : L"";
         const std::wstring game = argc > 11 ? argv[11] : L"";
-        const int rc = ombra_ui::RunToastTest(out_png, event, compact, seconds, alpha, scale, app, clips, title, game);
+        const float bar = argc > 12 ? static_cast<float>(_wtof(argv[12])) : 0.6f;
+        const int rc = ombra_ui::RunToastTest(out_png, event, compact, seconds, alpha, scale, app, clips, title, game, bar);
         LocalFree(argv);
         return rc;
     }

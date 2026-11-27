@@ -1088,7 +1088,7 @@ int RunToast(const std::wstring& event, std::vector<HANDLE> save_waits, HANDLE s
 
 int RunToastTest(const std::wstring& out_png_path, const std::wstring& event, bool compact, double seconds, bool alpha,
                  float scale, const std::wstring& app, uint32_t clips, const std::wstring& title,
-                 const std::wstring& game) {
+                 const std::wstring& game, float bar_fill) {
     ToastInfo info{};
     if (!LookupToastInfo(event, &info)) {
         ombra::Log::Error("RunToastTest: unrecognized event \"%ls\"", event.c_str());
@@ -1110,7 +1110,7 @@ int RunToastTest(const std::wstring& out_png_path, const std::wstring& event, bo
     toast.info = info;
     toast.app = app;
     toast.SetCompact(compact);
-    toast.test_bar_fill = 0.6f;  // a still from mid-hold
+    toast.test_bar_fill = std::clamp(bar_fill, 0.0f, 1.0f);
     toast.test_pending = event == L"save";
     // The card's size at `scale` (RenderOffscreenTest sets the font scale to it, as here).
     toast.GetTheme().SetFontScale(scale);
