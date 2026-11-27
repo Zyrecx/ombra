@@ -314,6 +314,8 @@ void SpawnToastProcess(const std::wstring& args, const std::vector<HANDLE>& inhe
 
     STARTUPINFOEXW si{};
     si.StartupInfo.cb = sizeof(si);
+    // No "app starting" cursor while the toast process starts: it never takes input.
+    si.StartupInfo.dwFlags = STARTF_FORCEOFFFEEDBACK;
     std::vector<uint8_t> attr_storage;
     DWORD flags = 0;
     if (!inherit.empty()) {

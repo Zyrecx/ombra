@@ -400,11 +400,11 @@ bool ToastWindow::CreateHostWindow(int x, int y, int width, int height) {
     wc.lpszClassName = kToastWindowClass;
     RegisterClassExW(&wc);
 
-    // TRANSPARENT + NOACTIVATE: click-through and never steals focus/foreground -- a toast must
-    // not interrupt whatever the user is doing (a game underneath it, most of the time).
-    // TOOLWINDOW: no taskbar entry, no alt-tab entry, matching OverlayHost's own popup.
+    // LAYERED + TRANSPARENT: click-through for real -- hit-testing skips the window, so the game
+    // under it keeps its clicks and its cursor (TRANSPARENT alone still takes them). NOACTIVATE:
+    // never steals focus/foreground. TOOLWINDOW: no taskbar or alt-tab entry, as OverlayHost's popup.
     const DWORD ex_style = WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST | WS_EX_TOOLWINDOW |
-                           WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
+                           WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
     const DWORD win_style = WS_POPUP;
 
     hwnd_ = CreateWindowExW(ex_style, kToastWindowClass, L"" OMBRA_PRODUCT_NAME " Toast", win_style,
@@ -413,6 +413,9 @@ bool ToastWindow::CreateHostWindow(int x, int y, int width, int height) {
         ombra::Log::Warn("ToastWindow: CreateWindowExW failed (0x%08X)", GetLastError());
         return false;
     }
+    // A layered window shows nothing until its attributes are set; fully opaque here, since the
+    // card's alpha is DirectComposition's.
+    SetLayeredWindowAttributes(hwnd_, 0, 255, LWA_ALPHA);
 
     // Never let this popup get burned into the desktop capture that's the whole point of the app --
     // (the overlay panel has this same latent gap today, not fixed here).
