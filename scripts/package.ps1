@@ -1,6 +1,7 @@
-# Release packages from build\Release: out\installer\Ombra-Setup.exe (installer\ombra.iss) and
-# out\installer\Ombra-Portable.zip. Build first (build.ps1). Inno Setup is pinned and hash-checked
-# like build.ps1's nasm, and unpacked portably under build\tools (no install, no registry).
+# Release packages from build\Release: out\installer\Ombra-Setup.exe (installer\ombra.iss),
+# out\installer\Ombra-Portable.zip and out\installer\install.ps1 (installer\install.ps1, filled in).
+# Build first (build.ps1). Inno Setup is pinned and hash-checked like build.ps1's nasm, and unpacked
+# portably under build\tools (no install, no registry).
 $ErrorActionPreference = 'Stop'
 $root  = Split-Path $PSScriptRoot
 $build = Join-Path $root 'build\Release'
@@ -42,5 +43,17 @@ $zip = Join-Path $out 'Ombra-Portable.zip'
 Remove-Item $zip -ErrorAction SilentlyContinue
 Compress-Archive (Join-Path $stage '*') $zip
 Remove-Item -Recurse -Force $stage
+
+# install.ps1 (irm | iex): the template with this release's version and the setup's SHA-256.
+$cmake = Get-Content -Raw (Join-Path $root 'CMakeLists.txt')
+if ($cmake -notmatch '(?m)^project\(ombra VERSION ([0-9]+\.[0-9]+\.[0-9]+) LANGUAGES CXX\)') { throw 'No project VERSION in CMakeLists.txt' }
+$version = $Matches[1]
+$hash = (Get-FileHash -Algorithm SHA256 (Join-Path $out 'Ombra-Setup.exe')).Hash.ToLowerInvariant()
+$template = [IO.File]::ReadAllBytes((Join-Path $root 'installer\install.ps1'))
+if ($template | Where-Object { $_ -gt 0x7E -or ($_ -lt 0x20 -and $_ -ne 0x0A -and $_ -ne 0x0D -and $_ -ne 0x09) }) {
+    throw 'installer\install.ps1 must be plain ASCII: GitHub serves it without a charset'
+}
+$script = [Text.Encoding]::ASCII.GetString($template).Replace('@VERSION@', $version).Replace('@SHA256@', $hash)
+[IO.File]::WriteAllText((Join-Path $out 'install.ps1'), $script, (New-Object Text.ASCIIEncoding))
 
 Get-ChildItem $out -File | ForEach-Object { '{0,-22} {1,8:N0} KB  {2}' -f $_.Name, ($_.Length / 1KB), (Get-FileHash $_.FullName).Hash }

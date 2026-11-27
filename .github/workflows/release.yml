@@ -76,7 +76,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $assets = @('out/installer/Ombra-Setup.exe', 'out/installer/Ombra-Portable.zip',
+          $assets = @('out/installer/Ombra-Setup.exe', 'out/installer/Ombra-Portable.zip', 'out/installer/install.ps1',
                       'LICENSE', 'THIRD-PARTY-NOTICES.txt')
           foreach ($asset in $assets) {
               if (-not (Test-Path -LiteralPath $asset -PathType Leaf) -or (Get-Item -LiteralPath $asset).Length -eq 0) {
@@ -84,7 +84,7 @@ jobs:
               }
           }
           # sha256sum format (LF, two spaces) for manual downloads; the updater uses GitHub's digest.
-          $sums = foreach ($asset in $assets[0..1]) {
+          $sums = foreach ($asset in $assets[0..2]) {
               '{0}  {1}' -f (Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash.ToLowerInvariant(), (Split-Path -Leaf $asset)
           }
           [IO.File]::WriteAllText("$PWD/out/installer/SHA256SUMS.txt", (($sums -join "`n") + "`n"))
