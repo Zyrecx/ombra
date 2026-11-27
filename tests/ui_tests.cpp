@@ -1967,6 +1967,9 @@ TEST_CASE("ui: a recording's time formats as m:ss, then h:mm:ss, and ticks on lo
     CHECK(live.Seconds(102000) == doctest::Approx(12.0));
     live.Report(30, 102000);  // far off: the engine's time wins
     CHECK(live.Seconds(102000) == doctest::Approx(30.0));
+    LiveElapsed early;  // a time longer than the tick count (a freshly booted runner)
+    early.Report(754, 5000);
+    CHECK(early.Seconds(5000) == doctest::Approx(754.0));
 }
 
 TEST_CASE("ui: Home's Record tile starts from now or seconds back, and shows the user's recording") {

@@ -91,12 +91,16 @@ std::wstring FormatElapsed(double seconds);
 // A running time the engine reports about once a second, counted on locally between reports so
 // it ticks evenly; a report moves it only when it drifts past 1.5 s (a stall, a late reply).
 struct LiveElapsed {
-    double zero_ms = -1;  // GetTickCount64 when the time was 0; -1 before the first report
+    // GetTickCount64 when the time was 0; may be negative (a time longer than the tick count,
+    // as a test reports on a freshly booted machine), so whether it's set is its own flag.
+    double zero_ms  = 0;
+    bool   reported = false;
     void Report(double seconds, double now_ms) {
         const double zero = now_ms - seconds * 1000.0;
-        if (zero_ms < 0 || zero - zero_ms > 1500.0 || zero_ms - zero > 1500.0) zero_ms = zero;
+        if (!reported || zero - zero_ms > 1500.0 || zero_ms - zero > 1500.0) zero_ms = zero;
+        reported = true;
     }
-    double Seconds(double now_ms) const { return zero_ms < 0 || now_ms < zero_ms ? 0.0 : (now_ms - zero_ms) / 1000.0; }
+    double Seconds(double now_ms) const { return !reported || now_ms < zero_ms ? 0.0 : (now_ms - zero_ms) / 1000.0; }
 };
 
 
