@@ -388,6 +388,7 @@ struct SaveToastSignal {
             auto* out = static_cast<SaveToastInfo*>(view);  // its app was written at the spawn
             out->clips = summary.clips;
             out->seconds = summary.seconds;
+            SetToastGame(*out, r.game);
             UnmapViewOfFile(view);
         }
         // SetEvent orders the write above before the toast's wait returns.

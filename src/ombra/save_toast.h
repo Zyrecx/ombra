@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <initializer_list>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -29,7 +30,25 @@ struct SaveToastInfo {
     // The API app whose action this is, written before the toast starts so every state names it;
     // empty for the user's own save. NUL-terminated; read it through ReadToastLive or ToastApp.
     wchar_t  app[kToastAppUnits + 1] = {};
+    // The game the clip is of (its folder name, SanitizeFolderName: at most 64), written with the
+    // result before its event is signalled; empty off a game. Read it through ToastGame.
+    wchar_t  game[kToastAppUnits + 1] = {};
 };
+
+// Copies a game name in, cut to the buffer on a code-point boundary. Engine side, before the signal.
+inline void SetToastGame(SaveToastInfo& info, std::wstring_view name) {
+    size_t n = (std::min)(name.size(), kToastAppUnits);
+    if (n < name.size() && n > 0 && name[n - 1] >= 0xD800 && name[n - 1] <= 0xDBFF) --n;  // a split pair
+    std::copy_n(name.data(), n, info.game);
+    info.game[n] = L'\0';
+}
+
+// The game from a mapping another process wrote: bounded even if it isn't terminated.
+inline std::wstring ToastGame(const SaveToastInfo& info) {
+    size_t n = 0;
+    while (n < kToastAppUnits && info.game[n]) ++n;
+    return std::wstring(info.game, n);
+}
 
 // A field another process may be writing (atomic_ref<const T> is C++26): loads never write, so a
 // read-only view is fine.
@@ -116,15 +135,33 @@ inline int64_t ClipSecondsLeft(int64_t end_qpc, int64_t now_qpc, int64_t freq) {
     return (end_qpc - now_qpc + freq - 1) / freq;
 }
 
-// A pending save's title: an app's clip still taking footage counts down ("Recording clip, 25 s
-// left"), then "Saving clip…" while the file is finished.
-inline std::wstring PendingSaveTitle(int64_t end_qpc, int64_t now_qpc, int64_t freq) {
-    const int64_t left = ClipSecondsLeft(end_qpc, now_qpc, freq);
-    if (left <= 0) return L"Saving clip…";
-    return L"Recording clip, " + std::to_wstring(left) + L" s left";
+// What a toast says: a headline, the detail line under it ("Last 30 s · VALORANT"), and the one
+// number a compact pill keeps on its chip ("30 s"). Either of the last two may be empty.
+struct ToastText {
+    std::wstring title, detail, stat;
+};
+
+// Parts of a detail line, joined with a middle dot; empty parts drop out.
+inline std::wstring JoinToastDetail(std::initializer_list<std::wstring_view> parts) {
+    std::wstring out;
+    for (std::wstring_view p : parts) {
+        if (p.empty()) continue;
+        if (!out.empty()) out += L" · ";
+        out += p;
+    }
+    return out;
 }
 
-// When that title next changes: the next whole second of the countdown, or the end; 0 for none.
+// A pending save: an app's clip still taking footage counts down ("Recording clip", "25 s left"),
+// then "Saving clip…" while the file is finished.
+inline ToastText PendingSaveText(int64_t end_qpc, int64_t now_qpc, int64_t freq) {
+    const int64_t left = ClipSecondsLeft(end_qpc, now_qpc, freq);
+    if (left <= 0) return {L"Saving clip…", {}, {}};
+    const std::wstring n = std::to_wstring(left) + L" s";
+    return {L"Recording clip", n + L" left", n};
+}
+
+// When that text next changes: the next whole second of the countdown, or the end; 0 for none.
 inline int64_t PendingTitleChangeQpc(int64_t end_qpc, int64_t now_qpc, int64_t freq) {
     const int64_t left = ClipSecondsLeft(end_qpc, now_qpc, freq);
     return left <= 0 ? 0 : end_qpc - (left - 1) * freq;
@@ -143,30 +180,43 @@ inline std::wstring FormatClipLength(double seconds) {
     return std::to_wstring(m) + L" min" + (s ? L" " + std::to_wstring(s) + L" s" : L"");
 }
 
-// A saved recording's toast title: "Recording saved, 12 min 5 s", "..., 1 h 20 min"; without a
-// length, "Recording saved".
-inline std::wstring RecordingSavedTitle(double seconds) {
-    if (seconds <= 0) return L"Recording saved";
+// A recording's length: as a clip's under an hour, then "1 h 20 min".
+inline std::wstring FormatRecordingLength(double seconds) {
     const long long total = std::llround(seconds);
-    if (total < 3600) return L"Recording saved, " + FormatClipLength(seconds);
+    if (total < 3600) return FormatClipLength(seconds);
     const long long h = total / 3600, m = total % 3600 / 60;
-    return L"Recording saved, " + std::to_wstring(h) + L" h" + (m ? L" " + std::to_wstring(m) + L" min" : L"");
+    return std::to_wstring(h) + L" h" + (m ? L" " + std::to_wstring(m) + L" min" : L"");
 }
 
-// Recordings a crash left fragmented, made plain at engine start: "Recording recovered, 12 min 5 s",
-// or "3 recordings recovered".
-inline std::wstring RecordingRecoveredTitle(double seconds, uint32_t count) {
-    if (count > 1) return std::to_wstring(count) + L" recordings recovered";
-    const std::wstring saved = RecordingSavedTitle(seconds);  // "Recording saved[, length]"
-    return L"Recording recovered" + saved.substr(std::wstring_view(L"Recording saved").size());
+// A saved recording: "Recording saved", "12 min 5 s"; no detail without a length.
+inline ToastText RecordingSavedText(double seconds) {
+    if (seconds <= 0) return {L"Recording saved", {}, {}};
+    const std::wstring len = FormatRecordingLength(seconds);
+    return {L"Recording saved", len, len};
 }
 
-// The toast's title for a saved action: "Saved last 30 s", "Saved 2 clips, last 30 s".
-inline std::wstring SavedToastTitle(const SaveToastInfo& info) {
-    if (info.seconds <= 0) return info.clips > 1 ? L"Saved " + std::to_wstring(info.clips) + L" clips" : L"Clip saved";
-    const std::wstring last = L"last " + FormatClipLength(info.seconds);
-    if (info.clips > 1) return L"Saved " + std::to_wstring(info.clips) + L" clips, " + last;
-    return L"Saved " + last;
+// Recordings a crash left fragmented, made plain at engine start: "Recording recovered" with its
+// length, or "3 recordings recovered".
+inline ToastText RecordingRecoveredText(double seconds, uint32_t count) {
+    if (count > 1) return {std::to_wstring(count) + L" recordings recovered", {}, {}};
+    ToastText t = RecordingSavedText(seconds);
+    t.title = L"Recording recovered";
+    return t;
+}
+
+// A saved clip: "Clip saved" (or "2 clips saved"), "Last 30 s · VALORANT".
+inline ToastText SavedToastText(const SaveToastInfo& info) {
+    ToastText t;
+    t.title = info.clips > 1 ? std::to_wstring(info.clips) + L" clips saved" : L"Clip saved";
+    if (info.seconds > 0) t.stat = FormatClipLength(info.seconds);
+    t.detail = JoinToastDetail({t.stat.empty() ? std::wstring{} : L"Last " + t.stat, ToastGame(info)});
+    return t;
+}
+
+// The detail an app's action shows: the app first, so a tool's action is never anonymous, even
+// with the detail line turned off (`details` false keeps only the app).
+inline std::wstring AppToastDetail(std::wstring_view app, std::wstring_view detail, bool details) {
+    return JoinToastDetail({app, details ? detail : std::wstring_view{}});
 }
 
 }  // namespace ombra

@@ -323,12 +323,14 @@ std::shared_ptr<ClipGroup> StartClip(const std::vector<SaveContext*>& contexts, 
                                      SaveFeedback feedback) {
     struct Operation {
         std::promise<ReplaySaveResults> promise;
-        ReplaySaveResults               result{SaveOutcome::kNothingNew, {}};
+        ReplaySaveResults               result{SaveOutcome::kNothingNew, {}, {}};
         std::atomic<size_t>             remaining{0};
         SaveFeedback                    feedback;
     };
     auto op = std::make_shared<Operation>();
     op->feedback = std::move(feedback);
+    if (!contexts.empty() && contexts.front()->controller)
+        op->result.game = contexts.front()->controller->CurrentGameFolder();
     std::shared_ptr<ClipGroup> group(new ClipGroup());
     group->done_ = op->promise.get_future().share();
     const auto finish = [op, contexts, at = request.event_qpc, app = request.app, id = request.id] {

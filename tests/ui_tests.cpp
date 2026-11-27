@@ -2792,7 +2792,8 @@ TEST_CASE("ui: every Appearance tab fits without scrolling with everything expan
     screen.InitSchema(specs, &config);
     screen.SetActiveRail(kRailAppearance);
     screen.ApplySettingChangeForTest("ui.card_borders", JsonValue::MakeBool(false));
-    for (int tab : {kLook, kLayout, kNotifications}) {
+    // Notifications may scroll (owner): it holds the popup's look, a live sample and every event.
+    for (int tab : {kLook, kLayout}) {
         screen.SetActiveSubTab(tab);
         for (const float s : {1.0f, 1.5f}) {
             CAPTURE(tab);

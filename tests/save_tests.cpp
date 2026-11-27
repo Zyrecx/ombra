@@ -227,21 +227,44 @@ TEST_CASE("save: replay fans out with one timestamp, grouped files and one compl
     CHECK_FALSE(second.ctx.save_in_flight.load());
 }
 
-TEST_CASE("save: the toast's title names the clip's real length") {
-    CHECK(SavedToastTitle({1, 29.98f}) == L"Saved last 30 s");
-    CHECK(SavedToastTitle({1, 4.2f}) == L"Saved last 4 s");
-    CHECK(SavedToastTitle({1, 0.6f}) == L"Saved last 1 s");
-    CHECK(SavedToastTitle({1, 120.0f}) == L"Saved last 2 min");
-    CHECK(SavedToastTitle({1, 90.0f}) == L"Saved last 1 min 30 s");
-    CHECK(SavedToastTitle({2, 30.0f}) == L"Saved 2 clips, last 30 s");
-    CHECK(SavedToastTitle({1, 0.0f}) == L"Clip saved");  // length unknown
+TEST_CASE("save: the toast's detail names the clip's real length and its game") {
+    const auto detail = [](SaveToastInfo info) { return SavedToastText(info).detail; };
+    CHECK(detail({1, 29.98f}) == L"Last 30 s");
+    CHECK(detail({1, 4.2f}) == L"Last 4 s");
+    CHECK(detail({1, 0.6f}) == L"Last 1 s");
+    CHECK(detail({1, 120.0f}) == L"Last 2 min");
+    CHECK(detail({1, 90.0f}) == L"Last 1 min 30 s");
+    CHECK(detail({1, 0.0f}).empty());  // length unknown
+
+    SaveToastInfo info{2, 30.0f};
+    SetToastGame(info, L"VALORANT");
+    const ToastText t = SavedToastText(info);
+    CHECK(t.title == L"2 clips saved");
+    CHECK(t.detail == L"Last 30 s · VALORANT");
+    CHECK(t.stat == L"30 s");  // a pill's chip
+    CHECK(SavedToastText({1, 0.0f}).title == L"Clip saved");
+
+    SetToastGame(info, L"");
+    CHECK(ToastGame(info).empty());  // off a game: the length alone
+    CHECK(SavedToastText(info).detail == L"Last 30 s");
+}
+
+TEST_CASE("save: an app's toast always names the app, the detail only while the line is on") {
+    CHECK(AppToastDetail(L"", L"Last 30 s", true) == L"Last 30 s");
+    CHECK(AppToastDetail(L"Command line", L"Last 30 s", true) == L"Command line · Last 30 s");
+    CHECK(AppToastDetail(L"Command line", L"Last 30 s", false) == L"Command line");
+    CHECK(AppToastDetail(L"", L"Last 30 s", false).empty());
 }
 
 TEST_CASE("save: a recording's toast names its length, in hours past one") {
-    CHECK(RecordingSavedTitle(0) == L"Recording saved");
-    CHECK(RecordingSavedTitle(725) == L"Recording saved, 12 min 5 s");
-    CHECK(RecordingSavedTitle(3599.6) == L"Recording saved, 1 h");
-    CHECK(RecordingSavedTitle(4830) == L"Recording saved, 1 h 20 min");
+    CHECK(RecordingSavedText(0).detail.empty());
+    CHECK(RecordingSavedText(0).title == L"Recording saved");
+    CHECK(RecordingSavedText(725).detail == L"12 min 5 s");
+    CHECK(RecordingSavedText(3599.6).detail == L"1 h");
+    CHECK(RecordingSavedText(4830).detail == L"1 h 20 min");
+    CHECK(RecordingRecoveredText(725, 1).title == L"Recording recovered");
+    CHECK(RecordingRecoveredText(725, 1).detail == L"12 min 5 s");
+    CHECK(RecordingRecoveredText(725, 3).title == L"3 recordings recovered");
 }
 
 TEST_CASE("save: the toast carries the asking app's name, bounded") {
@@ -272,11 +295,12 @@ TEST_CASE("save: the toast carries the asking app's name, bounded") {
 
 TEST_CASE("save: an app's pending clip counts down to its end, then gives up past it") {
     constexpr int64_t f = 1000;
-    CHECK(PendingSaveTitle(0, 5000, f) == L"Saving clip…");  // a hotkey save: no footage to come
-    CHECK(PendingSaveTitle(30000, 5000, f) == L"Recording clip, 25 s left");
-    CHECK(PendingSaveTitle(30000, 5001, f) == L"Recording clip, 25 s left");  // rounded up
-    CHECK(PendingSaveTitle(30000, 29999, f) == L"Recording clip, 1 s left");
-    CHECK(PendingSaveTitle(30000, 30000, f) == L"Saving clip…");
+    const auto line = [](const ToastText& t) { return t.detail.empty() ? t.title : t.title + L", " + t.detail; };
+    CHECK(line(PendingSaveText(0, 5000, f)) == L"Saving clip…");  // a hotkey save: no footage to come
+    CHECK(line(PendingSaveText(30000, 5000, f)) == L"Recording clip, 25 s left");
+    CHECK(line(PendingSaveText(30000, 5001, f)) == L"Recording clip, 25 s left");  // rounded up
+    CHECK(line(PendingSaveText(30000, 29999, f)) == L"Recording clip, 1 s left");
+    CHECK(line(PendingSaveText(30000, 30000, f)) == L"Saving clip…");
     CHECK(PendingTitleChangeQpc(30000, 5001, f) == 6000);  // "24 s left" from here
     CHECK(PendingTitleChangeQpc(30000, 29999, f) == 30000);
     CHECK(PendingTitleChangeQpc(30000, 30000, f) == 0);

@@ -35,9 +35,11 @@ int RunToast(const std::wstring& event, std::vector<HANDLE> save_waits = {}, HAN
 // `scale`: the DPI scale to draw at (2 = 200%), so a zoomed-in demo shot stays sharp.
 // `app`: the API app whose action it is (empty: the user's own); `clips` > 1 titles several clips.
 // "save" with `seconds`: an app's clip with that much footage still to come (its countdown).
-// `title`, when set, replaces the title (wording trials).
+// `title`, when set, replaces the headline (wording trials); `game` names a save_ok's game.
+// Drawn as the defaults are: the detail line and a time bar part drained.
 int RunToastTest(const std::wstring& out_png_path, const std::wstring& event, bool compact = false,
                  double seconds = 0, bool alpha = false, float scale = 1.0f,
-                 const std::wstring& app = {}, uint32_t clips = 1, const std::wstring& title = {});
+                 const std::wstring& app = {}, uint32_t clips = 1, const std::wstring& title = {},
+                 const std::wstring& game = {});
 
 }  // namespace ombra_ui

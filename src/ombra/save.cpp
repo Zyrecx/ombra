@@ -467,7 +467,7 @@ std::future<ReplaySaveResults> SaveReplay(const std::vector<SaveContext*>& conte
                                         const StartSaveFeedback& feedback) {
     struct Operation {
         std::promise<ReplaySaveResults> promise;
-        ReplaySaveResults result{SaveOutcome::kBusy, {}};
+        ReplaySaveResults result{SaveOutcome::kBusy, {}, {}};
         std::atomic<size_t> remaining{0};
         SaveFeedback feedback;
         std::vector<SaveContext*> contexts;  // the engine's: they outlive every save
@@ -479,12 +479,10 @@ std::future<ReplaySaveResults> SaveReplay(const std::vector<SaveContext*>& conte
     if (!contexts.empty())
         if (const int64_t off = contexts.front()->replay_off_qpc.load(std::memory_order_acquire)) t_end = (std::min)(t_end, off);
     op->contexts = contexts;
+    if (!contexts.empty() && contexts.front()->controller)
+        op->result.game = contexts.front()->controller->CurrentGameFolder();
     std::wstring folder;
-    if (contexts.size() > 1) {
-        const auto* controller = contexts.front()->controller;
-        folder = FormatFilename("{game} {date} {time}",
-                                controller ? controller->CurrentGameFolder() : L"", L"");
-    }
+    if (contexts.size() > 1) folder = FormatFilename("{game} {date} {time}", op->result.game, L"");
     op->result.monitors.resize(contexts.size());
     std::vector<size_t> claimed;
     for (size_t i = 0; i < contexts.size(); ++i) {

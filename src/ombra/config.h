@@ -77,6 +77,13 @@ struct SettingMeta {
     X(ui_toast_on_buffer_toggle, "ui.toast_on_buffer_toggle", true, Tier::Common, "Notifications", \
       "", "", ApplyTier::Free, true, \
       "Buffer on/off", "Show a popup when the instant-replay buffer is turned on or off.", "") \
+    X(ui_toast_details, "ui.toast_details", true, Tier::Common, "Notifications", \
+      "", "", ApplyTier::Free, true, \
+      "Details line", "A second line under the headline: the clip's length and game, or what went wrong.", \
+      "Off keeps one line. An app's action still names the app.") \
+    X(ui_toast_time_bar, "ui.toast_time_bar", true, Tier::Common, "Notifications", \
+      "", "", ApplyTier::Free, true, \
+      "Time bar", "A thin bar along the popup's foot that runs down until it leaves.", "") \
     X(ui_screen_frame, "ui.screen_frame", false, Tier::Common, "Appearance", \
       "", "", ApplyTier::Free, true, \
       "Screen frame", "Round off the screen's corners while the overlay is open, so it reads as one " \
@@ -160,7 +167,10 @@ struct SettingMeta {
     X(ui_screen_frame_thickness, "ui.screen_frame_thickness", 8, 0, 32, Tier::Common, "Appearance", \
       "0|4|8|16", "px", ApplyTier::Free, true, \
       "Frame border", "Width of a solid border along the screen edge. 0 rounds only the corners.", \
-      "Only applies while Screen frame is on.")
+      "Only applies while Screen frame is on.") \
+    X(ui_toast_duration, "ui.toast_duration", 3, 1, 15, Tier::Common, "Notifications", \
+      "2|3|5|8", "s", ApplyTier::Free, true, \
+      "Duration", "How long a popup stays up once it has its result.", "")
 
 #define OMBRA_CONFIG_ACTIONS(X) \
     X(engine_autotune, "engine.autotune", "", Tier::Preset, "System", \

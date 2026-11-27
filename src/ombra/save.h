@@ -82,6 +82,7 @@ struct ReplaySaveResult {
 struct ReplaySaveResults {
     SaveOutcome outcome;
     std::vector<ReplaySaveResult> monitors;  // input order, including busy monitors
+    std::wstring game;  // the game's folder name when the save started, as its files are named; empty off one
 };
 // The whole action's result, once: `outcome` folds the monitors (any failed or busy one makes it
 // kFailed); a monitor's `fell_back` means its clip went to the fallback folder, not output.root.

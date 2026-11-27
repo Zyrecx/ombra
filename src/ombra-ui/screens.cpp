@@ -267,6 +267,9 @@ const FieldFormEntry kFieldForms[] = {
     { "ui.toast_on_buffer_toggle", FieldForm::Custom },
     { "ui.toast_position",         FieldForm::Custom },     // a corner is spatial: a 2x2 picture
     { "ui.toast_style",            FieldForm::Custom },
+    { "ui.toast_details",          FieldForm::Custom },
+    { "ui.toast_time_bar",         FieldForm::Custom },
+    { "ui.toast_duration",         FieldForm::Custom },
     // Advanced
     { "games.list",                FieldForm::Custom },
     { "capture.capture_cursor",    FieldForm::Custom },
@@ -2135,10 +2138,19 @@ void SettingsScreen::BuildAppearanceNotificationsPage() {
         if (const FieldSpec* s = FindSpec("ui.toast_on_save"))
             AddRow(*card, AppearanceRow(L"Clip saved", L"A popup when a save finishes.", MakeSwitch(*s)));
         if (const FieldSpec* s = FindSpec("ui.toast_on_buffer_toggle"))
-            AddRow(*card, AppearanceRow(L"Buffer on/off", L"A popup when recording starts or stops.", MakeSwitch(*s)));
+            AddRow(*card, AppearanceRow(L"Buffer on/off", L"A popup when the replay buffer turns on or off.", MakeSwitch(*s)));
         if (const FieldSpec* s = FindSpec("ui.toast_style"))
             AddRow(*card, AppearanceRow(L"Style", L"A card, or a pill as wide as its text.",
                                         MakeSegmented(*s, [k = s->key](const std::string& v) { return OptionLabelFor(k, v); })));
+        if (const FieldSpec* s = FindSpec("ui.toast_details"))
+            AddRow(*card, AppearanceRow(L"Details line", L"A second line: the clip's length and game, or why it failed.",
+                                        MakeSwitch(*s)));
+        if (const FieldSpec* s = FindSpec("ui.toast_time_bar"))
+            AddRow(*card, AppearanceRow(L"Time bar", L"A line along the card's foot runs down until it goes. Not on a pill.",
+                                        MakeSwitch(*s)));
+        if (const FieldSpec* s = FindSpec("ui.toast_duration"))
+            AddRow(*card, AppearanceRow(L"Duration", L"How long a popup stays once it has its result.",
+                                        MakeSegmented(*s, [](const std::string& v) { return Utf8ToWide(v) + L" s"; })));
         // Its own corner picture: the Layout tab's screen only places the panel now.
         if (const FieldSpec* spec = FindSpec("ui.toast_position")) {
             auto corner = std::make_shared<PositionPickerControl>();

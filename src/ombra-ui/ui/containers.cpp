@@ -4,6 +4,7 @@
 #include "ombra-ui/ui/draw_probe.h"
 #include "ombra-ui/ui/paint.h"
 #include "ombra/brand_mark.h"
+#include "ombra/save_toast.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1667,87 +1668,152 @@ void StatusStrip::Draw(ID2D1DeviceContext* dc, const Theme& t, float s) {
            live ? t.color.text : t.color.text2, {TextAlign::Leading, false, true});
 }
 
-// The icon in its tone on a soft disc of it; a save shows the
-// brand mark instead. Compact is a pill as wide as its content, against the
-// screen edge; a title too long for one line makes it the full card, wrapped. An app's action
-// puts the app's name on a caption line above the title (in a pill too: it fits its height).
+namespace {
+constexpr float kToastWidthDip   = 300.0f;
+constexpr float kToastBrandDip   = 40.0f;  // the brand mark, larger than an icon's disc
+constexpr float kToastBarDip     = 3.0f;   // the time bar's thickness
+constexpr float kToastBarInsetDip = 2.0f;  // and its gap from the card's foot
+}  // namespace
+
+float ToastCard::Width(const Theme&, float s) { return kToastWidthDip * s; }
+
+float ToastCard::Height(const Theme& t, float s, bool details, bool time_bar) {
+    const Sizes& z = t.size;
+    float lines = LineHeight(TypeRole::Title);
+    if (details) lines += z.space_xxs() + LineHeight(TypeRole::Caption);
+    const float body = (std::max)(lines, kToastBrandDip) + 2 * z.space_md();
+    return (body + (time_bar ? kToastBarDip + kToastBarInsetDip : 0.0f)) * s;
+}
+
+D2D1_COLOR_F ToastCard::Hue(const Theme& t) const {
+    const ColorRoles& c = t.color;
+    if (brand) return c.accent_text;  // the picked colour, readable on the card in both modes
+    switch (tone) {
+        case Tone::Success: return c.success;
+        case Tone::Warning: return c.warning;
+        case Tone::Danger:  return c.danger;
+        case Tone::Muted:   return c.text3;
+        case Tone::Neutral: break;
+    }
+    return c.accent_text;
+}
+
+D2D1_RECT_F ToastCard::BarTrack(const Theme& t, float s) const {
+    // Along the foot, inside the corners' curve.
+    const float rad = t.size.pill ? (bounds.bottom - bounds.top) / 2 : t.size.radius_panel() * s;
+    const float foot = bounds.bottom - kToastBarInsetDip * s;
+    return D2D1::RectF(bounds.left + rad, foot - kToastBarDip * s, bounds.right - rad, foot);
+}
+
+std::wstring ToastCard::ShownDetail() const { return ombra::AppToastDetail(app, detail, details); }
+
+// The icon in its tone on a soft disc of it; a save shows the brand mark instead. The card: the
+// headline over the detail line (centred alone when there is none), the time bar along the foot.
+// Compact: a pill as wide as its content against the screen edge, the headline then the stat on a
+// soft chip of the tone; an app's name on a caption line above (it fits the pill's height). A
+// headline too long for a pill makes it the full card.
 void ToastCard::Draw(ID2D1DeviceContext* dc, const Theme& t, float s) {
     using namespace paint;
     const Paint p{dc, t, s};
     const ColorRoles& c = t.color;
     const Sizes& z = t.size;
     const float pad = z.space_md() * s, d = z.control() * s;
-    D2D1_RECT_F r = bounds;
-    // ui.corners round: a stadium, its ends half circles, as the pill buttons are.
-    float rad = z.pill ? (r.bottom - r.top) / 2 : z.radius_panel() * s;
-    float lead = pad, glyph = brand ? 40.0f * s : d, gap = z.space_md() * s;
-    TypeRole role = TypeRole::Title;
-    bool wrap = false;
+    const D2D1_COLOR_F hue = Hue(t);
+    const auto glyph_at = [&](float cx, float cy, float g) {
+        if (brand) {
+            const uint32_t rgb = t.PickedRgb();
+            const int px = (std::max)(16, static_cast<int>(std::ceil(g)) * 2);  // drawn once a toast: no cache
+            const auto pixels = ombra::RenderBrandMark(px, ((rgb >> 16) & 255) / 255.0f, ((rgb >> 8) & 255) / 255.0f,
+                                                       (rgb & 255) / 255.0f);
+            ComPtr<ID2D1Bitmap> bmp;
+            const auto props = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+            if (SUCCEEDED(dc->CreateBitmap(D2D1::SizeU(px, px), pixels.data(), px * 4, props, &bmp)))
+                dc->DrawBitmap(bmp.Get(), D2D1::RectF(cx - g / 2, cy - g / 2, cx + g / 2, cy + g / 2), p.op,
+                               D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+        } else {
+            p.Circle(cx, cy, g / 2, Faded(hue, c.soft_a));
+            DrawIcon(dc, t, icon, cx, cy, g * 0.6f, p.B(hue).Get());
+        }
+    };
+    const TextOpts trim{TextAlign::Leading, false, true};
+
     if (compact) {
-        lead = z.space_xs() * s;
-        glyph = d;
-        gap = z.space_sm() * s;
-        role = TypeRole::Label;
-        const float fixed = lead + d + gap + pad, title_w = p.TextW(title, role);
+        const float lead = z.space_xs() * s, gap = z.space_sm() * s, chip_pad = z.space_sm() * s;
+        const float title_w = p.TextW(title, TypeRole::Label);
+        const std::wstring chip = details ? stat : std::wstring{};  // the detail line's number
+        const float chip_w = chip.empty() ? 0.0f : p.TextW(chip, TypeRole::Caption) + 2 * chip_pad;
+        const float fixed = lead + d + gap + pad + (chip.empty() ? 0.0f : gap + chip_w);
         // A name only widens the pill up to the card's width; past that it ends in "...".
-        const float name_w = app.empty() ? 0.0f : (std::min)(p.TextW(app, TypeRole::Caption), r.right - r.left - fixed);
+        const float room = bounds.right - bounds.left;
+        const float name_w = app.empty() ? 0.0f : (std::min)(p.TextW(app, TypeRole::Caption), room - fixed);
         const float w = fixed + (std::max)(title_w, name_w);
-        if (w <= r.right - r.left) {
+        if (w <= room) {
+            D2D1_RECT_F r = bounds;
             if (trailing) r.left = r.right - w;
             else r.right = r.left + w;
             const float h = d + 2 * lead;
             r.top = Cy(bounds) - h / 2;
             r.bottom = r.top + h;
-            rad = h / 2;
-        } else {
-            wrap = true;  // the card's shape and inset, Label wrapped
-            lead = pad;
+            p.Fill(r, h / 2, c.raised);
+            p.Stroke(r, h / 2, c.line_strong);
+            const float cx = r.left + lead + d / 2, cy = Cy(r);
+            glyph_at(cx, cy, d);
+            const float tx = cx + d / 2 + gap;
+            float title_top = r.top, title_bottom = r.bottom;
+            if (!app.empty()) {  // the asking app above: where it came from, then what happened
+                const float ah = LineHeight(TypeRole::Caption) * s, th = LineHeight(TypeRole::Label) * s;
+                const float top = cy - (ah + th) / 2;
+                p.Text(app, TypeRole::Caption, D2D1::RectF(tx, top, tx + name_w + 1, top + ah), c.text2, trim);
+                title_top = top + ah;
+                title_bottom = title_top + th;
+            }
+            p.Text(title, TypeRole::Label, D2D1::RectF(tx, title_top, tx + title_w + 1, title_bottom), c.text);
+            if (!chip.empty()) {
+                const float ch = LineHeight(TypeRole::Caption) * s + 2 * z.space_xxs() * s;
+                const float cl = tx + (std::max)(title_w, name_w) + gap;
+                const auto cr = D2D1::RectF(cl, cy - ch / 2, cl + chip_w, cy + ch / 2);
+                p.Fill(cr, ch / 2, Faded(hue, c.soft_a));
+                p.Text(chip, TypeRole::Caption, cr, c.text, {TextAlign::Center});
+            }
+            return;
         }
+        // Too long for a pill: the card below.
     }
+
+    const D2D1_RECT_F r = bounds;
+    // ui.corners round: a stadium, its ends half circles, as the pill buttons are.
+    const float rad = z.pill ? (r.bottom - r.top) / 2 : z.radius_panel() * s;
     p.Fill(r, rad, c.raised);
     p.Stroke(r, rad, c.line_strong);
-
-    const float cx = r.left + lead + glyph / 2, cy = Cy(r);
-    if (brand) {
-        const uint32_t rgb = t.PickedRgb();
-        const int px = (std::max)(16, static_cast<int>(std::ceil(glyph)) * 2);  // drawn once a toast: no cache
-        const auto pixels = ombra::RenderBrandMark(px, ((rgb >> 16) & 255) / 255.0f, ((rgb >> 8) & 255) / 255.0f,
-                                                   (rgb & 255) / 255.0f);
-        ComPtr<ID2D1Bitmap> bmp;
-        const auto props = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-        if (SUCCEEDED(dc->CreateBitmap(D2D1::SizeU(px, px), pixels.data(), px * 4, props, &bmp)))
-            dc->DrawBitmap(bmp.Get(), D2D1::RectF(cx - glyph / 2, cy - glyph / 2, cx + glyph / 2, cy + glyph / 2),
-                           p.op, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+    const bool bar = time_bar && !compact;
+    const float body_bottom = bar ? r.bottom - (kToastBarDip + kToastBarInsetDip) * s : r.bottom;
+    const float glyph = brand ? kToastBrandDip * s : d;
+    const float cx = r.left + pad + glyph / 2, cy = (r.top + body_bottom) / 2;
+    glyph_at(cx, cy, glyph);
+    const float tx = cx + glyph / 2 + z.space_md() * s, right = r.right - pad;
+    const std::wstring line2 = ShownDetail();
+    if (line2.empty()) {
+        // The headline alone, centred; one too long for the line (the CPU-encoder fallback) drops
+        // to Label and wraps to two.
+        const auto tr = D2D1::RectF(tx, r.top, right, body_bottom);
+        if (p.TextW(title, TypeRole::Title) <= right - tx) p.Text(title, TypeRole::Title, tr, c.text);
+        else p.Text(title, TypeRole::Label, tr, c.text, {TextAlign::Leading, true, true});
     } else {
-        D2D1_COLOR_F hue = c.accent_text;
-        switch (tone) {
-            case Tone::Success: hue = c.success; break;
-            case Tone::Warning: hue = c.warning; break;
-            case Tone::Danger:  hue = c.danger; break;
-            case Tone::Muted:   hue = c.text3; break;
-            case Tone::Neutral: break;
-        }
-        p.Circle(cx, cy, glyph / 2, Faded(hue, c.soft_a));
-        DrawIcon(dc, t, icon, cx, cy, glyph * 0.6f, p.B(hue).Get());
+        const float th = LineHeight(TypeRole::Title) * s, gap2 = z.space_xxs() * s, dh = LineHeight(TypeRole::Caption) * s;
+        const float top = cy - (th + gap2 + dh) / 2;
+        // A headline too long for Title ("Screenshot saved to Videos\…") steps down to Label.
+        const TypeRole head = p.TextW(title, TypeRole::Title) <= right - tx ? TypeRole::Title : TypeRole::Label;
+        p.Text(title, head, D2D1::RectF(tx, top, right, top + th), c.text, trim);
+        p.Text(line2, TypeRole::Caption, D2D1::RectF(tx, top + th + gap2, right, top + th + gap2 + dh), c.text2, trim);
     }
-    const auto tr = D2D1::RectF(cx + glyph / 2 + gap, r.top, r.right - pad, r.bottom);
-    if (!app.empty()) {
-        // The asking app on a caption line above the title: where it came from, then what happened.
-        // A title too long for one line (a save that fell back to Videos) drops to Label over two.
-        const TextOpts trim{TextAlign::Leading, false, true};
-        const bool one_line = !wrap && p.TextW(title, role) <= tr.right - tr.left;
-        const TypeRole title_role = one_line ? role : TypeRole::Label;
-        const float th = LineHeight(title_role) * s * (one_line ? 1 : 2);
-        const float ah = LineHeight(TypeRole::Caption) * s, gap2 = z.space_xxs() * s;
-        const float top = cy - (ah + gap2 + th) / 2;
-        p.Text(app, TypeRole::Caption, D2D1::RectF(tr.left, top, tr.right, top + ah), c.text2, trim);
-        p.Text(title, title_role, D2D1::RectF(tr.left, top + ah + gap2, tr.right, top + ah + gap2 + th), c.text,
-               one_line ? trim : TextOpts{TextAlign::Leading, true, true, false});
-        return;
+    if (bar && bar_track) {
+        const D2D1_RECT_F track = BarTrack(t, s);
+        const float h = track.bottom - track.top;
+        p.Fill(track, h / 2, c.line);
+        const float fill = (std::clamp)(bar_fill, 0.0f, 1.0f);
+        if (fill > 0)
+            p.Fill(D2D1::RectF(track.left, track.top, track.left + (track.right - track.left) * fill, track.bottom), h / 2, hue);
     }
-    // A title too long for one line (the CPU-encoder fallback) drops to Label and wraps to two.
-    if (!wrap && p.TextW(title, role) <= tr.right - tr.left) p.Text(title, role, tr, c.text);
-    else p.Text(title, TypeRole::Label, tr, c.text, {TextAlign::Leading, true, true});
 }
 
 // The old dialog's shape: 400 DIP wide, sized to its text (an Auto-Tune result runs to several

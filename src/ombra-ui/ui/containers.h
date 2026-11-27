@@ -347,25 +347,44 @@ private:
     bool more_hovered_ = false;
 };
 
-// A toast (ombra-ui --toast): the result of a save or a buffer switch, opaque so the game doesn't
-// bleed through. The icon's disc carries the tone;
-// the card and title stay neutral. Not interactive: the toast window is click-through.
+// A toast (ombra-ui --toast): a headline over
+// a detail line, opaque so the game doesn't bleed through. The icon's disc carries the tone; the
+// card and text stay neutral. Not interactive: the toast window is click-through.
 class ToastCard : public Control {
 public:
     enum class Tone { Neutral, Success, Warning, Danger, Muted };
     std::wstring title;
+    std::wstring detail;  // the second line ("Last 30 s · VALORANT"); empty: the headline alone
+    std::wstring stat;    // the number a compact pill keeps on its chip ("30 s"); empty: none
     IconType icon = IconType::None;
     Tone tone = Tone::Neutral;
     // The brand mark (brand_mark.h, ring in the picked colour) in place of the icon's disc: a save
     // and its pending state.
     bool brand = false;
     // ui.toast_style compact: a pill as wide as its content, against the trailing edge (the leading
-    // one for a toast on the left of the screen).
+    // one for a toast on the left of the screen): the headline and the stat's chip.
     bool compact = false;
     bool trailing = true;
-    // The API app whose action this is, shown so a tool's save is never anonymous; empty for the user's own.
+    // The API app whose action this is, so a tool's action is never anonymous: it leads the detail
+    // line, and a pill's caption; empty for the user's own.
     std::wstring app;
+    bool details = true;  // ui.toast_details: off drops the detail line (an app's name stays)
+    // ui.toast_time_bar: a track along the card's foot (no pill has one). `bar_fill` is how much of
+    // it is drawn full, 0..1; the live toast draws 0 and animates its own fill (BarTrack).
+    bool  time_bar = false;   // the foot's room, so a pending save's text sits where its result's will
+    bool  bar_track = true;   // and the track in it (a pending save has none yet)
+    float bar_fill = 0.0f;
     void Draw(ID2D1DeviceContext* dc, const Theme& theme, float s) override;
+
+    // The card's size at scale `s`: a fixed width (text never scales with density) and the height
+    // of two lines, or one with the detail line off, in the density's padding.
+    static float Width(const Theme& theme, float s);
+    static float Height(const Theme& theme, float s, bool details, bool time_bar);
+    // Where the time bar runs, and its colour (the tone's): set `bounds` first.
+    D2D1_RECT_F BarTrack(const Theme& theme, float s) const;
+    D2D1_COLOR_F Hue(const Theme& theme) const;
+    // The line under the headline as shown: the app first, then the detail if the line is on.
+    std::wstring ShownDetail() const;
 };
 
 // A confirm dialog over the whole overlay (ScreenHost::ShowModal): a dimmed backdrop, a card sized

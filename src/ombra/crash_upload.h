@@ -238,7 +238,8 @@ inline constexpr const char* kUsageSettingsSent[] = {
     "capture.target", "capture.resolution", "encode.adapter", "encode.video_codec", "encode.amf_av1_unaligned", "encode.rate_control",
     "buffer.storage", "audio.codec", "save.overlap_policy", "hotkeys.backend", "ui.theme", "ui.accent",
     "ui.panel_position", "ui.panel_attach", "ui.screen_frame_color", "ui.rail_position", "ui.corners",
-    "log.level", "ui.font", "ui.density", "ui.toast_position", "ui.toast_style"};
+    "log.level", "ui.font", "ui.density", "ui.toast_position", "ui.toast_style",
+    "ui.toast_details", "ui.toast_time_bar", "ui.toast_duration"};
 // Sent only as whether they differ from the default (`<key>.changed`): typed or picked by the user.
 inline constexpr const char* kUsageSettingsChangedOnly[] = {"output.filename", "hotkeys.save_replay",
                                                             "hotkeys.toggle_buffer", "hotkeys.toggle_record",
