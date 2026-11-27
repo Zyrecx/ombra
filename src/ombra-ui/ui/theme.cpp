@@ -206,6 +206,8 @@ void Theme::RefreshRoles() {
         r.text_off = d2d(Mix(muted, RgbFromHex(pc.cards), 0.28f));
         r.focus = d2d(Mix(text, RgbFromHex(pc.cards), 0.08f));
     }
+    // The scrim is black in both modes, so a light theme's dark text would vanish on it.
+    r.on_scrim = light ? r.raised : r.text;
     const Rgb card = rgb(r.card);
     const Rgb picked = RgbFromHex(accent_id == AccentId::Custom  ? accent_rgb
                                   : accent_id == AccentId::Theme ? ThemeAccentRgb()

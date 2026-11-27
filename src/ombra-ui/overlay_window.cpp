@@ -1625,7 +1625,7 @@ void OverlayHost::DrawFloatingHeader(float view_w, float view_h) {
         d2d_context_->GetTextRenderingParams(&ui_params);
         d2d_context_->SetTextRenderingParams(theme_.NoGridFit());
         ComPtr<ID2D1SolidColorBrush> brush;
-        d2d_context_->CreateSolidColorBrush(theme_.color.text, &brush);
+        d2d_context_->CreateSolidColorBrush(theme_.color.on_scrim, &brush);
         const float top = CapCenteredTop(theme_.dwrite.Get(), wordmark, kWordmark, logo_cy);
         DrawString(d2d_context_.Get(), kWordmark, static_cast<UINT32>(wcslen(kWordmark)), wordmark,
                    D2D1::RectF(logo_cx + logo_sz * 0.5f + z.space_md() * dpi_scale_, top, view_w * 0.5f, top + logo_sz),

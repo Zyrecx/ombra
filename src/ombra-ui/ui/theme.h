@@ -83,6 +83,7 @@ bool AnimationsEnabled();  // SPI_GETCLIENTAREAANIMATION, read per call (cheap)
 // (ui/color.h DeriveAccent); status hues are never the accent.
 struct ColorRoles {
     D2D1_COLOR_F scrim;                        // over the whole screen while the overlay is open
+    D2D1_COLOR_F on_scrim;                     // text straight on the scrim (the wordmark): light in both modes
     D2D1_COLOR_F panel, card, raised;          // surface steps: panel < card < raised (menus, tooltips, dialogs)
     D2D1_COLOR_F line, line_strong, focus;     // card edge, control edge, keyboard focus ring
     D2D1_COLOR_F text, text2, text3, text_off; // primary, secondary, muted (help), disabled
