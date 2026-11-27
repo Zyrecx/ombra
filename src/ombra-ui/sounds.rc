@@ -1,0 +1,6 @@
+// The toast sounds (toast_sounds.h). Linked into ombra-ui only: nothing else plays them. CMake puts
+// the repo root on this file's include path, which rc.exe also searches for the WAVs.
+#include "src/ombra-ui/toast_sounds.h"
+OMBRA_RC_SOUND_SUCCESS WAVE "src/ombra-ui/sounds/toast-success.wav"
+OMBRA_RC_SOUND_PROBLEM WAVE "src/ombra-ui/sounds/toast-problem.wav"
+OMBRA_RC_SOUND_NEUTRAL WAVE "src/ombra-ui/sounds/toast-neutral.wav"

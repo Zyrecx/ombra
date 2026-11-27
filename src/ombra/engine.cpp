@@ -293,7 +293,9 @@ HANDLE     g_last_toast_process = nullptr;
 
 // `inherit` handles (already inheritable) pass to the toast and nothing else does: the explicit
 // handle list keeps every other inheritable handle in the engine out of the child.
-void SpawnToastProcess(const std::wstring& args, const std::vector<HANDLE>& inherit) {
+// A sound-only toast (`popup` false) has no window to replace: it neither kills the popup on
+// screen nor takes its slot, so the next popup doesn't cut its sound short.
+void SpawnToastProcess(const std::wstring& args, const std::vector<HANDLE>& inherit, bool popup = true) {
     // An isolated instance (OMBRA_HOME: tests, ombra-ui --drive) puts nothing on the user's screen.
     if (Instance().isolated) return;
     const std::wstring ui_path = ResolveOmbraUiExePath();
@@ -302,7 +304,7 @@ void SpawnToastProcess(const std::wstring& args, const std::vector<HANDLE>& inhe
     std::wstring cmdline = L"\"" + ui_path + L"\" --toast " + args;
 
     std::lock_guard<std::mutex> lock(g_toast_mutex);
-    if (g_last_toast_process) {
+    if (popup && g_last_toast_process) {
         if (WaitForSingleObject(g_last_toast_process, 0) == WAIT_TIMEOUT) {
             // Still showing a previous toast — best-effort kill so it doesn't linger with stale
             // state once this newer one replaces it. Ignore failure: it may have just exited on
@@ -343,10 +345,16 @@ void SpawnToastProcess(const std::wstring& args, const std::vector<HANDLE>& inhe
         return;
     }
     CloseHandle(pi.hThread);
-    g_last_toast_process = pi.hProcess;
+    if (popup) g_last_toast_process = pi.hProcess;
+    else CloseHandle(pi.hProcess);
 }
 
-void SpawnToast(const wchar_t* event) { SpawnToastProcess(event, {}); }
+// kSoundOnly: a windowless toast process that plays the event's sound and exits.
+void SpawnToast(const wchar_t* event, ToastShow show = ToastShow::kPopup) {
+    if (show == ToastShow::kNothing) return;
+    const bool popup = show == ToastShow::kPopup;
+    SpawnToastProcess(popup ? std::wstring(event) : std::wstring(event) + L" --sound-only", {}, popup);
+}
 
 // A save toast spawned at the press, not after the save: it waits on these events (inherited by
 // the toast process), so it appears within its own startup time and resolves in place when the
@@ -452,35 +460,39 @@ void SpawnAppToast(const wchar_t* event, const std::wstring& app, double seconds
     CloseHandle(info);  // the toast holds its own inherited handle
 }
 
-// A save whose pending toast wasn't shown: the problem it ended in, if any (toast_events.h rows).
-const wchar_t* SaveProblemToast(const ReplaySaveResults& r) {
+// The event a save ended in, as the pending toast resolves it (toast_events.h rows); none for a
+// busy one, which no popup was showing.
+const wchar_t* SaveResultToast(const ReplaySaveResults& r) {
+    if (r.outcome == SaveOutcome::kBusy) return nullptr;
+    if (r.outcome == SaveOutcome::kNothingNew) return L"save_nothing_new";
     if (r.outcome == SaveOutcome::kFailed) return L"save_failed";
-    if (r.outcome != SaveOutcome::kSaved) return nullptr;
     for (const auto& m : r.monitors)
         if (m.fell_back) return L"save_elsewhere";
-    return nullptr;
+    return L"save_ok";
 }
 
 // Both entry points use the same ring claims, timestamp, grouping and completion result.
 // `app`: the API app asking (its hello name), empty for the user's own save. Read as each save
-// starts: Clip saved on spawns the pending toast at the press (it then says how the save ended,
-// a failure too, since it is already on screen); off, nothing shows unless the save ends in a
-// problem and Problems is on.
+// starts: Clip saved's popup on spawns the pending toast at the press (it then says how the save
+// ended, a failure too, since it is already on screen, and plays the result's sound if its row
+// has it on); off, a problem pops up if Problems is on, and otherwise the result's row may still
+// want its sound alone.
 StartSaveFeedback ReplayFeedback(const Config& cfg, std::wstring app = {}) {
     return [&cfg, app = std::move(app)]() -> SaveFeedback {
         const auto [clip, problems] = ReadLiveConfig(cfg, [](const Config& c) {
-            return std::pair(ToastPopupOn(c, ToastRow::kClipSaved), ToastPopupOn(c, ToastRow::kProblems));
+            return std::pair(ToastShowFor(c, ToastRow::kClipSaved), ToastShowFor(c, ToastRow::kProblems));
         });
-        if (clip) {
+        if (clip == ToastShow::kPopup) {
             auto toast = SpawnSaveToast(app);
             return [toast](const ReplaySaveResults& r) { if (toast) toast->Resolve(r); };
         }
-        if (!problems) return {};
-        return [app](const ReplaySaveResults& r) {
-            if (const wchar_t* event = SaveProblemToast(r)) {
-                if (app.empty()) SpawnToast(event);
-                else SpawnAppToast(event, app);
-            }
+        if (clip == ToastShow::kNothing && problems == ToastShow::kNothing) return {};
+        return [app, clip, problems](const ReplaySaveResults& r) {
+            const wchar_t* event = SaveResultToast(r);
+            if (!event) return;
+            const ToastShow show = ToastRowFor(event) == ToastRow::kProblems ? problems : clip;
+            if (show == ToastShow::kPopup && !app.empty()) SpawnAppToast(event, app);
+            else SpawnToast(event, show);
         };
     };
 }
@@ -533,9 +545,10 @@ int RunExport(const Config& cfg, int argc, wchar_t** argv) {
     }
     const auto toast_if_unseen = [&](const wchar_t* event) {
         if (!overlay || WaitForSingleObject(overlay, 0) != WAIT_OBJECT_0) return;  // open: it shows the result
-        if (!ToastPopupOn(cfg, event)) return;
+        const ToastShow show = ToastShowFor(cfg, event);
+        if (show == ToastShow::kNothing) return;
         Log::Info("export: overlay closed, toast %ls", event);
-        SpawnToast(event);
+        SpawnToast(event, show);
     };
     // An overlay opened meanwhile leaves the source alone while this holds it (clip_ops.h).
     const ClipBusyLock busy(src);
@@ -797,15 +810,14 @@ int RunEngine(int argc, wchar_t** argv) {
     };
     // The user's own recording follows its toast rows (toast_events.h), as the user's saves do.
     pipe_api.user_record_feedback = [&cfg] {
-        const auto wanted = [&cfg](const wchar_t* event) {
-            return ReadLiveConfig(cfg, [event](const Config& c) { return ToastPopupOn(c, event); });
+        const auto toast = [&cfg](const wchar_t* event, double seconds) {
+            const ToastShow show = ReadLiveConfig(cfg, [event](const Config& c) { return ToastShowFor(c, event); });
+            if (show == ToastShow::kPopup) SpawnAppToast(event, {}, seconds);  // the mapping carries the length
+            else SpawnToast(event, show);
         };
         RecordFeedback feedback;
-        feedback.started = [wanted] { if (wanted(L"record_started")) SpawnAppToast(L"record_started", {}); };
-        feedback.ended   = [wanted](const RecordingResults& r) {
-            const wchar_t* event = RecordEndToast(r);
-            if (wanted(event)) SpawnAppToast(event, {}, r.Seconds());
-        };
+        feedback.started = [toast] { toast(L"record_started", 0); };
+        feedback.ended   = [toast](const RecordingResults& r) { toast(RecordEndToast(r), r.Seconds()); };
         return feedback;
     };
     // The pipe's events: before the pipe server, the saves and the controller (whose destructor
@@ -839,9 +851,13 @@ int RunEngine(int argc, wchar_t** argv) {
                         private_fields.Set("paths", std::move(paths));
                     });
                 }
-                if (!recovered.empty() &&
-                    ReadLiveConfig(cfg, [](const Config& c) { return ToastPopupOn(c, ToastRow::kRecording); }))
-                    SpawnAppToast(L"record_recovered", WideFromUtf8(app), seconds, static_cast<uint32_t>(recovered.size()));
+                if (!recovered.empty()) {
+                    const ToastShow show = ReadLiveConfig(cfg, [](const Config& c) { return ToastShowFor(c, L"record_recovered"); });
+                    if (show == ToastShow::kPopup)
+                        SpawnAppToast(L"record_recovered", WideFromUtf8(app), seconds, static_cast<uint32_t>(recovered.size()));
+                    else
+                        SpawnToast(L"record_recovered", show);
+                }
             });
         }
     }
@@ -1132,7 +1148,7 @@ int RunEngine(int argc, wchar_t** argv) {
     ScreenshotContext screenshot_ctx;
     screenshot_ctx.fallback_root = FallbackClipsDir();
     screenshot_ctx.notify = [&cfg](const wchar_t* event) {
-        if (ReadLiveConfig(cfg, [event](const Config& c) { return ToastPopupOn(c, event); })) SpawnToast(event);
+        SpawnToast(event, ReadLiveConfig(cfg, [event](const Config& c) { return ToastShowFor(c, event); }));
     };
     screenshot_ctx.worker = std::thread([&screenshot_ctx] {
         Log::SetThreadName("screenshot");
@@ -1187,8 +1203,7 @@ int RunEngine(int argc, wchar_t** argv) {
     for (auto& mp : pipelines) {
         if (resident) {
             const auto problem = [&cfg](const wchar_t* event) {
-                if (ReadLiveConfig(cfg, [](const Config& c) { return ToastPopupOn(c, ToastRow::kProblems); }))
-                    SpawnToast(event);
+                SpawnToast(event, ReadLiveConfig(cfg, [](const Config& c) { return ToastShowFor(c, ToastRow::kProblems); }));
             };
             mp->supervisor->SetEncoderFallbackCallback([problem](const std::string& code) {
                 problem(code == IVideoEncoder::kFaultDriverTooOld ? L"cpu_encoder_old_driver" : L"cpu_encoder");
@@ -1615,9 +1630,8 @@ int RunEngine(int argc, wchar_t** argv) {
         // pipelines are disarmed but the switch is on, and this must turn it off.
         const bool next_armed = controller.ToggleUserEnabled();
         if (tray) tray->SetTooltip(TrayTooltip(next_armed));
-        if (ReadLiveConfig(cfg, [](const Config& c) { return ToastPopupOn(c, ToastRow::kBuffer); })) {
-            SpawnToast(next_armed ? L"buffer_on" : L"buffer_off");
-        }
+        SpawnToast(next_armed ? L"buffer_on" : L"buffer_off",
+                   ReadLiveConfig(cfg, [](const Config& c) { return ToastShowFor(c, ToastRow::kBuffer); }));
     };
     if (tray) {
         TrayMenuActions menu;

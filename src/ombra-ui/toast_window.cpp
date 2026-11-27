@@ -9,6 +9,7 @@
 #include "ombra-ui/toast_window.h"
 #include "ombra-ui/monitor_adapter.h"
 #include "ombra/brand.h"
+#include "ombra-ui/toast_sounds.h"
 #include "ombra-ui/ui/containers.h"
 #include "ombra-ui/ui/theme.h"
 
@@ -16,7 +17,9 @@
 #include "ombra/log.h"
 #include "ombra/resource.h"
 #include "ombra/save_toast.h"
+#include "ombra/toast_events.h"
 
+#include <mmsystem.h>
 #include <d3d11.h>
 #include <dxgi1_3.h>
 #include <d2d1_1.h>
@@ -31,6 +34,22 @@
 #include <vector>
 
 namespace ombra_ui {
+
+void PlayToastSound(const ombra::Config& cfg, std::wstring_view event, bool wait) {
+    if (!ombra::ToastSoundOn(cfg, event)) return;
+    int id = 0;
+    switch (ombra::ToastSoundFor(event)) {
+    case ombra::ToastSound::kSuccess: id = OMBRA_RC_SOUND_SUCCESS; break;
+    case ombra::ToastSound::kProblem: id = OMBRA_RC_SOUND_PROBLEM; break;
+    case ombra::ToastSound::kNeutral: id = OMBRA_RC_SOUND_NEUTRAL; break;
+    case ombra::ToastSound::kNone:    return;
+    }
+    // PlaySound reads the WAV straight from the mapped image: nothing to load or free. NODEFAULT:
+    // no Windows ding in its place if the resource is missing (ombra-tests links none).
+    const DWORD flags = SND_RESOURCE | SND_NODEFAULT | (wait ? SND_SYNC : SND_ASYNC);
+    if (!PlaySoundW(MAKEINTRESOURCEW(id), GetModuleHandleW(nullptr), flags))
+        ombra::Log::Warn("toast: sound %d for %.*ls didn't play", id, static_cast<int>(event.size()), event.data());
+}
 
 using Microsoft::WRL::ComPtr;
 
@@ -289,6 +308,9 @@ public:
     void SetDetails(bool on) { details_ = on; }    // ui.toast_details
     void SetTimeBar(bool on) { time_bar_ = on; }   // ui.toast_time_bar
     void SetHoldMs(ULONGLONG ms) { hold_ms_ = ms; }  // ui.toast_duration
+    // The live toast's sound: `event`'s as the card shows (a pending save's comes with its result),
+    // if its row's Sound is on in `cfg`. Never set by --toasttest or --drive: those stay silent.
+    void SetSound(const ombra::Config* cfg, std::wstring event) { sound_cfg_ = cfg; sound_event_ = std::move(event); }
     // The card's height for this toast: two lines when it will ever show a detail line (a save
     // always may: its result's), and the time bar's foot. Theme and DPI set first.
     float CardHeight(bool save) const;
@@ -310,6 +332,9 @@ private:
     // (what is left of the enter): no frame drawn in this process while it runs.
     bool StartBar(double delay_sec);
     bool StartBarOnce(double delay_sec);
+    void PlayCardSound() const {
+        if (sound_cfg_ && !sound_event_.empty()) PlayToastSound(*sound_cfg_, sound_event_, /*wait=*/false);
+    }
 
     static constexpr size_t kSaveWaits = 6;  // five results, then the change event
     static constexpr DWORD  kSaveResults = 5;
@@ -321,6 +346,8 @@ private:
     bool time_bar_ = true;
     ULONGLONG hold_ms_ = 3000;
     bool pending_ = false;
+    const ombra::Config* sound_cfg_ = nullptr;
+    std::wstring sound_event_;
     ULONGLONG start_tick_ = 0;
     int64_t start_qpc_ = 0, end_qpc_ = 0, qpc_freq_ = 1;
     bool slide_from_right_ = true;
@@ -827,6 +854,7 @@ bool ToastWindow::PollSaveResult() {
     else if (QpcNow() >= ombra::PendingGiveUpQpc(start_qpc_, end_qpc_, qpc_freq_)) event = L"save_failed";
     if (!event) return false;
     LookupToastInfo(event, &info);
+    if (sound_cfg_) sound_event_ = event;
     if (r == WAIT_OBJECT_0 && info_) {
         if (const void* view = MapViewOfFile(info_, FILE_MAP_READ, 0, 0, sizeof(ombra::SaveToastInfo))) {
             info.text = ombra::SavedToastText(*static_cast<const ombra::SaveToastInfo*>(view));
@@ -852,7 +880,10 @@ void ToastWindow::RunLoop() {
     RenderCard();
     const float sign = slide_from_right_ ? 1.0f : -1.0f;
     Animate(sign * kEnterTravelDip * dpi_scale, 0.0f, 0.0f, 1.0f, /*ease_out=*/true);
-    if (!pending_) StartBar(static_cast<double>(kEnterMs) / 1000.0);
+    if (!pending_) {
+        StartBar(static_cast<double>(kEnterMs) / 1000.0);
+        PlayCardSound();  // with the card's first frame; a pending save's waits for its result
+    }
 
     // Spawn-to-first-frame, so a normal save shows how long process startup costs.
     FILETIME created{}, unused{}, now{};
@@ -902,6 +933,7 @@ void ToastWindow::RunLoop() {
             const ULONGLONG tick = GetTickCount64(), hold_from = (std::max)(tick, start_tick_ + kEnterMs);
             leave_at = hold_from + hold_ms_;
             StartBar(static_cast<double>(hold_from - tick) / 1000.0);
+            PlayCardSound();
         } else if (RefreshPending(changed)) {
             RenderCard();  // a second off the countdown, or another app joined the clip
         }
@@ -964,17 +996,22 @@ bool ToastCardFor(const std::wstring& event, ToastCard* out) {
     return true;
 }
 
-int RunToast(const std::wstring& event, std::vector<HANDLE> save_waits, HANDLE save_info) {
+int RunToast(const std::wstring& event, std::vector<HANDLE> save_waits, HANDLE save_info, bool sound_only) {
     ToastInfo info{};
     if (!LookupToastInfo(event, &info)) {
         ombra::Log::Error("RunToast: unrecognized event \"%ls\"", event.c_str());
         return 1;
     }
 
-    // Local, self-contained config read -- no pipe/engine connection. ui.toast_enabled/ui.toast_on_* aren't re-checked here: ombra.exe already decided to
-    // spawn this process, and re-checking risks a stale double-negative if the two disagree.
+    // Local, self-contained config read -- no pipe/engine connection. The popup rows
+    // (ui.toast_on_*) aren't re-checked here: ombra.exe already decided to show this one, and an
+    // app's toast pops up whatever they say. The sound is decided here, from the event's row.
     const ombra::ConfigLoadResult loaded = ombra::LoadConfig();
     const ombra::Config& cfg = loaded.config;
+    if (sound_only) {  // the popup's row is off, its sound's isn't: no window, no device
+        PlayToastSound(cfg, event, /*wait=*/true);
+        return 0;
+    }
     const ToastPosition position = ParseToastPosition(cfg.ui_toast_position);
     const bool from_right = ToastPositionIsRight(position);
     const bool from_top = ToastPositionIsTop(position);
@@ -999,6 +1036,7 @@ int RunToast(const std::wstring& event, std::vector<HANDLE> save_waits, HANDLE s
     toast.SetDetails(cfg.ui_toast_details);
     toast.SetTimeBar(cfg.ui_toast_time_bar);
     toast.SetHoldMs(static_cast<ULONGLONG>((std::clamp)(static_cast<int>(cfg.ui_toast_duration), 1, 15)) * 1000);
+    toast.SetSound(&cfg, event);  // a pending save's becomes its result's
     if (!toast.InitGraphics(/*warp=*/false, mon)) return 1;
     if (const auto it = loaded.raw.find("ui.themes"); it != loaded.raw.end())
         toast.GetTheme().user_themes = ombra::ParseUserThemes(it->second);

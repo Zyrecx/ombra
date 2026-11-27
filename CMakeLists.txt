@@ -239,7 +239,8 @@ add_library(ombra_ui_core STATIC
     src/ombra-ui/ui/widget.cpp)
 target_link_libraries(ombra_ui_core PUBLIC
     ombra_common
-    user32 shell32 d2d1 dxguid dwrite dcomp dxgi d3d11 windowscodecs ole32 shlwapi mfplat mfuuid)
+    user32 shell32 d2d1 dxguid dwrite dcomp dxgi d3d11 windowscodecs ole32 shlwapi mfplat mfuuid winmm)
+# winmm: PlaySoundW, the toast's sound (toast_window.cpp).
 # d2d1/dwrite/dcomp/dxgi/d3d11/windowscodecs: overlay_window.cpp + ui/*.cpp --
 # the D3D11/DComp/Direct2D overlay and its offscreen-PNG test/snapshot path.
 # dxguid: CLSID_D2D1Shadow, the menu popup's shadow (ui/controls.cpp).
@@ -367,7 +368,12 @@ add_executable(ombra-ui WIN32
     src/ombra/mux.cpp
     src/ombra/av1.cpp
     src/ombra-ui/ombra-ui.rc
-    src/ombra-ui/fonts.rc)
+    src/ombra-ui/fonts.rc
+    src/ombra-ui/sounds.rc)
+# The toast sounds (scripts/toast-sounds.py): found from the repo root like fonts.rc's fonts.
+set_source_files_properties(src/ombra-ui/sounds.rc PROPERTIES
+    INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}"
+    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/ombra-ui/toast_sounds.h;${CMAKE_CURRENT_SOURCE_DIR}/src/ombra-ui/sounds/toast-success.wav;${CMAKE_CURRENT_SOURCE_DIR}/src/ombra-ui/sounds/toast-problem.wav;${CMAKE_CURRENT_SOURCE_DIR}/src/ombra-ui/sounds/toast-neutral.wav")
 target_link_libraries(ombra-ui PRIVATE ombra_ui_core dwmapi)
 add_dependencies(ombra-ui ombra_build_info)
 # The generated icon (ombra/ombra.ico) for ombra-ui.rc; ombra gets this dir from ombra_core.

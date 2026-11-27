@@ -2770,11 +2770,11 @@ TEST_CASE("ui: Appearance shows a setting's dependents only while they apply") {
     screen.SetActiveSubTab(kNotifications);
     screen.Layout(D2D1::RectF(0, 0, 1280, 800), 1.0f);
     for (const char* key : {"ui.toast_on_save", "ui.toast_on_record", "ui.toast_on_screenshot", "ui.toast_on_buffer_toggle",
-                            "ui.toast_on_problem"}) {
+                            "ui.toast_on_problem", "ui.toast_sound_on_save", "ui.toast_sound_on_record",
+                            "ui.toast_sound_on_screenshot", "ui.toast_sound_on_buffer_toggle", "ui.toast_sound_on_problem"}) {
         CAPTURE(key);
-        CHECK(screen.ControlForTest(key));  // the event table's Popup column
+        CHECK(screen.ControlForTest(key));  // the event table's Popup and Sound columns
     }
-    CHECK_FALSE(screen.ControlForTest("ui.toast_sound_on_save"));  // no Sound column until sounds play
     CHECK(screen.ControlForTest("ui.toast_position"));       // its own corner picture
     CHECK(screen.ControlForTest("ui.toast_style"));
     screen.ApplySettingChangeForTest("ui.toast_enabled", JsonValue::MakeBool(false));
@@ -2812,6 +2812,43 @@ TEST_CASE("ui: every toast event sits on exactly one Notifications row, and the 
     CHECK(ombra::ToastPopupOn(c, L"buffer_on"));
     c.ui_toast_enabled = false;  // the master switch silences every row
     CHECK_FALSE(ombra::ToastPopupOn(c, L"buffer_on"));
+}
+
+TEST_CASE("ui: a toast's sound follows its row's Sound switch, apart from its popup") {
+    using ombra::ToastShow;
+    using ombra::ToastSound;
+    for (const auto& r : ombra::kToastEventRows) {
+        CAPTURE(ombra::NarrowUtf8(std::wstring(r.event)));
+        // Every problem sounds like one; only the pending save has none (its result makes it).
+        CHECK((r.row == ombra::ToastRow::kProblems) == (r.sound == ToastSound::kProblem));
+        CHECK((r.sound == ToastSound::kNone) == (r.event == L"save"));
+    }
+    CHECK(ombra::ToastSoundFor(L"save_nothing_new") == ToastSound::kNeutral);
+    CHECK(ombra::ToastSoundFor(L"not_an_event") == ToastSound::kProblem);
+
+    ombra::Config c;  // defaults: sound on for Clip saved, Recording and Problems
+    CHECK(ombra::ToastSoundOn(c, L"save_ok"));
+    CHECK(ombra::ToastSoundOn(c, L"record_started"));
+    CHECK(ombra::ToastSoundOn(c, L"cpu_encoder"));
+    CHECK_FALSE(ombra::ToastSoundOn(c, L"shot_saved"));
+    CHECK_FALSE(ombra::ToastSoundOn(c, L"buffer_on"));
+    CHECK_FALSE(ombra::ToastSoundOn(c, L"save"));  // pending: silent until its result
+    CHECK(ombra::ToastShowFor(c, L"buffer_on") == ToastShow::kPopup);
+
+    c.ui_toast_on_save = false;  // popup off, sound on: the sound alone
+    CHECK(ombra::ToastShowFor(c, L"save_ok") == ToastShow::kSoundOnly);
+    CHECK(ombra::ToastShowFor(c, ombra::ToastRow::kClipSaved) == ToastShow::kSoundOnly);
+    c.ui_toast_sound_on_save = false;
+    CHECK(ombra::ToastShowFor(c, L"save_ok") == ToastShow::kNothing);
+    c.ui_toast_on_screenshot = false;
+    c.ui_toast_sound_on_screenshot = true;
+    CHECK(ombra::ToastShowFor(c, L"shot_saved") == ToastShow::kSoundOnly);
+    CHECK(ombra::ToastShowFor(c, L"shot_failed") == ToastShow::kPopup);  // a problem is on its own row
+
+    c.ui_toast_enabled = false;  // the master switch silences sounds too, an app's included
+    CHECK_FALSE(ombra::ToastSoundOn(c, L"record_started"));
+    CHECK_FALSE(ombra::ToastSoundOn(c, L"cpu_encoder"));
+    CHECK(ombra::ToastShowFor(c, L"shot_saved") == ToastShow::kNothing);
 }
 
 // No scroll: each tab fits the narrowest Settings row with every dependent shown and an

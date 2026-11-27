@@ -73,7 +73,7 @@ struct SettingMeta {
       "Show a small on-screen popup for saves, recordings, screenshots, the buffer and problems, " \
       "even while the overlay is closed. Off: no popups and no sounds.", "") \
     /* One Popup and one Sound per event row (toast_events.h ToastRowFor). An app's clips and */ \
-    /* recordings always pop up; its save_now follows Clip saved. Sounds are stored, not played yet. */ \
+    /* recordings always pop up (their sound follows the row); its save_now follows Clip saved. */ \
     X(ui_toast_on_save, "ui.toast_on_save", true, Tier::Common, "Notifications", \
       "", "", ApplyTier::Free, true, \
       "Clip saved popup", "A popup when a clip or a trim is saved, or there was nothing new to save.", "") \
@@ -91,19 +91,19 @@ struct SettingMeta {
       "Problems popup", "A popup when something fails or needs a look: a failed save, a full disk, " \
       "recording on the CPU.", "") \
     X(ui_toast_sound_on_save, "ui.toast_sound_on_save", true, Tier::Common, "Notifications", \
-      "", "", ApplyTier::Free, false, \
-      "Clip saved sound", "A sound when a clip or a trim is saved.", "") \
+      "", "", ApplyTier::Free, true, \
+      "Clip saved sound", "A sound when a clip or a trim is saved, or there was nothing new to save.", "") \
     X(ui_toast_sound_on_record, "ui.toast_sound_on_record", true, Tier::Common, "Notifications", \
-      "", "", ApplyTier::Free, false, \
-      "Recording sound", "A sound when a recording starts or is saved.", "") \
+      "", "", ApplyTier::Free, true, \
+      "Recording sound", "A sound when a recording starts, is saved, or is recovered after a crash.", "") \
     X(ui_toast_sound_on_screenshot, "ui.toast_sound_on_screenshot", false, Tier::Common, "Notifications", \
-      "", "", ApplyTier::Free, false, \
+      "", "", ApplyTier::Free, true, \
       "Screenshot sound", "A sound when a screenshot is saved.", "") \
     X(ui_toast_sound_on_buffer_toggle, "ui.toast_sound_on_buffer_toggle", false, Tier::Common, "Notifications", \
-      "", "", ApplyTier::Free, false, \
+      "", "", ApplyTier::Free, true, \
       "Buffer on/off sound", "A sound when the instant-replay buffer is turned on or off.", "") \
     X(ui_toast_sound_on_problem, "ui.toast_sound_on_problem", true, Tier::Common, "Notifications", \
-      "", "", ApplyTier::Free, false, \
+      "", "", ApplyTier::Free, true, \
       "Problems sound", "A sound when something fails or needs a look.", "") \
     X(ui_toast_details, "ui.toast_details", true, Tier::Common, "Notifications", \
       "", "", ApplyTier::Free, true, \

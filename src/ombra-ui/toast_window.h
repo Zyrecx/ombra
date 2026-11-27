@@ -30,8 +30,10 @@ std::vector<std::wstring> ToastEventNames();
 // gone. `event` is one of ToastEventNames(); an unrecognized event logs and returns 1 without creating any window. "save" is spawned at the
 // hotkey press with `save_waits` = inherited {ok, nothing_new, failed, engine process, elsewhere}
 // handles: it shows "Saving clip…" until one is signalled, then the matching result. `save_info`
-// maps the clip count and length (save_toast.h) for "Saved last 30 s".
-int RunToast(const std::wstring& event, std::vector<HANDLE> save_waits = {}, HANDLE save_info = nullptr);
+// maps the clip count and length (save_toast.h) for "Saved last 30 s". The toast plays its event's
+// sound when its row's Sound is on (toast_sounds.h); `sound_only` plays only that, no window.
+int RunToast(const std::wstring& event, std::vector<HANDLE> save_waits = {}, HANDLE save_info = nullptr,
+             bool sound_only = false);
 
 // Headless verification: renders one frame of the toast card (fully opaque, mid-hold) to an
 // offscreen D3D11 texture and saves it as a PNG, exactly like overlay_window.h's RunOverlayTest —

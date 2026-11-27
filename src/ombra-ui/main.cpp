@@ -1141,7 +1141,9 @@ int RunUi() {
         } else if (argc == 5 && std::wstring(argv[3]) == L"--info") {
             info = handle(4);
         }
-        const int rc = ombra_ui::RunToast(event, std::move(waits), info);
+        // --toast <event> --sound-only: the popup's row is off, its sound's on (engine.cpp SpawnToast).
+        const bool sound_only = argc == 4 && std::wstring(argv[3]) == L"--sound-only";
+        const int rc = ombra_ui::RunToast(event, std::move(waits), info, sound_only);
         LocalFree(argv);
         return rc;
     }
