@@ -270,6 +270,52 @@ TEST_CASE("save: the toast carries the asking app's name, bounded") {
     CHECK(ToastApp(info) == std::wstring(kToastAppUnits, L'a'));
 }
 
+TEST_CASE("save: an app's pending clip counts down to its end, then gives up past it") {
+    constexpr int64_t f = 1000;
+    CHECK(PendingSaveTitle(0, 5000, f) == L"Saving clip…");  // a hotkey save: no footage to come
+    CHECK(PendingSaveTitle(30000, 5000, f) == L"Recording clip, 25 s left");
+    CHECK(PendingSaveTitle(30000, 5001, f) == L"Recording clip, 25 s left");  // rounded up
+    CHECK(PendingSaveTitle(30000, 29999, f) == L"Recording clip, 1 s left");
+    CHECK(PendingSaveTitle(30000, 30000, f) == L"Saving clip…");
+    CHECK(PendingTitleChangeQpc(30000, 5001, f) == 6000);  // "24 s left" from here
+    CHECK(PendingTitleChangeQpc(30000, 29999, f) == 30000);
+    CHECK(PendingTitleChangeQpc(30000, 30000, f) == 0);
+    CHECK(PendingTitleChangeQpc(0, 5000, f) == 0);
+    // An extended clip gives up 120 s past its end, not past the toast's start.
+    CHECK(PendingGiveUpQpc(1000, 0, f) == 121000);
+    CHECK(PendingGiveUpQpc(1000, 200000, f) == 320000);
+}
+
+TEST_CASE("save: a clip's toast names every app that asked, bounded") {
+    CHECK(ToastAppNames({}).empty());
+    CHECK(ToastAppNames({L"Tool"}) == L"Tool");
+    CHECK(ToastAppNames({L"Tool", L"Other"}) == L"Tool, Other");
+    const std::wstring mid_name(40, L'n');
+    CHECK(ToastAppNames({mid_name, L"Other", L"Third"}) == mid_name + L", Other, Third");  // 54 units fit
+    const std::wstring long_name(51, L'n');  // 65 units together
+    CHECK(ToastAppNames({long_name, L"Other", L"Third"}) == long_name + L" and 2 more");
+    // Even the first doesn't fit beside "and N more": cut, never through a surrogate pair.
+    std::wstring astral;
+    for (int i = 0; i < 32; ++i) astral += L"\U0001F3AE";
+    const std::wstring named = ToastAppNames({astral, L"Other"});
+    CHECK(named.size() <= kToastAppUnits);
+    CHECK(named.ends_with(L" and 1 more"));
+    const wchar_t last = named[named.size() - std::wstring_view(L" and 1 more").size() - 1];
+    CHECK_FALSE((last >= 0xD800 && last <= 0xDBFF));
+
+    // The end and the names travel together.
+    SaveToastInfo info;
+    SetToastLive(info, 12345, L"Tool, Other");
+    const std::optional<ToastLive> live = ReadToastLive(info);
+    REQUIRE(live);
+    CHECK(live->end_qpc == 12345);
+    CHECK(live->app == L"Tool, Other");
+    CHECK(info.version == 2);
+    info.version = 3;  // a writer stuck mid-write: no torn copy
+    CHECK_FALSE(ReadToastLive(info));
+    CHECK(ToastApp(info) == L"Tool, Other");
+}
+
 TEST_CASE("save: replay skips busy monitors and reports incomplete instead of success") {
     SaveRig first(L"busy-first"), second(L"busy-second");
     first.ctx.save_in_flight = true;

@@ -376,18 +376,21 @@ std::shared_ptr<ClipGroup> StartClip(const std::vector<SaveContext*>& contexts, 
 std::optional<AppClips::Started> AppClips::Request(const std::string& app,
                                                    const std::vector<SaveContext*>& contexts,
                                                    const ClipRequest& request,
-                                                   const StartSaveFeedback& feedback) {
+                                                   const StartClipFeedback& feedback) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (closed_) return std::nullopt;
     // A finished clip's group holds no footage (Run unpinned it), only its result: drop it here.
     std::erase_if(open_, [](const auto& entry) {
         return entry.second.group->Done().wait_for(std::chrono::seconds(0)) == std::future_status::ready;
     });
+    const int64_t until = request.event_qpc +
+        SecondsToQpc(std::clamp(request.after_seconds, 0.0, kClipMaxAfterSeconds), QpcFrequency());
     const auto it = std::find_if(open_.begin(), open_.end(), [&](const auto& e) { return e.first == app; });
     if (it != open_.end()) {
-        const int64_t until = request.event_qpc +
-            SecondsToQpc(std::clamp(request.after_seconds, 0.0, kClipMaxAfterSeconds), QpcFrequency());
-        if (it->second.group->Extend(until)) return Started{it->second.id, true, it->second.group->Done()};
+        if (it->second.group->Extend(until)) {
+            if (it->second.extended) it->second.extended(until, request.app);
+            return Started{it->second.id, true, it->second.group->Done()};
+        }
         open_.erase(it);  // past the cap or already ended: this request gets a clip of its own
     }
     const uint64_t id = next_id_++;
@@ -395,10 +398,11 @@ std::optional<AppClips::Started> AppClips::Request(const std::string& app,
     numbered.id = id;
     // Its markers are this app's (every command-line script is one app): not another app's.
     numbered.marker_app = app;
-    auto group = StartClip(contexts, numbered, feedback ? feedback() : SaveFeedback{});
+    ClipFeedback made = feedback ? feedback(until, request.app) : ClipFeedback{};
+    auto group = StartClip(contexts, numbered, std::move(made.done));
     Started started{id, false, group->Done()};
     if (started.done.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
-        open_.emplace_back(app, Open{id, std::move(group)});
+        open_.emplace_back(app, Open{id, std::move(group), std::move(made.extended)});
     return started;
 }
 

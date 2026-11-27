@@ -88,6 +88,15 @@ struct ReplaySaveResults {
 using SaveFeedback = std::function<void(const ReplaySaveResults&)>;
 using StartSaveFeedback = std::function<SaveFeedback()>;
 
+// What an app's clip (clip.h AppClips) tells its toast: `done` with the result, as a save's;
+// `extended` each time a request joins it, with the clip's new end and that request's app.
+struct ClipFeedback {
+    SaveFeedback                                                    done;
+    std::function<void(int64_t until_qpc, const std::string& app)> extended;
+};
+// Made once per new clip, with the end its footage runs to (event + after) and its request's app.
+using StartClipFeedback = std::function<ClipFeedback(int64_t until_qpc, const std::string& app)>;
+
 // Claims all available rings before returning, then saves them concurrently at one timestamp.
 // The caller may wait for the result (pipe) or discard the future (hotkey). Feedback resolves
 // once for the whole action. Any failure/busy monitor prevents an unqualified success toast.

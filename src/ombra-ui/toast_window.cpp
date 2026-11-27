@@ -63,8 +63,11 @@ constexpr float  kLeaveTravelDip = 18.0f;
 constexpr ULONGLONG kEnterMs = static_cast<ULONGLONG>(kEnterSlideSec * 1000);
 constexpr ULONGLONG kHoldMs  = 2200;
 constexpr ULONGLONG kLeaveMs = static_cast<ULONGLONG>(kLeaveSec * 1000) + 20;  // + a frame of slack before Close
-// A save toast that never hears back (engine hung mid-save) gives up after this long.
-constexpr ULONGLONG kPendingMaxMs = 120000;
+int64_t QpcNow() {
+    LARGE_INTEGER t{};
+    QueryPerformanceCounter(&t);
+    return t.QuadPart;
+}
 
 constexpr float kTestMarginPx  = 28.0f;  // --toasttest backdrop around the card
 
@@ -232,19 +235,24 @@ public:
     // Space between the card and the window's edge-side border (kEdgeGapDip, physical px).
     void SetEdgeGap(float px) { edge_gap_ = px; }
 
-    // A "save" toast: shown at the hotkey press, pending until one of these handles is signalled
-    // (ok, nothing_new, failed events, then the engine process exiting), then it holds the result.
+    // A "save" toast: shown at the hotkey press, pending until one of the result handles is
+    // signalled (ok, nothing_new, failed events, the engine process exiting, elsewhere), then it
+    // holds the result. The sixth, an auto-reset event, says the clip's end or names moved.
     // `info` maps a SaveToastInfo the engine fills before it signals ok.
     void SetSaveWaits(std::vector<HANDLE> waits, HANDLE info_mapping) {
         waits_   = std::move(waits);
         info_    = info_mapping;
-        pending_ = waits_.size() == 5;
+        pending_ = waits_.size() == kSaveWaits;
         // The engine wrote the asking app's name before spawning this process: shown in every state.
         if (info_) {
             if (const void* view = MapViewOfFile(info_, FILE_MAP_READ, 0, 0, sizeof(ombra::SaveToastInfo))) {
-                app = ombra::ToastApp(*static_cast<const ombra::SaveToastInfo*>(view));
-                info_seconds = static_cast<const ombra::SaveToastInfo*>(view)->seconds;
-                info_count   = static_cast<const ombra::SaveToastInfo*>(view)->clips;
+                const auto* saved = static_cast<const ombra::SaveToastInfo*>(view);
+                if (const auto live = ombra::ReadToastLive(*saved)) {
+                    app      = live->app;
+                    end_qpc_ = live->end_qpc;
+                }
+                info_seconds = saved->seconds;
+                info_count   = saved->clips;
                 UnmapViewOfFile(view);
             }
         }
@@ -259,14 +267,20 @@ private:
     LRESULT HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
     void DrawCard(float width, float height);
     bool PollSaveResult();  // true once a pending save's result has replaced the card's content
+    // A pending card's countdown, and its end and names re-read when the engine `changed` them;
+    // true if the card needs drawing again.
+    bool RefreshPending(bool changed);
     bool Animate(float x_from, float x_to, float op_from, float op_to, bool ease_out);
 
+    static constexpr size_t kSaveWaits = 6;  // five results, then the change event
+    static constexpr DWORD  kSaveResults = 5;
     HWND hwnd_ = nullptr;
     std::vector<HANDLE> waits_;
     HANDLE info_ = nullptr;
     bool compact_ = false;
     bool pending_ = false;
     ULONGLONG start_tick_ = 0;
+    int64_t start_qpc_ = 0, end_qpc_ = 0, qpc_freq_ = 1;
     bool slide_from_right_ = true;
     float edge_gap_ = 0.0f;
     std::wstring adapter_name_;
@@ -636,15 +650,35 @@ void ToastWindow::Close() {
     }
 }
 
+bool ToastWindow::RefreshPending(bool changed) {
+    if (!pending_) return false;
+    std::wstring name = app;
+    if (changed && info_) {  // the engine moved the end or the names: read them again
+        if (const void* view = MapViewOfFile(info_, FILE_MAP_READ, 0, 0, sizeof(ombra::SaveToastInfo))) {
+            if (const auto live = ombra::ReadToastLive(*static_cast<const ombra::SaveToastInfo*>(view))) {
+                end_qpc_ = live->end_qpc;
+                name     = live->app;
+            }
+            UnmapViewOfFile(view);
+        }
+    }
+    const std::wstring title = ombra::PendingSaveTitle(end_qpc_, QpcNow(), qpc_freq_);
+    if (title == info.title && name == app) return false;
+    info.title = title;
+    app        = name;
+    return true;
+}
+
 bool ToastWindow::PollSaveResult() {
     if (!pending_) return false;
-    const DWORD r = WaitForMultipleObjects(static_cast<DWORD>(waits_.size()), waits_.data(), FALSE, 0);
+    // The results only: the change event after them is RefreshPending's.
+    const DWORD r = WaitForMultipleObjects(kSaveResults, waits_.data(), FALSE, 0);
     const wchar_t* event = nullptr;
     if (r == WAIT_OBJECT_0)          event = L"save_ok";
     else if (r == WAIT_OBJECT_0 + 1) event = L"save_nothing_new";
     else if (r == WAIT_OBJECT_0 + 2 || r == WAIT_OBJECT_0 + 3 || r == WAIT_FAILED) event = L"save_failed";
     else if (r == WAIT_OBJECT_0 + 4) event = L"save_elsewhere";
-    else if (GetTickCount64() - start_tick_ >= kPendingMaxMs) event = L"save_failed";
+    else if (QpcNow() >= ombra::PendingGiveUpQpc(start_qpc_, end_qpc_, qpc_freq_)) event = L"save_failed";
     if (!event) return false;
     LookupToastInfo(event, &info);
     if (r == WAIT_OBJECT_0 && info_) {
@@ -659,6 +693,11 @@ bool ToastWindow::PollSaveResult() {
 
 void ToastWindow::RunLoop() {
     start_tick_ = GetTickCount64();
+    LARGE_INTEGER freq{};
+    QueryPerformanceFrequency(&freq);
+    qpc_freq_  = freq.QuadPart > 0 ? freq.QuadPart : 1;
+    start_qpc_ = QpcNow();
+    RefreshPending(/*changed=*/false);  // the countdown from the first frame (SetSaveWaits read the end)
     PollSaveResult();  // a save that finished before this process got here shows its result directly
 
     // Content first, then the enter animation and the visual tree in one Commit: the first composed
@@ -693,14 +732,29 @@ void ToastWindow::RunLoop() {
             close_at = t + kLeaveMs;
             continue;
         }
-        const ULONGLONG deadline = close_at ? close_at : pending_ ? start_tick_ + kPendingMaxMs : leave_at;
-        const DWORD timeout = static_cast<DWORD>(deadline > t ? deadline - t : 0);
+        DWORD timeout = 0;
+        if (pending_ && !close_at) {
+            // The countdown's next second, else the give-up: in QPC, as the engine's end is.
+            const int64_t qpc  = QpcNow();
+            int64_t       next = ombra::PendingGiveUpQpc(start_qpc_, end_qpc_, qpc_freq_);
+            if (const int64_t change = ombra::PendingTitleChangeQpc(end_qpc_, qpc, qpc_freq_))
+                next = (std::min)(next, change);
+            const int64_t ms = next > qpc ? (next - qpc) * 1000 / qpc_freq_ + 1 : 0;
+            timeout = static_cast<DWORD>((std::min<int64_t>)(ms, 0x7FFFFFFF));
+        } else {
+            const ULONGLONG deadline = close_at ? close_at : leave_at;
+            timeout = static_cast<DWORD>(deadline > t ? deadline - t : 0);
+        }
         const DWORD n = pending_ ? static_cast<DWORD>(waits_.size()) : 0;
-        MsgWaitForMultipleObjects(n, n ? waits_.data() : nullptr, FALSE, timeout, QS_ALLINPUT);
+        // The change event is auto-reset: this wait consumes it, so its return is the only notice.
+        const DWORD woke = MsgWaitForMultipleObjects(n, n ? waits_.data() : nullptr, FALSE, timeout, QS_ALLINPUT);
+        const bool changed = pending_ && woke == WAIT_OBJECT_0 + kSaveResults;
 
         if (PollSaveResult()) {
             RenderCard();  // swap "Saving clip…" for the result in place; the card is already in view
             leave_at = std::max(GetTickCount64(), start_tick_ + kEnterMs) + kHoldMs;
+        } else if (RefreshPending(changed)) {
+            RenderCard();  // a second off the countdown, or another app joined the clip
         }
         MSG msg;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -821,12 +875,14 @@ int RunToast(const std::wstring& event, std::vector<HANDLE> save_waits, HANDLE s
 }
 
 int RunToastTest(const std::wstring& out_png_path, const std::wstring& event, bool compact, double seconds, bool alpha,
-                 float scale, const std::wstring& app, uint32_t clips) {
+                 float scale, const std::wstring& app, uint32_t clips, const std::wstring& title) {
     ToastInfo info{};
     if (!LookupToastInfo(event, &info)) {
         ombra::Log::Error("RunToastTest: unrecognized event \"%ls\"", event.c_str());
         return 1;
     }
+    // A pending save's seconds are the clip's footage still to come: its countdown.
+    if (event == L"save" && seconds > 0) info.title = ombra::PendingSaveTitle(static_cast<int64_t>(seconds * 1000), 0, 1000);
     if (event == L"save_ok" && (seconds > 0 || clips > 1)) {
         ombra::SaveToastInfo saved;
         saved.clips = clips;
@@ -835,6 +891,7 @@ int RunToastTest(const std::wstring& out_png_path, const std::wstring& event, bo
     }
     if (event == L"record_saved") info.title = ombra::RecordingSavedTitle(seconds);
     if (event == L"record_recovered") info.title = ombra::RecordingRecoveredTitle(seconds, clips);
+    if (!title.empty()) info.title = title;
     ToastWindow toast;
     toast.info = info;
     toast.app = app;

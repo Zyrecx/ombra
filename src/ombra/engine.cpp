@@ -350,10 +350,28 @@ void SpawnToast(const wchar_t* event) { SpawnToastProcess(event, {}); }
 // save ends. The engine's own process handle goes along too, so a crash mid-save still resolves it.
 struct SaveToastSignal {
     HANDLE ok = nullptr, nothing_new = nullptr, failed = nullptr, engine = nullptr, elsewhere = nullptr;
+    HANDLE changed = nullptr;  // auto-reset: the end or the names moved (Extend), not a result
     HANDLE info = nullptr;  // a SaveToastInfo (save_toast.h), written before the result's event
+    std::mutex                mutex;  // end_qpc, apps: an app's clip is extended from pipe threads
+    int64_t                   end_qpc = 0;
+    std::vector<std::wstring> apps;   // every app that asked for this clip, first first
     ~SaveToastSignal() {
-        for (HANDLE h : {ok, nothing_new, failed, engine, elsewhere, info})
+        for (HANDLE h : {ok, nothing_new, failed, engine, elsewhere, changed, info})
             if (h) CloseHandle(h);
+    }
+    // The clip's footage now runs to `until_qpc` (never earlier than before), asked for by `app`
+    // too: the toast counts down to it and names every app that asked.
+    void Extend(int64_t until_qpc, const std::wstring& app) {
+        std::lock_guard<std::mutex> lock(mutex);
+        end_qpc = (std::max)(end_qpc, until_qpc);
+        if (!app.empty() && std::find(apps.begin(), apps.end(), app) == apps.end()) apps.push_back(app);
+        if (void* view = MapViewOfFile(info, FILE_MAP_WRITE, 0, 0, sizeof(SaveToastInfo))) {
+            SetToastLive(*static_cast<SaveToastInfo*>(view), end_qpc, ToastAppNames(apps));
+            UnmapViewOfFile(view);
+        } else {
+            Log::Warn("SaveToastSignal: the clip's end couldn't be written (err=%lu)", GetLastError());
+        }
+        SetEvent(changed);
     }
     void Resolve(const ReplaySaveResults& r) {
         SaveToastInfo summary;
@@ -378,8 +396,8 @@ struct SaveToastSignal {
 };
 
 // `app` names the app whose action this is (empty for the user's own): the toast shows it from the
-// start, pending included.
-std::shared_ptr<SaveToastSignal> SpawnSaveToast(const std::wstring& app) {
+// start, pending included. `end_qpc`: an app's clip still taking footage runs to it (0: none).
+std::shared_ptr<SaveToastSignal> SpawnSaveToast(const std::wstring& app, int64_t end_qpc = 0) {
     SECURITY_ATTRIBUTES inheritable{sizeof(inheritable), nullptr, TRUE};
     auto sig = std::make_shared<SaveToastSignal>();
     sig->ok          = CreateEventW(&inheritable, TRUE, FALSE, nullptr);
@@ -387,25 +405,23 @@ std::shared_ptr<SaveToastSignal> SpawnSaveToast(const std::wstring& app) {
     sig->failed      = CreateEventW(&inheritable, TRUE, FALSE, nullptr);
     sig->engine      = OpenProcess(SYNCHRONIZE, TRUE, GetCurrentProcessId());
     sig->elsewhere   = CreateEventW(&inheritable, TRUE, FALSE, nullptr);
+    sig->changed     = CreateEventW(&inheritable, FALSE, FALSE, nullptr);
     sig->info        = CreateFileMappingW(INVALID_HANDLE_VALUE, &inheritable, PAGE_READWRITE, 0,
                                           sizeof(SaveToastInfo), nullptr);
-    if (!sig->ok || !sig->nothing_new || !sig->failed || !sig->engine || !sig->elsewhere || !sig->info) {
+    if (!sig->ok || !sig->nothing_new || !sig->failed || !sig->engine || !sig->elsewhere || !sig->changed ||
+        !sig->info) {
         Log::Warn("SpawnSaveToast: handle setup failed (err=%lu)", GetLastError());
         return nullptr;
     }
-    if (!app.empty()) {
-        if (void* view = MapViewOfFile(sig->info, FILE_MAP_WRITE, 0, 0, sizeof(SaveToastInfo))) {
-            SetToastApp(*static_cast<SaveToastInfo*>(view), app);
-            UnmapViewOfFile(view);
-        } else {
-            Log::Warn("SpawnSaveToast: the app's name couldn't be written (err=%lu)", GetLastError());
-        }
-    }
-    // The toast's argv: the five wait handles (in WaitForMultipleObjects order), then the info.
+    if (!app.empty() || end_qpc) sig->Extend(end_qpc, app);  // before the spawn: every state shows it
+    // The toast's argv: the five result handles (in WaitForMultipleObjects order), the change
+    // event, then the info.
+    const std::vector<HANDLE> handles = {sig->ok,        sig->nothing_new, sig->failed, sig->engine,
+                                         sig->elsewhere, sig->changed,     sig->info};
     std::wstring args = L"save --wait";
-    for (HANDLE h : {sig->ok, sig->nothing_new, sig->failed, sig->engine, sig->elsewhere, sig->info})
+    for (HANDLE h : handles)
         args += L" " + std::to_wstring(static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(h)));
-    SpawnToastProcess(args, {sig->ok, sig->nothing_new, sig->failed, sig->engine, sig->elsewhere, sig->info});
+    SpawnToastProcess(args, handles);
     return sig;
 }
 
@@ -731,6 +747,17 @@ int RunEngine(int argc, wchar_t** argv) {
     pipe_api.recordings   = &recordings;
     pipe_api.replay_toast = [](const std::string& app, bool on) {
         SpawnAppToast(on ? L"buffer_on" : L"buffer_off", WideFromUtf8(app));
+    };
+    // A tool's clip is never silent: its toast follows no toast setting, counts down while the clip
+    // takes footage and names every app whose request joined it.
+    pipe_api.clip_feedback = [](int64_t until_qpc, const std::string& app) {
+        auto toast = SpawnSaveToast(WideFromUtf8(app), until_qpc);
+        ClipFeedback feedback;
+        feedback.done     = [toast](const ReplaySaveResults& r) { if (toast) toast->Resolve(r); };
+        feedback.extended = [toast](int64_t until, const std::string& by) {
+            if (toast) toast->Extend(until, WideFromUtf8(by));
+        };
+        return feedback;
     };
     // A tool's recording is never silent, as its clip isn't: these follow no toast setting.
     pipe_api.record_feedback = [](const std::string& app) {

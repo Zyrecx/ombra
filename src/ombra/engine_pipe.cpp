@@ -925,7 +925,7 @@ JsonValue PipeRequest::OnApiClip() {
     const std::vector<SaveContext*> contexts = Contexts();
     // A tool's clip is never silent: its toast doesn't follow the user's save-toast setting. Every
     // script using the command line is one app ("--as" only names it), so they share one open clip.
-    const auto started = api->clips->Request(kCommandLineApp, contexts, request, save_feedback);
+    const auto started = api->clips->Request(kCommandLineApp, contexts, request, api->clip_feedback);
     if (!started) return ApiError("failed", "Ombra is exiting");
 
     JsonValue resp = JsonValue::MakeObject();

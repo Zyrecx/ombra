@@ -39,6 +39,9 @@ struct PipeCaller;
 // What the public API (protocol.h) acts through, one per engine: the engine's, or a test's.
 struct PipeApi {
     AppClips*   clips      = nullptr;  // clip.h; nullptr refuses `clip`
+    // An app's clip's toast, naming the app (never silent: it follows no toast setting). Empty
+    // shows nothing.
+    StartClipFeedback clip_feedback;
     Recordings* recordings = nullptr;  // recording.h; nullptr refuses `record_start`
     // An app turned Instant Replay on (true) or off: its toast, naming the app. Empty shows nothing.
     std::function<void(const std::string& app, bool on)> replay_toast;

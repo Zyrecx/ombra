@@ -163,9 +163,10 @@ public:
         bool                                  extended = false;  // joined the app's open clip
         std::shared_future<ReplaySaveResults> done;
     };
-    // nullopt once Close() ran. `feedback` is made only for a new clip, not for an extension.
+    // nullopt once Close() ran. `feedback` is made only for a new clip; an extension calls its
+    // `extended`.
     std::optional<Started> Request(const std::string& app, const std::vector<SaveContext*>& contexts,
-                                   const ClipRequest& request, const StartSaveFeedback& feedback = {});
+                                   const ClipRequest& request, const StartClipFeedback& feedback = {});
     // Engine exit, before StopClipsAndWait: refuses every request from now on.
     void Close();
 
@@ -173,6 +174,7 @@ private:
     struct Open {
         uint64_t                   id = 0;
         std::shared_ptr<ClipGroup> group;
+        std::function<void(int64_t, const std::string&)> extended;  // its ClipFeedback's
     };
     std::mutex                       mutex_;  // held across StartClip: one app can't open two at once
     std::vector<std::pair<std::string, Open>> open_;  // by app; a finished clip is dropped lazily

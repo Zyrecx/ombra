@@ -1128,16 +1128,16 @@ int RunUi() {
     }
     if (argv && argc > 1 && std::wstring(argv[1]) == L"--toast") {
         const std::wstring event = (argc > 2) ? argv[2] : L"";
-        // --toast save --wait <ok> <nothing_new> <failed> <engine> <elsewhere> <info>: handles the
-        // engine made inheritable for this process (SpawnSaveToast, engine.cpp).
+        // --toast save --wait <ok> <nothing_new> <failed> <engine> <elsewhere> <changed> <info>:
+        // handles the engine made inheritable for this process (SpawnSaveToast, engine.cpp).
         std::vector<HANDLE> waits;
         HANDLE info = nullptr;
         const auto handle = [&](int i) { return reinterpret_cast<HANDLE>(static_cast<uintptr_t>(_wcstoui64(argv[i], nullptr, 10))); };
         // --toast <event> --info <info>: an API app's one-shot toast, the mapping naming the app
         // (SpawnAppToast, engine.cpp).
-        if (argc == 10 && std::wstring(argv[3]) == L"--wait") {
-            for (int i = 4; i < 9; ++i) waits.push_back(handle(i));
-            info = handle(9);
+        if (argc == 11 && std::wstring(argv[3]) == L"--wait") {
+            for (int i = 4; i < 10; ++i) waits.push_back(handle(i));
+            info = handle(10);
         } else if (argc == 5 && std::wstring(argv[3]) == L"--info") {
             info = handle(4);
         }
@@ -1147,7 +1147,7 @@ int RunUi() {
     }
     if (argv && argc > 1 && std::wstring(argv[1]) == L"--toasttest") {
         const std::wstring out_png = (argc > 2) ? argv[2] : L"out\\ombra_toast_test.png";
-        // --toasttest [PNG] [EVENT] [card|compact] [SECONDS] [alpha|opaque] [SCALE] [APP] [CLIPS]
+        // --toasttest [PNG] [EVENT] [card|compact] [SECONDS] [alpha|opaque] [SCALE] [APP] [CLIPS] [TITLE]
         const std::wstring event = (argc > 3) ? argv[3] : L"save_ok";
         const bool compact = argc > 4 && std::wstring(argv[4]) == L"compact";
         const double seconds = argc > 5 ? _wtof(argv[5]) : 0.0;
@@ -1155,7 +1155,8 @@ int RunUi() {
         const float scale = argc > 7 ? std::clamp(static_cast<float>(_wtof(argv[7])), 0.5f, 8.0f) : 1.0f;
         const std::wstring app = argc > 8 ? argv[8] : L"";
         const uint32_t clips = argc > 9 ? static_cast<uint32_t>((std::max)(1, _wtoi(argv[9]))) : 1;
-        const int rc = ombra_ui::RunToastTest(out_png, event, compact, seconds, alpha, scale, app, clips);
+        const std::wstring title = argc > 10 ? argv[10] : L"";
+        const int rc = ombra_ui::RunToastTest(out_png, event, compact, seconds, alpha, scale, app, clips, title);
         LocalFree(argv);
         return rc;
     }

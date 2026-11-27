@@ -462,16 +462,29 @@ TEST_CASE("clip: an app's request during its own open clip extends it; another a
     req.after_seconds  = 30.0;
     AppClips clips;
     int feedbacks = 0;
-    const StartSaveFeedback feedback = [&]() -> SaveFeedback { ++feedbacks; return {}; };
+    std::vector<std::pair<int64_t, std::string>> started, extensions;
+    const StartClipFeedback feedback = [&](int64_t until, const std::string& app) {
+        ++feedbacks;
+        started.emplace_back(until, app);
+        ClipFeedback made;
+        made.extended = [&](int64_t new_until, const std::string& by) { extensions.emplace_back(new_until, by); };
+        return made;
+    };
+    const auto after = static_cast<int64_t>(std::llround(req.after_seconds * static_cast<double>(QpcFrequency())));
     req.app = "tool";  // the name an event and toast show; the first argument is the clip's key
     const auto first = clips.Request("tool", {&rig.ctx}, req, feedback);
     REQUIRE(first);
     CHECK_FALSE(first->extended);
+    REQUIRE(started.size() == 1);
+    CHECK(started[0] == std::make_pair(req.event_qpc + after, std::string("tool")));
     req.event_qpc += QpcFrequency();
+    req.app = "tool as";  // another --as name joining the same clip: its toast names it too
     const auto again = clips.Request("tool", {&rig.ctx}, req, feedback);
     REQUIRE(again);
     CHECK(again->extended);
     CHECK(again->id == first->id);
+    REQUIRE(extensions.size() == 1);
+    CHECK(extensions[0] == std::make_pair(req.event_qpc + after, std::string("tool as")));
     req.app = "other";
     const auto other = clips.Request("other", {&rig.ctx}, req, feedback);
     REQUIRE(other);
