@@ -18,8 +18,12 @@ std::wstring g_root;
 }  // namespace
 
 void InitTestEnvironment() {
-    wchar_t temp[MAX_PATH];
-    GetTempPathW(MAX_PATH, temp);
+    // Long form: TEMP may be an 8.3 path (CI runners: RUNNER~1), while Windows hands back long paths
+    // (GetFinalPathNameByHandle), so tests comparing the two would fail on the name form alone.
+    wchar_t short_temp[MAX_PATH], temp[MAX_PATH];
+    GetTempPathW(MAX_PATH, short_temp);
+    const DWORD n = GetLongPathNameW(short_temp, temp, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) wcscpy_s(temp, short_temp);
     SYSTEMTIME st{};
     GetLocalTime(&st);
     wchar_t name[64];
