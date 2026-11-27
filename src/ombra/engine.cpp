@@ -884,6 +884,9 @@ int RunEngine(int argc, wchar_t** argv) {
                                                    AudioRingMaxAgeQpc(buffer_seconds)));
     audio_hub.SetSources(TrackSourcesFrom(all_sources), cfg.audio_full_mix_track);
     audio_hub.Start();
+    Log::Info("audio: %zu sources, %zu enabled", all_sources.size(),
+              static_cast<size_t>(std::count_if(all_sources.begin(), all_sources.end(),
+                                                [](const AudioSourceSpec& s) { return s.enabled; })));
     std::printf("  audio          %zu sources -> %zu tracks, %.1f MB encoded ring per track\n",
                 all_sources.size(), audio_hub.TrackCount(),
                 static_cast<double>(ring_sizing.audio_capacity - static_cast<int64_t>(AudioTrackHub::StageBytes())) /
