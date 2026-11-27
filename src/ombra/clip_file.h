@@ -26,6 +26,8 @@ struct ClipInfo {
     // Foundation ignores edit lists, so a decoded frame's presentation time is its sample time plus
     // this.
     double              video_offset_s = 0.0;
+    // The "markers" tag's JSON (MarkersForFile, marker.h) as stored; empty: none.
+    std::string         markers_json;
 };
 
 // Parses the moov box only (a few small reads). False with `error` set for anything this reader
@@ -42,6 +44,7 @@ struct TrimResult {
 // Writes [start_s, end_s) of `src` to `dst` without re-encoding: video from the last keyframe at
 // or before start_s up to the first frame at or after end_s, every audio track cut to match (its
 // first frame's lead-in trimmed by an edit list, as a save does). Holds the kept samples in memory.
+// The source's markers come along, shifted to the output's start (CutFileMarkers).
 // `keep_audio`, if given, says per audio track (file order, as ClipInfo::audio_track_names) whether
 // it goes into the output; tracks past its end are kept.
 // The audio TrimClip would write for [start_s, end_s), for a writer that makes its own video

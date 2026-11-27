@@ -17,6 +17,8 @@
 #include "ombra/clip_ops.h"
 #include "ombra/clip_reencode.h"
 #include "ombra/encode_target.h"
+#include "ombra/json.h"
+#include "ombra/marker.h"
 #include "ombra/mux.h"
 #include "ombra/util.h"
 
@@ -39,7 +41,8 @@ constexpr double   kToneAt = 2.5;  // video time the Desktop track's tone starts
 // 4 s of fixture video (60 fps, keyframes at 0/1/2/3 s) with "Desktop" (a 1 kHz tone from 2.5 s)
 // and "Mic" (silence, ending `mic_until` s into the video if set, as a track whose source went idle
 // does). Video starts 0.3 s plus 7 samples into the audio timeline, off the AAC grid.
-std::wstring MakeSource(const std::wstring& name, VideoCodec codec, double mic_until = 0.0) {
+std::wstring MakeSource(const std::wstring& name, VideoCodec codec, double mic_until = 0.0,
+                        const MuxMarkers& markers = {}) {
     const int64_t freq = QpcFrequency();
     const int64_t origin = freq * 1000;
     auto frame_qpc = [&](uint64_t f) { return origin + static_cast<int64_t>(f) * freq / kRate; };
@@ -71,11 +74,11 @@ std::wstring MakeSource(const std::wstring& name, VideoCodec codec, double mic_u
     if (codec == VideoCodec::H264) {
         const H264Fixture& fx = StandardFixture();
         for (size_t i = 0; i < fx.aus.size(); ++i) aus.push_back({fx.aus[i].annexb, fx.aus[i].idr, i});
-        REQUIRE(MuxWriteMp4(path, fx.sps_pps, fx.width, fx.height, fx.fps, aus, audio, codec));
+        REQUIRE(MuxWriteMp4(path, fx.sps_pps, fx.width, fx.height, fx.fps, aus, audio, codec, {}, markers));
     } else {
         const Av1Fixture& fx = StandardAv1Fixture();
         for (size_t i = 0; i < fx.aus.size(); ++i) aus.push_back({fx.aus[i].obus, fx.aus[i].key, i});
-        REQUIRE(MuxWriteMp4(path, fx.seq_header, fx.width, fx.height, fx.fps, aus, audio, codec));
+        REQUIRE(MuxWriteMp4(path, fx.seq_header, fx.width, fx.height, fx.fps, aus, audio, codec, {}, markers));
     }
     return path;
 }
@@ -146,6 +149,94 @@ TEST_CASE("clip file: a trim starts on the keyframe before the request and keeps
             CheckTrimmed(dst, 3.0, kToneAt - 1.0);
         }
     }
+}
+
+// A 60 fps source whose markers sit on frames as MarkersForFile places them (`ms` rounded down):
+// 500 (frame 30), 2000 (120, a keyframe), 2183 (131), 2200 (132), 3000 (180, a kind this build
+// doesn't know), 3483 (209), 3500 (210).
+static const char* kSourceMarkers =
+    R"({"v":1,"markers":[{"ms":500,"kind":"kill","app":"Tool"},)"
+    R"({"ms":2000,"kind":"game_start","label":"VALORANT","app":"Ombra"},)"
+    R"({"ms":2183,"kind":"kill","app":"Tool","important":true,"x":7},)"
+    R"({"ms":2200,"kind":"death","label":"First blood","app":"Tool"},)"
+    R"({"ms":3000,"kind":"ace","app":"Tool"},{"ms":3483,"kind":"round_end","app":"Tool"},)"
+    R"({"ms":3500,"kind":"win","app":"Tool"}]})";
+
+static std::wstring MarkedSource(const std::wstring& name) {
+    return MakeSource(name, VideoCodec::H264, 0.0, CutFileMarkers(kSourceMarkers, 0.0, 4.0, 60));
+}
+
+// The `ms` of every item in a file's markers tag, in tag order.
+static std::vector<double> TagMs(const std::wstring& path) {
+    ClipInfo info;
+    REQUIRE(ReadClipInfo(path, info));
+    std::vector<double> out;
+    if (info.markers_json.empty()) return out;
+    const JsonValue root = ParseJson(info.markers_json);
+    for (const JsonValue& item : root.Find("markers")->arr) out.push_back(item.Find("ms")->num);
+    return out;
+}
+
+TEST_CASE("clip file: ReadClipInfo returns the markers tag as written") {
+    const std::wstring src = MarkedSource(L"marked_info.mp4");
+    ClipInfo info;
+    REQUIRE(ReadClipInfo(src, info));
+    CHECK(info.markers_json == CutFileMarkers(kSourceMarkers, 0.0, 4.0, 60).json);
+    CHECK(TagMs(src) == std::vector<double>{500, 2000, 2183, 2200, 3000, 3483, 3500});
+}
+
+TEST_CASE("clip file: a trim keeps the markers inside it, moved to its start") {
+    const std::wstring src = MarkedSource(L"marked_src.mp4");
+    SUBCASE("from the keyframe before the request to before the end") {
+        const std::wstring dst = TestOutputPath(L"clip_file\\marked_trim.mp4");
+        const TrimResult r = TrimClip(src, dst, 2.2, 3.5);  // snaps back to 2.0
+        REQUIRE_MESSAGE(r.ok, r.error);
+        const ProbeInfo info = Probe(dst);
+        REQUIRE_MESSAGE(info.ok, info.error);
+        REQUIRE(info.chapters.size() == 5);
+        // The game start on the first kept frame is the chapter at 0, not "Start".
+        CHECK(info.chapters[0].title == "Game start \xC2\xB7 VALORANT");
+        CHECK(info.chapters[0].start_s == doctest::Approx(0.0));
+        CHECK(info.chapters[1].title == "Kill \xC2\xB7 Tool");
+        CHECK(info.chapters[1].start_s == doctest::Approx(0.183));
+        CHECK(info.chapters[2].title == "First blood \xC2\xB7 Tool");
+        CHECK(info.chapters[2].start_s == doctest::Approx(0.2));
+        CHECK(info.chapters[3].title == "Marker \xC2\xB7 Tool");
+        CHECK(info.chapters[3].start_s == doctest::Approx(1.0));
+        CHECK(info.chapters[4].title == "Round end \xC2\xB7 Tool");
+        CHECK(info.chapters[4].start_s == doctest::Approx(1.483));
+        CHECK(TagMs(dst) == std::vector<double>{0, 183, 200, 1000, 1483});
+        // Fields this build doesn't know stay on the item.
+        REQUIRE(info.format_tags.count("markers") == 1);
+        CHECK(info.format_tags.at("markers").find(R"("important":true,"x":7)") != std::string::npos);
+        CHECK(info.format_tags.at("markers").find(R"("kind":"ace")") != std::string::npos);
+    }
+    SUBCASE("none inside: no chapters and no tag") {
+        const std::wstring dst = TestOutputPath(L"clip_file\\marked_none.mp4");
+        const TrimResult r = TrimClip(src, dst, 1.0, 1.4);
+        REQUIRE_MESSAGE(r.ok, r.error);
+        const ProbeInfo info = Probe(dst);
+        REQUIRE_MESSAGE(info.ok, info.error);
+        CHECK(info.chapters.empty());
+        CHECK(info.format_tags.count("markers") == 0);
+    }
+}
+
+TEST_CASE("clip file: a cut's markers need a frame of theirs inside it and a tag this build reads") {
+    // A marker half a frame or more before the start is on the frame before it; at the end, the
+    // frame at the end is the first one left out.
+    const MuxMarkers cut = CutFileMarkers(kSourceMarkers, 2.2, 3.5, 60);
+    std::vector<std::string> titles;
+    for (const MuxChapter& c : cut.chapters) titles.push_back(c.title);
+    CHECK(titles == std::vector<std::string>{"First blood \xC2\xB7 Tool", "Marker \xC2\xB7 Tool", "Round end \xC2\xB7 Tool"});
+    REQUIRE(cut.chapters.size() == 3);
+    CHECK(cut.chapters[0].ms == 0);
+    CHECK(cut.chapters[1].ms == 800);
+    CHECK(cut.chapters[2].ms == 1283);
+
+    CHECK(CutFileMarkers(R"({"v":2,"markers":[{"ms":0,"kind":"kill"}]})", 0.0, 4.0, 60).json.empty());
+    CHECK(CutFileMarkers(R"({"v":1,"markers":[{"ms":0,)", 0.0, 4.0, 60).chapters.empty());
+    CHECK(CutFileMarkers(R"({"v":1,"markers":[{"kind":"kill"},7]})", 0.0, 4.0, 60).json.empty());
 }
 
 // Clips' "End here" ends the range at the end of the frame on screen: the frame starting exactly at
@@ -400,6 +491,24 @@ TEST_CASE("clip ops: replace keeps the original's name and times; the busy lock 
     WIN32_FILE_ATTRIBUTE_DATA attr{};
     REQUIRE(GetFileAttributesExW(src.c_str(), GetFileExInfoStandard, &attr));
     CHECK(CompareFileTime(&attr.ftLastWriteTime, &old_write) == 0);
+}
+
+TEST_CASE("gpu: a re-encoded trim moves the markers to its exact first frame" * doctest::test_suite("gpu")) {
+    const std::wstring src = MarkedSource(L"re_marked_src.mp4");
+    const std::wstring dst = TestOutputPath(L"clip_file\\re_marked.mp4");
+    ReencodeOptions opts;
+    opts.adapter = "nvidia";
+    const TrimResult r = ReencodeClip(src, dst, 2.2, 3.5, nullptr, opts);
+    REQUIRE_MESSAGE(r.ok, r.error);
+    CHECK(r.start_s == doctest::Approx(2.2));
+    const ProbeInfo info = Probe(dst);
+    REQUIRE_MESSAGE(info.ok, info.error);
+    REQUIRE(info.chapters.size() == 3);
+    CHECK(info.chapters[0].title == "First blood \xC2\xB7 Tool");  // source frame 132, now the first
+    CHECK(info.chapters[0].start_s == doctest::Approx(0.0));
+    CHECK(info.chapters[1].start_s == doctest::Approx(0.8));
+    CHECK(info.chapters[2].start_s == doctest::Approx(1.283));
+    CHECK(TagMs(dst) == std::vector<double>{0, 800, 1283});
 }
 
 TEST_CASE("gpu: a re-encode that is cancelled leaves no output" * doctest::test_suite("gpu")) {

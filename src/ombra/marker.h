@@ -91,6 +91,13 @@ private:
 // first frame to its end (MarkerTimeline::Between); any before the first frame are left out.
 MuxMarkers MarkersForFile(const std::vector<Marker>& markers, const FileClock& clock);
 
+// The markers a cut of a file keeps (a trim, a re-encode): from `json` (the source's tag), those on
+// a frame in [start_s, end_s) of the source, `ms` moved to the cut's first frame, each item's other
+// fields as they were, and their chapters rebuilt. Half a frame of slack at both ends: a marker's
+// `ms` is its frame's time rounded down. A tag this can't read (another version, malformed) gives
+// none.
+MuxMarkers CutFileMarkers(const std::string& json, double start_s, double end_s, uint32_t fps);
+
 // Every marker on the engine's timeline. Keeps a marker while it's within the buffer's reach or a
 // file being written (a Hold) still covers it. Thread-safe.
 class MarkerTimeline {

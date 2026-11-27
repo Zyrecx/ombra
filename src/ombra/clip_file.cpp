@@ -1,5 +1,7 @@
 #include "ombra/clip_file.h"
 
+#include "ombra/brand.h"
+#include "ombra/marker.h"
 #include "ombra/mux.h"
 
 #include <windows.h>
@@ -10,6 +12,7 @@
 #include <functional>
 #include <numeric>
 #include <optional>
+#include <string_view>
 
 namespace ombra {
 namespace {
@@ -145,7 +148,50 @@ struct Movie {
     std::vector<Track> tracks;
     const Track*       video = nullptr;
     uint64_t           file_size = 0;
+    std::string        markers_json;  // ClipInfo::markers_json
 };
+
+// The freeform tag WriteFreeformMeta writes (moov/udta/meta/ilst/----, mean OMBRA_PRODUCT_NAME,
+// name `key`), or empty.
+std::string FreeformTag(Bytes udta, std::string_view key) {
+    std::string value;
+    ForEachBox(udta, [&](const std::string& type, Bytes meta) {
+        if (type != "meta") return true;
+        // ISO meta is a full box; QuickTime's isn't (its first child's type sits at offset 4).
+        if (meta.Left() >= 8 && std::memcmp(meta.Here() + 4, "hdlr", 4) != 0) meta.Skip(4);
+        ForEachBox(meta, [&](const std::string& type, Bytes ilst) {
+            if (type != "ilst") return true;
+            ForEachBox(ilst, [&](const std::string& type, Bytes item) {
+                if (type != "----") return true;
+                std::string_view mean, name;
+                Bytes data(nullptr, 0);
+                bool has_data = false;
+                ForEachBox(item, [&](const std::string& type, Bytes b) {
+                    const auto text = [&] {
+                        b.Skip(4);  // version and flags
+                        return std::string_view(reinterpret_cast<const char*>(b.Here()), b.Left());
+                    };
+                    if (type == "mean") mean = text();
+                    else if (type == "name") name = text();
+                    else if (type == "data" && b.Left() >= 8) {
+                        b.Skip(8);  // type and locale
+                        data = b;
+                        has_data = true;
+                    }
+                    return true;
+                });
+                if (has_data && mean == OMBRA_PRODUCT_NAME && name == key) {
+                    value.assign(reinterpret_cast<const char*>(data.Here()), data.Left());
+                    return false;
+                }
+                return true;
+            });
+            return value.empty();
+        });
+        return value.empty();
+    });
+    return value;
+}
 
 bool ParseSampleEntry(Track& t, Bytes b) {
     std::optional<Bytes> entry;
@@ -378,6 +424,7 @@ bool ReadMovie(const File& f, Movie& m, std::string& error) {
             const uint32_t ts = b.U32();
             if (b.Ok() && ts) m.timescale = ts;
         }
+        if (type == "udta") m.markers_json = FreeformTag(b, "markers");
         return true;
     });
     const bool ok = ForEachBox(Bytes(moov.data(), moov.size()), [&](const std::string& type, Bytes b) {
@@ -527,6 +574,7 @@ bool ReadClipInfo(const std::wstring& path, ClipInfo& out, std::string* error) {
     for (const Track& t : m.tracks) {
         if (t.handler == "soun") out.audio_track_names.push_back(t.name);
     }
+    out.markers_json = std::move(m.markers_json);
     return true;
 }
 
@@ -651,7 +699,10 @@ TrimResult TrimClip(const std::wstring& src, const std::wstring& dst, double sta
     const VideoCodec codec = v.entry == "av01" ? VideoCodec::AV1 : VideoCodec::H264;
     const std::wstring part = dst + L".part";
     const uint32_t last_ticks = static_cast<uint32_t>((dts1 - v.samples[v1 - 1].dts) / frame_dur);
-    if (!MuxWriteMp4(part, codec_header, v.width, v.height, fps, samples, read, audio, codec, last_ticks, PictureOf(v))) {
+    // A marker's `ms` counts from the source's first frame, not its presentation time.
+    const MuxMarkers markers = CutFileMarkers(m.markers_json, r.start_s - v.TimeOf(0), r.end_s - v.TimeOf(0), fps);
+    if (!MuxWriteMp4(part, codec_header, v.width, v.height, fps, samples, read, audio, codec, last_ticks, PictureOf(v),
+                     markers)) {
         DeleteFileW(part.c_str());
         if (r.error.empty()) r.error = "writing the trimmed clip failed (see the log)";
         return r;

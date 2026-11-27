@@ -4,6 +4,7 @@
 #include "ombra/config.h"
 #include "ombra/encode_target.h"
 #include "ombra/log.h"
+#include "ombra/marker.h"
 #include "ombra/mux.h"
 
 #include <windows.h>
@@ -476,8 +477,11 @@ TrimResult ReencodeClip(const std::wstring& src, const std::wstring& dst, double
     if (encoder->Codec() == VideoCodec::AV1) Av1CodedSize(header.data(), header.size(), coded_w, coded_h);
     auto read = [&](size_t i, std::vector<uint8_t>& annexb) { return spill.Read(i, annexb); };
     const std::wstring part = dst + L".part";
+    // A marker's `ms` counts from the source's first frame, not its presentation time.
+    const MuxMarkers markers = CutFileMarkers(info.markers_json, r.start_s - info.video_offset_s,
+                                              r.end_s - info.video_offset_s, fps);
     if (!MuxWriteMp4(part, header, coded_w, coded_h, fps, samples, read, audio, encoder->Codec(), last_ticks,
-                     MuxPicture{out_w, out_h})) {
+                     MuxPicture{out_w, out_h}, markers)) {
         DeleteFileW(part.c_str());
         r.error = "writing the trimmed clip failed (see the log)";
         return r;

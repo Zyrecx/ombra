@@ -3,6 +3,7 @@
 #include "ombra/json.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <utility>
@@ -136,6 +137,54 @@ MuxMarkers MarkersForFile(const std::vector<Marker>& markers, const FileClock& c
     JsonValue root = JsonValue::MakeObject();
     root.Set("v", JsonValue::MakeNum(1));
     root.Set("markers", std::move(list));
+    out.json = WriteJsonCompact(root);
+    return out;
+}
+
+MuxMarkers CutFileMarkers(const std::string& json, double start_s, double end_s, uint32_t fps) {
+    MuxMarkers out;
+    if (json.empty() || end_s <= start_s) return out;
+    JsonValue root;
+    try {
+        root = ParseJson(json);
+    } catch (const std::string&) {
+        return out;
+    }
+    const JsonValue* v = root.Find("v");
+    if (!v || v->type != JsonValue::Type::Number || v->num != 1) return out;
+    const JsonValue* list = root.Find("markers");
+    if (!list || list->type != JsonValue::Type::Array) return out;
+
+    const double slack_ms = 500.0 / (fps ? fps : 1);
+    const double start_ms = start_s * 1000.0, length_ms = (end_s - start_s) * 1000.0;
+    JsonValue kept = JsonValue::MakeArray();
+    for (const JsonValue& item : list->arr) {
+        const JsonValue* ms = item.Find("ms");
+        if (!ms || ms->type != JsonValue::Type::Number) continue;
+        const double at = ms->num - start_ms;
+        if (at < -slack_ms || at >= length_ms - slack_ms) continue;
+        const uint64_t new_ms = static_cast<uint64_t>((std::max)(0LL, std::llround(at)));
+
+        // The chapter as MarkersForFile names it. A kind this build doesn't know reads as generic.
+        Marker m;
+        const auto text = [&](const char* key) {
+            const JsonValue* f = item.Find(key);
+            if (!f || f->type != JsonValue::Type::String) return std::string();
+            return CleanMarkerLabel(f->str).value_or(std::string());
+        };
+        const std::string kind = text("kind");
+        for (const TypeInfo& t : kTypes)
+            if (kind == t.name) m.type = t.type;
+        m.label = text("label");
+        m.owner = text("app");
+        out.chapters.push_back({new_ms, MarkerChapterTitle(m)});
+
+        JsonValue moved = item;
+        moved.Set("ms", JsonValue::MakeNum(static_cast<double>(new_ms)));
+        kept.arr.push_back(std::move(moved));
+    }
+    if (kept.arr.empty()) return out;
+    root.Set("markers", std::move(kept));
     out.json = WriteJsonCompact(root);
     return out;
 }

@@ -361,6 +361,7 @@ add_executable(ombra-ui WIN32
     src/ombra/games.cpp
     src/ombra/clip_ops.cpp
     src/ombra/clip_file.cpp
+    src/ombra/marker.cpp
     src/ombra/mux.cpp
     src/ombra/av1.cpp
     src/ombra-ui/ombra-ui.rc
