@@ -482,6 +482,16 @@ TEST_CASE("engine pipe api: replay switches Instant Replay for the command line 
     CHECK(toasts == expected);
 }
 
+// The command line's own path (a real WM_QUIT) runs end to end, not here: this process has no
+// engine message loop to quit.
+TEST_CASE("engine pipe api: exit is refused to apps") {
+    HandlerRig rig;
+    CHECK(ErrorOf(rig.ApiRequest("exit", JsonValue::MakeObject(), nullptr)) == "not_allowed");
+    PipeCaller app;
+    app.app = "Command line";
+    CHECK(ErrorOf(rig.ApiRequest("exit", JsonValue::MakeObject(), &app)) == "not_allowed");
+}
+
 TEST_CASE("engine pipe api: clip checks its fields, Instant Replay and the footage") {
     HandlerRig rig;
     PipeCaller cli;

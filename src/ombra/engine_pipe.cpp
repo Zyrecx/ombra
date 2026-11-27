@@ -437,6 +437,7 @@ struct PipeRequest {
     JsonValue OnApiRecordStop();
     std::vector<SaveContext*> Contexts() const;  // every monitor's, as a save takes them
     JsonValue OnApiReplay();
+    JsonValue OnApiExit();
     JsonValue OnSaveNow();
     JsonValue OnScreenshot();
     JsonValue OnSetArmed();
@@ -462,17 +463,21 @@ struct PipeRequest {
 
 }  // namespace
 
-JsonValue PipeRequest::OnShutdown() {
-    // Same exit path as tray Exit and Ctrl+C. The pump thread id is zero until the resident
-    // message loop runs (and always in harnesses that call this function directly).
-    JsonValue   resp     = JsonValue::MakeObject();
+// Same exit path as tray Exit and Ctrl+C. False while the resident message loop isn't running
+// (its thread id is zero until then, and always in harnesses that call the handlers directly).
+bool QuitMessageLoop() {
     const DWORD pump_tid = g_pump_thread_id_for_ctrl_handler.load();
-    if (pump_tid == 0 || !PostThreadMessage(pump_tid, WM_QUIT, 0, 0)) {
+    if (pump_tid == 0 || !PostThreadMessage(pump_tid, WM_QUIT, 0, 0)) return false;
+    Telemetry::Event("shutdown_request", "source=pipe");
+    return true;
+}
+
+JsonValue PipeRequest::OnShutdown() {
+    JsonValue resp = JsonValue::MakeObject();
+    if (!QuitMessageLoop()) {
         resp.Set("ok", JsonValue::MakeBool(false));
         resp.Set("error", JsonValue::MakeStr("the engine's message loop isn't running"));
-        return resp;
     }
-    Telemetry::Event("shutdown_request", "source=pipe");
     return resp;
 }
 
@@ -1188,6 +1193,14 @@ JsonValue PipeRequest::OnApiReplay() {
     return resp;
 }
 
+// The public API's Exit (protocol.h): the internal shutdown, for Ombra's own command line only.
+JsonValue PipeRequest::OnApiExit() {
+    if (!caller || !caller->command_line)
+        return ApiError("not_allowed", "only Ombra's command line can close Ombra");
+    if (!QuitMessageLoop()) return ApiError("failed", "Ombra's message loop isn't running (starting or exiting)");
+    return JsonValue::MakeObject();
+}
+
 JsonValue PipeRequest::OnGetStatus() {
     double ws_mb = 0, private_mb = 0;
     GetProcessRssMb(ws_mb, private_mb);
@@ -1868,6 +1881,7 @@ constexpr PipeCommand kApiCommands[] = {
     {"record_start", false, &PipeRequest::OnApiRecordStart},  // waits for footage, up to kRecordStartSeconds
     {"record_stop",  false, &PipeRequest::OnApiRecordStop},   // waits for the files
     {"replay", false, &PipeRequest::OnApiReplay},  // as set_armed: the controller serializes it
+    {"exit",   false, &PipeRequest::OnApiExit},    // as shutdown
 };
 
 }  // namespace

@@ -72,6 +72,12 @@
 //                      naming the app. Errors: bad_request, not_allowed (only Ombra's command line:
 //                      no app may switch it until consent exists).
 //
+//   exit            -> {}
+//                   <- {}
+//                      Closes the engine the way the tray's Exit does (the "exiting" event
+//                      follows); the reply comes before it has finished. Errors: not_allowed
+//                      (only Ombra's command line), failed (its message loop isn't running: starting or exiting).
+//
 //   record_start    -> {"before"?:number (seconds before now; default 0, capped at buffer_seconds),
 //                       "title"?:string (in the file or folder name)}
 //                   <- {"recording":number (this engine run's id)}

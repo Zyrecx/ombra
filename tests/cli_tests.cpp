@@ -47,7 +47,7 @@ TEST_CASE("cli: usage errors exit 2 on stderr, help exits 0 on stdout") {
     const wchar_t* com = L"" OMBRA_CLI_EXE;
     for (const wchar_t* args : {L"", L"frob", L"clip --nope", L"clip --before", L"clip --before -1",
                                 L"clip --after x", L"clip extra", L"marker a b", L"marker x --at 3",
-                                L"replay", L"replay maybe", L"status --json=1", L"start --json"}) {
+                                L"replay", L"replay maybe", L"status --json=1", L"start --json", L"stop --json"}) {
         const std::string shown = NarrowUtf8(args);
         CAPTURE(shown);
         const ProcessResult r = RunCli(com, args);
@@ -77,6 +77,12 @@ TEST_CASE("cli: no engine exits 3, --json answers in the engine's error shape") 
     const JsonValue* ok = v.Find("ok");
     CHECK((ok && ok->type == JsonValue::Type::Bool && !ok->b));
     CHECK_FALSE(v.Find("id"));
+
+    // stop's goal is no engine, already met: success, as start on a running one.
+    const ProcessResult stop = RunCli(L"" OMBRA_CLI_EXE, L"stop");
+    CHECK(stop.exit_code == 0);
+    CHECK(stop.out.empty());
+    CHECK(stop.err.empty());
 }
 
 // ombra.exe answers the same commands (a script calling it by full path), without starting an engine.

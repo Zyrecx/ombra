@@ -35,6 +35,7 @@ constexpr int kExitNothingNew  = 6;
 // after a login or `ombra start` waits that out rather than failing.
 constexpr DWORD  kConnectTimeoutMs = 30000;
 constexpr DWORD  kRequestTimeoutMs = 15000;
+constexpr DWORD  kStopTimeoutMs    = 30000;  // `stop`: the engine's exit, after it agreed
 constexpr double kClipMaxAfterS    = 120;    // the engine's cap on "after" (protocol.h)
 constexpr double kClipWaitMarginS  = 120;    // past "after": the clip's tail, then writing the file
 // record start waits for the first footage (the engine gives up after 10 s, kRecordStartSeconds);
@@ -197,6 +198,13 @@ public:
         }
     }
 
+    // The engine process at the other end, opened to wait on; nullptr if that fails.
+    HANDLE OpenServerProcess() const {
+        ULONG pid = 0;
+        if (pipe_ == INVALID_HANDLE_VALUE || !GetNamedPipeServerProcessId(pipe_, &pid)) return nullptr;
+        return OpenProcess(SYNCHRONIZE, FALSE, pid);
+    }
+
 private:
     bool Io(bool write, char* data, DWORD size, DWORD* done, DWORD timeout_ms) {
         OVERLAPPED ov{};
@@ -335,6 +343,21 @@ struct Answer {
     int                      exit_code = kExitOk;
 };
 
+// Says hello as `app` on a connected pipe; kExitOk, or the exit code of a failure already reported.
+int SayHello(const Args& args, const std::string& type, Pipe& pipe) {
+    const bool json = args.Has(L"--json");
+    JsonValue hello = JsonValue::MakeObject();
+    hello.Set("type", JsonValue::MakeStr("hello"));
+    hello.Set("id", JsonValue::MakeNum(1));
+    hello.Set("api", JsonValue::MakeNum(kApiVersionMax));
+    const std::wstring* as = args.Value(L"--as");
+    hello.Set("app", JsonValue::MakeStr(as ? Utf8(*as) : std::string(kDefaultApp)));
+    const std::optional<JsonValue> greeted = pipe.Request(hello, kRequestTimeoutMs);
+    if (!greeted) return Fail(json, type.c_str(), "no_answer", L"" OMBRA_PRODUCT_NAME " didn't answer");
+    if (!IsOk(*greeted)) return EngineFailure(json, *greeted);
+    return kExitOk;
+}
+
 // Connects and says hello as `app`; kExitOk, or the exit code of a failure already reported.
 int OpenSession(const Args& args, const std::string& type, Pipe& pipe) {
     const bool json = args.Has(L"--json");
@@ -346,16 +369,7 @@ int OpenSession(const Args& args, const std::string& type, Pipe& pipe) {
         case Connect::kNoAnswer:
             return Fail(json, type.c_str(), "no_answer", L"" OMBRA_PRODUCT_NAME " didn't answer");
     }
-    JsonValue hello = JsonValue::MakeObject();
-    hello.Set("type", JsonValue::MakeStr("hello"));
-    hello.Set("id", JsonValue::MakeNum(1));
-    hello.Set("api", JsonValue::MakeNum(kApiVersionMax));
-    const std::wstring* as = args.Value(L"--as");
-    hello.Set("app", JsonValue::MakeStr(as ? Utf8(*as) : std::string(kDefaultApp)));
-    const std::optional<JsonValue> greeted = pipe.Request(hello, kRequestTimeoutMs);
-    if (!greeted) return Fail(json, type.c_str(), "no_answer", L"" OMBRA_PRODUCT_NAME " didn't answer");
-    if (!IsOk(*greeted)) return EngineFailure(json, *greeted);
-    return kExitOk;
+    return SayHello(args, type, pipe);
 }
 
 Answer Ask(const Args& args, JsonValue req, DWORD timeout_ms) {
@@ -739,11 +753,48 @@ int RunStart(int argc) {
     return result;
 }
 
+// Closes the engine the way the tray's Exit does and returns once its process has ended, so a
+// script can replace or restart it next. Not running is success, as `start` on a running one.
+int RunStop(int argc) {
+    if (argc > 2) return UsageError(L"stop takes no options");
+    Pipe pipe;
+    switch (pipe.Open(kConnectTimeoutMs)) {
+        case Connect::kOk: break;
+        case Connect::kNotRunning: return kExitOk;  // also when it exited just now
+        case Connect::kNoAnswer: return Fail(false, "exit", "no_answer", L"" OMBRA_PRODUCT_NAME " didn't answer");
+    }
+    const Args args;
+    if (const int code = SayHello(args, "exit", pipe); code != kExitOk) return code;
+    // Opened before asking, while the pipe still names it. Without access (another integrity
+    // level) the instance mutex tells when it has gone instead.
+    const HANDLE engine = pipe.OpenServerProcess();
+    JsonValue req = Request("exit");
+    req.Set("id", JsonValue::MakeNum(2));
+    // No reply also counts: the engine may close the pipe as it exits. Its process decides.
+    const std::optional<JsonValue> resp = pipe.Request(req, kRequestTimeoutMs);
+    if (resp && !IsOk(*resp)) {
+        if (engine) CloseHandle(engine);
+        return EngineFailure(false, *resp);
+    }
+    bool ended = false;
+    if (engine) {
+        ended = WaitForSingleObject(engine, kStopTimeoutMs) == WAIT_OBJECT_0;
+        CloseHandle(engine);
+    } else {
+        for (const ULONGLONG deadline = GetTickCount64() + kStopTimeoutMs; !ended && GetTickCount64() < deadline; Sleep(100))
+            ended = !EngineRunning();
+    }
+    if (!ended)
+        return Fail(false, "exit", "failed", L"" OMBRA_PRODUCT_NAME " is still closing after " +
+                                                 std::to_wstring(kStopTimeoutMs / 1000) + L" s");
+    return kExitOk;
+}
+
 }  // namespace
 
 bool IsCliCommand(const wchar_t* arg) {
     if (!arg) return false;
-    for (const wchar_t* command : {L"clip", L"marker", L"record", L"status", L"replay", L"watch", L"start", L"help"})
+    for (const wchar_t* command : {L"clip", L"marker", L"record", L"status", L"replay", L"watch", L"start", L"stop", L"help"})
         if (std::wcscmp(arg, command) == 0) return true;
     return false;
 }
@@ -774,8 +825,10 @@ int PrintCliUsage(bool error) {
         L"        recording_recovered, exiting (default: all of them).\n"
         L"  start\n"
         L"        Start " OMBRA_PRODUCT_NAME " in the background if it isn't running.\n"
+        L"  stop\n"
+        L"        Close " OMBRA_PRODUCT_NAME " as its tray Exit does and wait until it has.\n"
         L"\n"
-        L"Every command but start also takes:\n"
+        L"Every command but start and stop also takes:\n"
         L"  --json      Print " OMBRA_PRODUCT_NAME "'s answer as one line of JSON.\n"
         L"  --as NAME   The name " OMBRA_PRODUCT_NAME "'s notifications show (default \"Command line\").\n"
         L"\n"
@@ -796,6 +849,7 @@ int RunCli(int argc, wchar_t** argv) {
     if (command == L"replay") return RunReplay(argc, argv);
     if (command == L"watch") return RunWatch(argc, argv);
     if (command == L"start") return RunStart(argc);
+    if (command == L"stop") return RunStop(argc);
     return UsageError(L"unknown command " + command);
 }
 
