@@ -31,8 +31,9 @@
 //   fixture audio [perapp]: Desktop, Mic (off), three app tracks (two mixed), three apps playing
 //   fixture setup: the setup screen with fixed sample facts (a dGPU and an iGPU, 1080p 120 Hz, 15.3 GB)
 //   fixture update STATE [KIND]: the Updates card (Advanced > Diagnostics) in one update_status state
-//   fixture monitors [plain]: three displays laid out as a desktop (one portrait, one left of the
-//     primary), with synthetic captures unless `plain`
+//   fixture monitors [plain] [IMAGE...]: three displays laid out as a desktop (one portrait, one left
+//     of the primary), with synthetic captures unless `plain`; each IMAGE (Primary, DISPLAY2,
+//     DISPLAY3) replaces that display's capture, drawn like a real grab (match its shape)
 //   fixture meters: fixed levels for the Audio page built next (then `fixture audio`): Desktop
 //     -12 dB, Discord -3 dB (red), League -30 dB, Spotify -44 dB; the off mic stays unlit
 //   fixture games: 14 detected games (two switched off), two that looked like one, three added by hand
@@ -518,8 +519,14 @@ private:
                 s->SeedAudioForSnapshot(0.0f, arg(2) == "perapp");
                 return Settle();
             }
-            if (arg(1) == "monitors") {  // fixture monitors [plain]
+            if (arg(1) == "monitors") {  // fixture monitors [plain] [IMAGE...]
                 s->SeedMonitorsForSnapshot(3, true, arg(2) != "plain");
+                for (size_t i = arg(2) == "plain" ? 3 : 2, m = 0; !arg(i).empty(); ++i, ++m) {
+                    UINT w = 0, h = 0;
+                    std::vector<uint8_t> bgra;
+                    if (!LoadImage(arg(i), w, h, bgra)) return Fail(("cannot load " + arg(i)).c_str());
+                    if (!s->SetMonitorThumbForSnapshot(m, w, h, std::move(bgra))) return Fail("fixture monitors: more images than displays");
+                }
                 return Settle();
             }
             if (arg(1) == "games") {
@@ -1311,9 +1318,8 @@ private:
         return wic_.Get();
     }
 
-    void Backdrop(const std::string& what) {
-        backdrop_.clear();
-        if (what.empty() || what == "gray") return;
+    // An image file as 32bpp BGRA, scaled to w x h (0: its own size, written back).
+    bool LoadImage(const std::string& what, UINT& w, UINT& h, std::vector<uint8_t>& bgra) {
         IWICImagingFactory* wic = Wic();
         ComPtr<IWICBitmapDecoder> dec;
         ComPtr<IWICBitmapFrameDecode> frame;
@@ -1321,14 +1327,26 @@ private:
         ComPtr<IWICFormatConverter> conv;
         const std::wstring path = Widen(what[0] == '"' ? what.substr(1, what.size() - 2) : what);
         if (!wic || FAILED(wic->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &dec)) ||
-            FAILED(dec->GetFrame(0, &frame)) || FAILED(wic->CreateBitmapScaler(&scaler)) ||
-            FAILED(scaler->Initialize(frame.Get(), opt_.width, opt_.height, WICBitmapInterpolationModeFant)) ||
+            FAILED(dec->GetFrame(0, &frame)))
+            return false;
+        if (w == 0 || h == 0) frame->GetSize(&w, &h);
+        if (FAILED(wic->CreateBitmapScaler(&scaler)) ||
+            FAILED(scaler->Initialize(frame.Get(), w, h, WICBitmapInterpolationModeFant)) ||
             FAILED(wic->CreateFormatConverter(&conv)) ||
-            FAILED(conv->Initialize(scaler.Get(), GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom))) {
+            FAILED(conv->Initialize(scaler.Get(), GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom)))
+            return false;
+        bgra.resize(static_cast<size_t>(w) * h * 4);
+        return SUCCEEDED(conv->CopyPixels(nullptr, w * 4, static_cast<UINT>(bgra.size()), bgra.data()));
+    }
+
+    void Backdrop(const std::string& what) {
+        backdrop_.clear();
+        if (what.empty() || what == "gray") return;
+        UINT w = static_cast<UINT>(opt_.width), h = static_cast<UINT>(opt_.height);
+        if (!LoadImage(what, w, h, backdrop_)) {
+            backdrop_.clear();
             return Fail("cannot load backdrop image");
         }
-        backdrop_.resize(static_cast<size_t>(opt_.width) * opt_.height * 4);
-        conv->CopyPixels(nullptr, opt_.width * 4, static_cast<UINT>(backdrop_.size()), backdrop_.data());
         std::printf("  backdrop %s\n", what.c_str());
     }
 

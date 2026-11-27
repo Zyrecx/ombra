@@ -433,6 +433,8 @@ public:
     // fake monitors, each with a synthetic gradient preview (unless !thumbs). `layout` places the
     // first three as a real desktop would (negative coordinates, a portrait screen).
     void SeedMonitorsForSnapshot(int count, bool layout = false, bool thumbs = true);
+    // --drive: seeded display `index`'s capture, as if grabbed (32bpp BGRA). False: no such display.
+    bool SetMonitorThumbForSnapshot(size_t index, UINT w, UINT h, std::vector<uint8_t> bgra);
     // Window-mode grid with `count` fake windows; `saved` is the staged capture.target_window.
     void SeedWindowsForSnapshot(int count, const char* saved);
     // Same for the Audio tab: per-app mode with Desktop, Mic, and three app sources (two grouped),

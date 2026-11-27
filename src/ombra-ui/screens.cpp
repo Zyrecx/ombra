@@ -1360,6 +1360,13 @@ void SettingsScreen::SeedMonitorsForSnapshot(int count, bool layout, bool thumbs
     RebuildGroupRows(current_dpi_scale_);
 }
 
+bool SettingsScreen::SetMonitorThumbForSnapshot(size_t index, UINT w, UINT h, std::vector<uint8_t> bgra) {
+    if (index >= monitor_rows_.size()) return false;
+    monitor_thumb_cache_[monitor_rows_[index].device] = MonitorThumbCache{w, h, std::move(bgra)};
+    RebuildGroupRows(current_dpi_scale_);
+    return true;
+}
+
 void SettingsScreen::SeedMemoryForSnapshot(bool with_projection) {
     constexpr double kMb = 1024.0 * 1024.0;
     auto& m = preview_memory_;
