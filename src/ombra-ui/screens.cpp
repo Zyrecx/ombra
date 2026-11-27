@@ -2122,19 +2122,21 @@ void SettingsScreen::BuildAppearanceLayoutPage() {
     auto panel = std::make_shared<CardContainer>();
     panel->title = L"Panel";
     const float gap = host_ ? host_->GetTheme().size.space_lg() : Sizes{}.space_lg();  // picture to rows
+    // The rows beside the picture keep room for a title and a four-way segmented control on one
+    // line; the picture gives way. Narrower, each control drops under its text and the rows grow.
+    // Density widens those controls, so the room scales with it.
+    const float rows_dip = host_ ? host_->GetTheme().size.S(440.0f) : 440.0f;
+    const float dpi = current_dpi_scale_ > 0.0f ? current_dpi_scale_ : 1.0f;
+    const float page_w = (scroll_area_.bounds.right - scroll_area_.bounds.left) / dpi - kScrollbarRoomDip;
+    const float pad = host_ ? host_->GetTheme().size.card_padding() : 16.0f;
+    const float picture_room = page_w - 2 * pad - gap - rows_dip;
+    constexpr float kPictureMinDip = 180.0f;
     std::shared_ptr<PanelPositionControl> picker;
     if (const FieldSpec* spec = FindSpec("ui.panel_position")) {
         picker = std::make_shared<PanelPositionControl>();
         picker->id = spec->key;
         picker->tooltip = L"Click an edge or the middle to place the panel";
-        // The rows beside it keep room for a title and a four-way segmented control on one line
-        // (narrower, each control drops under its text and the tab scrolls); the picture gives way.
-        // Density widens those controls, so the room scales with it.
-        const float rows_dip = host_ ? host_->GetTheme().size.S(440.0f) : 440.0f;
-        const float dpi = current_dpi_scale_ > 0.0f ? current_dpi_scale_ : 1.0f;
-        const float page_w = (scroll_area_.bounds.right - scroll_area_.bounds.left) / dpi - kScrollbarRoomDip;
-        const float pad = host_ ? host_->GetTheme().size.card_padding() : 16.0f;
-        picker->max_width_dip = std::clamp(page_w - 2 * pad - gap - rows_dip, 180.0f, 280.0f);
+        picker->max_width_dip = std::clamp(picture_room, kPictureMinDip, 280.0f);
         for (const auto& opt : spec->enum_options) {
             picker->options.push_back(Utf8ToWide(opt));
             if (opt == position) picker->selected = static_cast<int>(picker->options.size()) - 1;
@@ -2162,18 +2164,23 @@ void SettingsScreen::BuildAppearanceLayoutPage() {
     }
     if (const FieldSpec* s = FindSpec("ui.rail_position"))
         add_beside(AppearanceRow(L"Tabs", L"Which side the page list sits on.", MakeSegmented(*s, label(s->key))));
-    if (const FieldSpec* s = FindSpec("ui.memory_card"))
-        add_beside(AppearanceRow(L"Memory card", L"Memory use beside Settings.", MakeSwitch(*s)));
-    // Home's tiles sit under the picture, in the room the taller rows beside it leave; a fourth
-    // row beside it would make the tab scroll.
+    // Home tiles joins the rows while they stay one line each: four rows are then shorter than the
+    // picture with a row under it. Once they wrap, a fourth would make the tab scroll, so it sits
+    // under the picture, in the room the taller rows leave.
     auto under = FlexWidget::MakeColumn();
     if (picker) under->Add(picker);
     if (const FieldSpec* s = FindSpec("ui.home_layout")) {
         if (auto row = AppearanceRow(L"Home tiles", L"Side by side, or stacked.", MakeSegmented(*s, label(s->key)))) {
-            row->divider_above = picker != nullptr;
-            under->Add(row);
+            if (picture_room >= kPictureMinDip) {
+                add_beside(row);
+            } else {
+                row->divider_above = picker != nullptr;
+                under->Add(row);
+            }
         }
     }
+    if (const FieldSpec* s = FindSpec("ui.memory_card"))
+        add_beside(AppearanceRow(L"Memory card", L"Memory use beside Settings.", MakeSwitch(*s)));
     auto hero = FlexWidget::MakeRow(gap);
     hero->align = FlexAlign::Start;
     if (!under->items.empty()) hero->Add(under).basis_dip = picker ? picker->max_width_dip : -1.0f;
