@@ -1685,6 +1685,11 @@ float ToastCard::Height(const Theme& t, float s, bool details, bool time_bar) {
     return (body + (time_bar ? kToastBarDip + kToastBarInsetDip : 0.0f)) * s;
 }
 
+float ToastCard::FitHeight(const Theme& t, float s, bool gains_detail) const {
+    const bool two_lines = (gains_detail && (details || !app.empty())) || !ShownDetail().empty();
+    return Height(t, s, two_lines, time_bar && !compact);
+}
+
 D2D1_COLOR_F ToastCard::Hue(const Theme& t) const {
     const ColorRoles& c = t.color;
     if (brand) return c.accent_text;  // the picked colour, readable on the card in both modes
@@ -1722,13 +1727,22 @@ void ToastCard::Draw(ID2D1DeviceContext* dc, const Theme& t, float s) {
     const auto glyph_at = [&](float cx, float cy, float g) {
         if (brand) {
             const uint32_t rgb = t.PickedRgb();
-            const int px = (std::max)(16, static_cast<int>(std::ceil(g)) * 2);  // drawn once a toast: no cache
-            const auto pixels = ombra::RenderBrandMark(px, ((rgb >> 16) & 255) / 255.0f, ((rgb >> 8) & 255) / 255.0f,
-                                                       (rgb & 255) / 255.0f);
-            ComPtr<ID2D1Bitmap> bmp;
-            const auto props = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-            if (SUCCEEDED(dc->CreateBitmap(D2D1::SizeU(px, px), pixels.data(), px * 4, props, &bmp)))
-                dc->DrawBitmap(bmp.Get(), D2D1::RectF(cx - g / 2, cy - g / 2, cx + g / 2, cy + g / 2), p.op,
+            const int px = (std::max)(16, static_cast<int>(std::ceil(g)) * 2);
+            ComPtr<ID2D1Device> device;
+            dc->GetDevice(&device);
+            if (!brand_bmp_ || brand_px_ != px || brand_rgb_ != rgb || brand_device_ != device) {
+                brand_bmp_.Reset();
+                const auto pixels = ombra::RenderBrandMark(px, ((rgb >> 16) & 255) / 255.0f,
+                                                           ((rgb >> 8) & 255) / 255.0f, (rgb & 255) / 255.0f);
+                const auto props = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+                if (SUCCEEDED(dc->CreateBitmap(D2D1::SizeU(px, px), pixels.data(), px * 4, props, &brand_bmp_))) {
+                    brand_px_ = px;
+                    brand_rgb_ = rgb;
+                    brand_device_ = device;
+                }
+            }
+            if (brand_bmp_)
+                dc->DrawBitmap(brand_bmp_.Get(), D2D1::RectF(cx - g / 2, cy - g / 2, cx + g / 2, cy + g / 2), p.op,
                                D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
         } else {
             p.Circle(cx, cy, g / 2, Faded(hue, c.soft_a));
@@ -1814,6 +1828,103 @@ void ToastCard::Draw(ID2D1DeviceContext* dc, const Theme& t, float s) {
         if (fill > 0)
             p.Fill(D2D1::RectF(track.left, track.top, track.left + (track.right - track.left) * fill, track.bottom), h / 2, hue);
     }
+}
+
+namespace {
+constexpr float kStageEdgeDip = 4.0f;  // the live toast's gap from the screen edge it docks against
+}  // namespace
+
+// Two cards' height and the stage's margins, inside the card's row padding.
+D2D1_SIZE_F ToastCornerControl::Measure(const LayoutConstraints& c, const LayoutContext& ctx) {
+    const float s = ctx.dpi_scale;
+    const float w = c.BoundedWidth() ? c.max_w : 600 * s;
+    if (!ctx.theme) return D2D1::SizeF(w, 200 * s);
+    const Sizes& z = ctx.theme->size;
+    const float ch = card.FitHeight(*ctx.theme, s, false);
+    return D2D1::SizeF(w, 2 * ch + (2 * z.space_md() + 2 * z.space_md() + z.space_xl()) * s);
+}
+
+// The slots are as wide as the live toast, or half the stage when that is narrower.
+void ToastCornerControl::Arrange(const D2D1_RECT_F& rect, const LayoutContext& ctx) {
+    bounds = rect;
+    const float s = ctx.dpi_scale;
+    const Sizes z = ctx.theme ? ctx.theme->size : Sizes{};
+    const float pad_x = z.card_padding() * s, pad_y = z.space_md() * s;
+    stage_ = D2D1::RectF(rect.left + pad_x, rect.top + pad_y, rect.right - pad_x, rect.bottom - pad_y);
+    const float edge = kStageEdgeDip * s, m = z.space_md() * s;
+    const float room = (std::max)(0.0f, (stage_.right - stage_.left - 2 * edge - z.space_md() * s) / 2);
+    const float w = ctx.theme ? (std::min)(ToastCard::Width(*ctx.theme, s), room) : room;
+    const float h = ctx.theme ? card.FitHeight(*ctx.theme, s, false) : 0.0f;
+    for (int i = 0; i < 4; ++i) {
+        const float left = (i & 1) ? stage_.right - edge - w : stage_.left + edge;
+        const float top = (i & 2) ? stage_.bottom - m - h : stage_.top + m;
+        slots_[i] = D2D1::RectF(left, top, left + w, top + h);
+    }
+    card.trailing = (selected & 1) != 0;
+    card.bounds = slots_[selected & 3];
+}
+
+int ToastCornerControl::IndexAt(D2D1_POINT_2F pt) const {
+    if (!visible || !enabled) return -1;
+    for (int i = 0; i < 4; ++i) {
+        const D2D1_RECT_F& r = slots_[i];
+        if (i != selected && pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom) return i;
+    }
+    return -1;
+}
+
+void ToastCornerControl::Draw(ID2D1DeviceContext* dc, const Theme& t, float s) {
+    if (!visible) return;
+    const paint::Paint p{dc, t, s, enabled ? 1.0f : 0.4f};
+    const ColorRoles& c = t.color;
+    const float rad = t.size.radius_panel() * s;
+    p.Fill(stage_, rad, c.panel);
+    p.Stroke(stage_, rad, c.line);
+    TrackItems(hovered_index);
+    for (int i = 0; i < 4; ++i) {
+        if (i == selected) continue;
+        const D2D1_RECT_F& r = slots_[i];
+        const float sr = t.size.pill ? (r.bottom - r.top) / 2 : rad;
+        p.Fill(r, sr, pressed && i == hovered_index ? c.PressedLayer() : c.HoverLayer(item_hover_.Amount(i)));
+        p.Stroke(r, sr, c.line_strong);
+        p.Text(names[i], TypeRole::Caption, r, c.text3, {TextAlign::Center});
+    }
+    card.Draw(dc, t, s);
+    if (focus_visible) p.Focus(stage_, rad);
+}
+
+bool ToastCornerControl::OnMouseMove(D2D1_POINT_2F pt) {
+    const int was = hovered_index;
+    Widget::OnMouseMove(pt);
+    hovered_index = IndexAt(pt);
+    return was != hovered_index;
+}
+
+void ToastCornerControl::Select(int i) {
+    if (i == selected) return;
+    selected = i;
+    hovered_index = -1;
+    card.trailing = (i & 1) != 0;
+    card.bounds = slots_[i];
+    if (on_change) on_change(i);
+}
+
+void ToastCornerControl::Press(D2D1_POINT_2F pt) {
+    if (const int i = IndexAt(pt); i >= 0) Select(i);
+}
+
+// Left/Right pick the side, Up/Down the edge.
+bool ToastCornerControl::OnKeyDown(UINT vk) {
+    if (!focused || !enabled) return false;
+    int i = selected;
+    if (vk == VK_LEFT) i &= ~1;
+    else if (vk == VK_RIGHT) i |= 1;
+    else if (vk == VK_UP) i &= ~2;
+    else if (vk == VK_DOWN) i |= 2;
+    else return false;
+    if (i == selected) return false;
+    Select(i);
+    return true;
 }
 
 // The old dialog's shape: 400 DIP wide, sized to its text (an Auto-Tune result runs to several

@@ -514,12 +514,7 @@ bool ToastWindow::CreateSwapchainAndDComp(int width, int height) {
 }
 
 float ToastWindow::CardHeight(bool save) const {
-    ToastCard probe;
-    probe.detail = info.text.detail;
-    probe.app = app;
-    probe.details = details_;
-    const bool two_lines = (save && (details_ || !app.empty())) || !probe.ShownDetail().empty();
-    return ToastCard::Height(theme_, dpi_scale, two_lines, time_bar_ && !compact_);
+    return MakeCard(0, 0).FitHeight(theme_, dpi_scale, save);
 }
 
 // The card is ToastCard (ui/containers.h), at (0, 0) and `width` x `height`. A pending save shows
@@ -938,6 +933,18 @@ LRESULT ToastWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 }  // namespace
+
+bool ToastCardFor(const std::wstring& event, ToastCard* out) {
+    ToastInfo info{};
+    if (!LookupToastInfo(event, &info)) return false;
+    out->title = info.text.title;
+    out->detail = info.text.detail;
+    out->stat = info.text.stat;
+    out->icon = info.icon;
+    out->tone = info.tone;
+    out->brand = info.brand;
+    return true;
+}
 
 int RunToast(const std::wstring& event, std::vector<HANDLE> save_waits, HANDLE save_info) {
     ToastInfo info{};

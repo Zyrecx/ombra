@@ -380,11 +380,48 @@ public:
     // of two lines, or one with the detail line off, in the density's padding.
     static float Width(const Theme& theme, float s);
     static float Height(const Theme& theme, float s, bool details, bool time_bar);
+    // This card's height: two lines when it shows a detail line, or will (`gains_detail`: a pending
+    // save, whose result brings one), and the time bar's foot when it has one.
+    float FitHeight(const Theme& theme, float s, bool gains_detail) const;
     // Where the time bar runs, and its colour (the tone's): set `bounds` first.
     D2D1_RECT_F BarTrack(const Theme& theme, float s) const;
     D2D1_COLOR_F Hue(const Theme& theme) const;
     // The line under the headline as shown: the app first, then the detail if the line is on.
     std::wstring ShownDetail() const;
+
+private:
+    // The brand mark rasterised at one size and colour on one device: Settings' sample redraws on
+    // every hover and scroll, a toast only a few times.
+    Microsoft::WRL::ComPtr<ID2D1Bitmap>   brand_bmp_;
+    Microsoft::WRL::ComPtr<ID2D1Device>   brand_device_;
+    int      brand_px_  = 0;
+    uint32_t brand_rgb_ = 0;
+};
+
+// ui.toast_position as the toast itself (Appearance > Notifications): a screen-like stage with a
+// real ToastCard, as the staged ui.* options draw it and still at mid-hold, docked in the chosen
+// corner as the live one docks; the other three corners are outlines that pick theirs. Corner
+// index: bit 0 right, bit 1 bottom (0 top left .. 3 bottom right). Arrows move between corners.
+class ToastCornerControl : public Control {
+public:
+    ToastCard card;                    // its `trailing` follows `selected`
+    std::wstring names[4];             // read in the outlines
+    int selected = 1;
+    int hovered_index = -1;
+    std::function<void(int)> on_change;
+    D2D1_SIZE_F Measure(const LayoutConstraints& c, const LayoutContext& ctx) override;
+    void Arrange(const D2D1_RECT_F& rect, const LayoutContext& ctx) override;
+    void Draw(ID2D1DeviceContext* dc, const Theme& theme, float s) override;
+    CursorKind CursorAt(D2D1_POINT_2F pt) const override { return IndexAt(pt) >= 0 ? CursorKind::Hand : CursorKind::Arrow; }
+    bool OnMouseMove(D2D1_POINT_2F pt) override;
+    bool OnKeyDown(UINT vk) override;
+protected:
+    void Press(D2D1_POINT_2F pt) override;
+private:
+    int IndexAt(D2D1_POINT_2F pt) const;  // an outline under `pt`; -1 for none or the chosen corner
+    void Select(int i);
+    D2D1_RECT_F stage_{};
+    D2D1_RECT_F slots_[4]{};  // each corner's card, in pixels
 };
 
 // A confirm dialog over the whole overlay (ScreenHost::ShowModal): a dimmed backdrop, a card sized

@@ -2,6 +2,8 @@
 #include "ombra/brand.h"
 #include "ombra-ui/ui/disk_location.h"
 #include "ombra-ui/ui/paint.h"
+#include "ombra-ui/toast_window.h"
+#include "ombra/save_toast.h"
 #include "ombra/log.h"
 #include "ombra/config.h"
 #include "ombra/crash.h"
@@ -2125,6 +2127,52 @@ void SettingsScreen::BuildAppearanceLayoutPage() {
     groups_.push_back(std::move(sec));
 }
 
+// ui.toast_position as a saved clip's toast in its corner, drawn as the staged options draw it:
+// its look follows the host theme, which SyncUiTheme keeps on the staged ui.* values, and the clip
+// is as long as the staged replay.
+std::shared_ptr<ToastCornerControl> SettingsScreen::MakeToastCorner(const FieldSpec& spec) {
+    auto corner = std::make_shared<ToastCornerControl>();
+    corner->id = spec.key;
+    ToastCard& card = corner->card;
+    ToastCardFor(L"save_ok", &card);
+    ombra::SaveToastInfo saved;
+    saved.clips = 1;
+    if (const auto* v = EffectiveConfigValue("buffer.seconds"); v && v->type == ombra::JsonValue::Type::Number)
+        saved.seconds = static_cast<float>(v->num);
+    const ombra::ToastText text = ombra::SavedToastText(saved);
+    card.title = text.title;
+    card.detail = text.detail;
+    card.stat = text.stat;
+    auto str_of = [&](const std::string& key, const char* fallback) {
+        const auto* v = EffectiveConfigValue(key);
+        return v && v->type == ombra::JsonValue::Type::String ? v->str : std::string(fallback);
+    };
+    auto bool_of = [&](const char* key, bool fallback) {
+        const auto* v = EffectiveConfigValue(key);
+        return v && v->type == ombra::JsonValue::Type::Bool ? v->b : fallback;
+    };
+    card.compact = str_of("ui.toast_style", "card") == "compact";
+    card.details = bool_of("ui.toast_details", true);
+    card.time_bar = bool_of("ui.toast_time_bar", true);
+    card.bar_fill = 0.6f;  // a still from mid-hold, as --toasttest draws it
+
+    // Each option's corner index from its name (bit 0 right, bit 1 bottom).
+    std::vector<std::string> options(4);
+    const std::string at = str_of(spec.key, "top_right");
+    for (const auto& opt : spec.enum_options) {
+        const int i = (opt.find("right") != std::string::npos ? 1 : 0) | (opt.find("bottom") != std::string::npos ? 2 : 0);
+        options[i] = opt;
+        corner->names[i] = OptionLabelFor(spec.key, opt);
+        if (opt == at) corner->selected = i;
+    }
+    const FieldSpec s = spec;
+    corner->on_change = [this, s, options](int i) {
+        if (i >= 0 && i < 4 && !options[i].empty()) ApplySettingChange(s, ombra::JsonValue::MakeStr(options[i]));
+    };
+    controls_by_key_[spec.key] = corner;
+    return corner;
+}
+
 void SettingsScreen::BuildAppearanceNotificationsPage() {
     GroupSection sec;
     sec.name = L"Notifications";
@@ -2135,6 +2183,7 @@ void SettingsScreen::BuildAppearanceNotificationsPage() {
     card->title = L"Notifications";
     if (const FieldSpec* s = FindSpec("ui.toast_enabled")) card->actions.push_back(MakeSwitch(*s));
     if (toasts_on) {
+        if (const FieldSpec* s = FindSpec("ui.toast_position")) card->rows.push_back(MakeToastCorner(*s));
         if (const FieldSpec* s = FindSpec("ui.toast_on_save"))
             AddRow(*card, AppearanceRow(L"Clip saved", L"A popup when a save finishes.", MakeSwitch(*s)));
         if (const FieldSpec* s = FindSpec("ui.toast_on_buffer_toggle"))
@@ -2151,28 +2200,6 @@ void SettingsScreen::BuildAppearanceNotificationsPage() {
         if (const FieldSpec* s = FindSpec("ui.toast_duration"))
             AddRow(*card, AppearanceRow(L"Duration", L"How long a popup stays once it has its result.",
                                         MakeSegmented(*s, [](const std::string& v) { return Utf8ToWide(v) + L" s"; })));
-        // Its own corner picture: the Layout tab's screen only places the panel now.
-        if (const FieldSpec* spec = FindSpec("ui.toast_position")) {
-            auto corner = std::make_shared<PositionPickerControl>();
-            corner->id = spec->key;
-            const auto* v = EffectiveConfigValue(spec->key);
-            const std::string at = v && v->type == ombra::JsonValue::Type::String ? v->str : "top_right";
-            for (const auto& opt : spec->enum_options) {
-                const bool right = opt.find("right") != std::string::npos, bottom = opt.find("bottom") != std::string::npos;
-                corner->spots.push_back({right ? 0.85f : 0.15f, bottom ? 0.85f : 0.15f});
-                corner->names.push_back(OptionLabelFor(spec->key, opt));
-                if (opt == at) corner->selected = static_cast<int>(corner->spots.size()) - 1;
-            }
-            const FieldSpec s = *spec;
-            corner->on_change = [this, s](int i) {
-                if (i >= 0 && i < static_cast<int>(s.enum_options.size()))
-                    ApplySettingChange(s, ombra::JsonValue::MakeStr(s.enum_options[i]));
-            };
-            controls_by_key_[spec->key] = corner;
-            auto row = AppearanceRow(L"Corner", L"Where on the screen they appear.", corner);
-            row->align_top = true;
-            card->rows.push_back(row);
-        }
     } else {
         card->help = L"No popups. Saves and the buffer work the same; you just aren't told on screen.";
     }

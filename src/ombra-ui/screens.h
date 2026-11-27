@@ -697,6 +697,7 @@ private:
     void BuildAppearanceLookPage();
     void BuildAppearanceLayoutPage();
     void BuildAppearanceNotificationsPage();
+    std::shared_ptr<ToastCornerControl> MakeToastCorner(const FieldSpec& spec);
     std::shared_ptr<ColorPickerControl> BuildAccentPicker();
     void OpenAccentEditor(const D2D1_RECT_F& anchor, uint32_t custom);
     // ui.theme's tiles (BuildThemePicker in screens.cpp says which); a user theme's six colours

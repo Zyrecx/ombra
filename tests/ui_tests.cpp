@@ -2972,13 +2972,14 @@ TEST_CASE("ui: the cursor is a hand over controls and an arrow elsewhere") {
 
     // Scrolled: the same control is now higher on screen by the scroll amount. A short viewport,
     // since Appearance doesn't scroll at full height.
-    screen.Layout(D2D1::RectF(0, 0, 1280, 300), 1.0f);
+    screen.Layout(D2D1::RectF(0, 0, 1280, 450), 1.0f);
     const float sy = 40.0f;
     REQUIRE(screen.MaxScrollForTest() >= sy);
-    sw = screen.ControlForTest("ui.toast_on_buffer_toggle");  // lower down: still in view once scrolled
+    sw = screen.ControlForTest("ui.toast_on_save");  // lower down: still in view once scrolled
     REQUIRE(sw);
     const D2D1_RECT_F hs = sw->bounds;
     REQUIRE(hs.top - sy > 0.0f);
+    REQUIRE(hs.bottom - sy < 450.0f - 60.0f);  // above the Save bar's room
     screen.ScrollForTest(sy);
     CHECK(screen.CursorAt(D2D1::Point2F(mid(hs).x, mid(hs).y - sy)) == CursorKind::Hand);
 }
@@ -4784,8 +4785,8 @@ TEST_CASE("ui: a click on a corner of the notifications picture stages that corn
     auto corner = d.screen.ControlForTest("ui.toast_position");
     REQUIRE(corner);
     const D2D1_RECT_F b = d.OnScreen(corner->bounds);
-    const float w = b.right - b.left;
-    d.Click(D2D1::Point2F(b.left + w * 0.15f, b.top + w * 9.0f / 16.0f * 0.15f));  // the top-left spot
+    // Into the top-left outline (the default corner is top right).
+    d.Click(D2D1::Point2F(b.left + (b.right - b.left) * 0.1f, b.top + (b.bottom - b.top) * 0.2f));
     const JsonValue* staged = d.screen.StagedValueForTest("ui.toast_position");
     REQUIRE(staged);
     CHECK(staged->str == "top_left");

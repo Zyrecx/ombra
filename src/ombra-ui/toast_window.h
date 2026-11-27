@@ -16,6 +16,12 @@
 
 namespace ombra_ui {
 
+class ToastCard;
+
+// `event`'s card as the popup draws it: headline, detail, icon, tone; no geometry and no ui.*
+// options. False for an unrecognized event. Settings' sample toast is a "save_ok".
+bool ToastCardFor(const std::wstring& event, ToastCard* out);
+
 // Real entry point: creates a small, click-through, non-activating popup window near the corner of
 // the foreground app's monitor, slides/fades it in, holds, slides/fades it out, and returns once the window is
 // gone. `event` is one of "save" | "save_ok" | "save_nothing_new" | "save_failed" | "shot_failed" | "shot_elsewhere" | "buffer_on" | "buffer_off" |

@@ -1,6 +1,7 @@
 // Controls (ui/controls.h): behaviour that doesn't need a device.
 #include <doctest/doctest.h>
 
+#include "ombra-ui/ui/containers.h"
 #include "ombra-ui/ui/controls.h"
 
 #include <windows.h>
@@ -103,17 +104,21 @@ TEST_CASE("colour and position pickers: hit tests follow density and DPI") {
             cp.OnMouseMove(D2D1::Point2F(custom_x + z.control_xs() * s, cy));  // the hex text
             CHECK(cp.hovered_index == -1);
 
-            PositionPickerControl pp;
-            pp.spots = {{0.18f, 0.14f}, {0.82f, 0.14f}, {0.18f, 0.86f}, {0.82f, 0.86f}};
-            const D2D1_SIZE_F pm = pp.Measure(LayoutConstraints{}, ctx);
-            pp.Arrange(D2D1::RectF(10, 10, 10 + pm.width, 10 + pm.height), ctx);
-            const float mw = pm.width, mh = pm.width * 9 / 16;
+            // The toast's corner: each other corner's outline hovers, the chosen one and the middle don't.
+            ToastCornerControl tc;
+            tc.selected = 3;
+            const D2D1_SIZE_F tm = tc.Measure(LayoutConstraints::Available(700 * s), ctx);
+            tc.Arrange(D2D1::RectF(10, 10, 10 + tm.width, 10 + tm.height), ctx);
+            const float pad = t.size.card_padding() * s, mid_y = 10 + tm.height / 2;
+            const float near_x = 10 + pad + 20 * s, far_x = 10 + tm.width - pad - 20 * s;
+            const float top_y = 10 + t.size.space_md() * s * 2 + 4 * s, low_y = 10 + tm.height - t.size.space_md() * s * 2 - 4 * s;
+            const D2D1_POINT_2F corners[4] = {{near_x, top_y}, {far_x, top_y}, {near_x, low_y}, {far_x, low_y}};
             for (int i = 0; i < 4; ++i) {
-                pp.OnMouseMove(D2D1::Point2F(10 + mw * pp.spots[i].fx, 10 + mh * pp.spots[i].fy));
-                CHECK(pp.hovered_index == i);
+                tc.OnMouseMove(corners[i]);
+                CHECK(tc.hovered_index == (i == 3 ? -1 : i));
             }
-            pp.OnMouseMove(D2D1::Point2F(10 + mw / 2, 10 + mh / 2));  // the middle of the screen
-            CHECK(pp.hovered_index == -1);
+            tc.OnMouseMove(D2D1::Point2F(10 + tm.width / 2, mid_y));
+            CHECK(tc.hovered_index == -1);
         }
     }
 }

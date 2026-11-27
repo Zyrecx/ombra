@@ -119,7 +119,6 @@ struct Sizes {
     float card_padding() const { return S(16); }
     float switch_w() const { return S(36); }
     float switch_h() const { return S(20); }
-    float miniature_h() const { return S(72); }  // position picker's 16:9 screen
     float row_text_min() const { return S(160); }  // a row narrower than this for its text wraps its control under it
     // Glyphs sit with the text, so like type they ignore density: icon box (also the caret's
     // height) and drawn marks (chevron, +/-). Stroke weights (1, 1.5, 2 DIP) stay literal.

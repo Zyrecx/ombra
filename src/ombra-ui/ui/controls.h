@@ -631,29 +631,11 @@ private:
     const Theme* theme_ = nullptr;  // for Layout during input; set by Place and Draw
 };
 
-// Position on screen (toast corner, panel edge): a miniature screen with selectable spots.
-class PositionPickerControl : public Control {
-public:
-    struct Spot { float fx, fy; };   // 0..1 within the miniature
-    std::vector<Spot> spots;
-    std::vector<std::wstring> names; // read under the miniature
-    int selected = 0;
-    int hovered_index = -1;
-    std::function<void(int)> on_change;
-    D2D1_SIZE_F Measure(const LayoutConstraints& c, const LayoutContext& ctx) override;
-    void Draw(ID2D1DeviceContext* dc, const Theme& theme, float s) override;
-    bool OnMouseMove(D2D1_POINT_2F pt) override;
-protected:
-    void Press(D2D1_POINT_2F pt) override;
-private:
-    int IndexAt(D2D1_POINT_2F pt) const;
-};
-
 // ui.panel_position as a picture (Appearance > Layout): a small screen with the overlay panel where
 // it would sit, fused to the edge when `attached`, every other slot a dashed outline so it reads as
 // a choice. Five click zones: the middle and a band along each edge, each option's own text picking
-// its zone. Ported from the old ScreenPositionPickerWidget (same geometry), minus its toast corners:
-// Notifications has its own PositionPickerControl.
+// its zone. Ported from the old ScreenPositionPickerWidget (same geometry), minus its toast corners
+// (Notifications places its toast with ToastCornerControl).
 class PanelPositionControl : public Control {
 public:
     std::vector<std::wstring> options;  // "center", "top", "bottom", "left", "right"
