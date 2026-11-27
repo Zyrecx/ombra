@@ -68,7 +68,8 @@ struct ScreenshotContext {
     std::wstring    pending_path;
     std::wstring    pending_fallback_path;  // empty: an explicit path, which doesn't fall back
     std::wstring    fallback_root;          // FallbackClipsDir, set before the worker's first job
-    // The worker's only way to tell the user: L"shot_failed" or L"shot_elsewhere". Set before it starts.
+    // The worker's only way to tell the user: L"shot_saved", L"shot_failed" or L"shot_elsewhere"
+    // (the callee gates them by toast row). Set before it starts.
     std::function<void(const wchar_t*)> notify;
     std::atomic<bool> requested{false};
     std::atomic<int>  shot_count{0};

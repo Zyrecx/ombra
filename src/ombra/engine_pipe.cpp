@@ -340,8 +340,7 @@ void ScreenshotWorkerLoop(ScreenshotContext* ctx) {
         if (!ok) Log::Error("screenshot: could not write \"%ls\"", path.c_str());
         std::printf("\n  screenshot     %s\n", ok ? "ok" : "FAILED — could not write PNG");
         std::wprintf(L"  output         %s\n\n", path.c_str());
-        if (!ok) notify(L"shot_failed");
-        else if (path != wanted) notify(L"shot_elsewhere");
+        notify(!ok ? L"shot_failed" : path != wanted ? L"shot_elsewhere" : L"shot_saved");
     }
 }
 
@@ -1395,7 +1394,8 @@ JsonValue PipeRequest::OnGetStatus() {
 }
 
 JsonValue PipeRequest::OnSaveNow() {
-    const StartSaveFeedback feedback = cfg.ui_toast_enabled && cfg.ui_toast_on_save ? save_feedback : StartSaveFeedback{};
+    // The toast follows its rows, read as the save starts (engine.cpp ReplayFeedback).
+    const StartSaveFeedback feedback = save_feedback;
     config_lock.unlock();
     const std::vector<SaveContext*> contexts = Contexts();
     // Wait only on this pipe worker. Hotkeys dispatch the same operation without waiting.

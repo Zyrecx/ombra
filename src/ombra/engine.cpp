@@ -40,6 +40,7 @@
 #include "ombra/clip.h"
 #include "ombra/save.h"
 #include "ombra/save_toast.h"
+#include "ombra/toast_events.h"
 #include "ombra/util.h"
 #include "ombra/telemetry.h"
 #include "ombra/update.h"
@@ -451,13 +452,36 @@ void SpawnAppToast(const wchar_t* event, const std::wstring& app, double seconds
     CloseHandle(info);  // the toast holds its own inherited handle
 }
 
+// A save whose pending toast wasn't shown: the problem it ended in, if any (toast_events.h rows).
+const wchar_t* SaveProblemToast(const ReplaySaveResults& r) {
+    if (r.outcome == SaveOutcome::kFailed) return L"save_failed";
+    if (r.outcome != SaveOutcome::kSaved) return nullptr;
+    for (const auto& m : r.monitors)
+        if (m.fell_back) return L"save_elsewhere";
+    return nullptr;
+}
+
 // Both entry points use the same ring claims, timestamp, grouping and completion result.
-// `app`: the API app asking (its hello name), empty for the user's own save.
-StartSaveFeedback ReplayFeedback(bool enabled, std::wstring app = {}) {
-    if (!enabled) return {};
-    return [app = std::move(app)]() -> SaveFeedback {
-        auto toast = SpawnSaveToast(app);
-        return [toast](const ReplaySaveResults& r) { if (toast) toast->Resolve(r); };
+// `app`: the API app asking (its hello name), empty for the user's own save. Read as each save
+// starts: Clip saved on spawns the pending toast at the press (it then says how the save ended,
+// a failure too, since it is already on screen); off, nothing shows unless the save ends in a
+// problem and Problems is on.
+StartSaveFeedback ReplayFeedback(const Config& cfg, std::wstring app = {}) {
+    return [&cfg, app = std::move(app)]() -> SaveFeedback {
+        const auto [clip, problems] = ReadLiveConfig(cfg, [](const Config& c) {
+            return std::pair(ToastPopupOn(c, ToastRow::kClipSaved), ToastPopupOn(c, ToastRow::kProblems));
+        });
+        if (clip) {
+            auto toast = SpawnSaveToast(app);
+            return [toast](const ReplaySaveResults& r) { if (toast) toast->Resolve(r); };
+        }
+        if (!problems) return {};
+        return [app](const ReplaySaveResults& r) {
+            if (const wchar_t* event = SaveProblemToast(r)) {
+                if (app.empty()) SpawnToast(event);
+                else SpawnAppToast(event, app);
+            }
+        };
     };
 }
 
@@ -509,7 +533,7 @@ int RunExport(const Config& cfg, int argc, wchar_t** argv) {
     }
     const auto toast_if_unseen = [&](const wchar_t* event) {
         if (!overlay || WaitForSingleObject(overlay, 0) != WAIT_OBJECT_0) return;  // open: it shows the result
-        if (!cfg.ui_toast_enabled || !cfg.ui_toast_on_save) return;
+        if (!ToastPopupOn(cfg, event)) return;
         Log::Info("export: overlay closed, toast %ls", event);
         SpawnToast(event);
     };
@@ -771,13 +795,16 @@ int RunEngine(int argc, wchar_t** argv) {
         };
         return feedback;
     };
-    // The user's own recording follows the toast setting, as the user's saves do.
+    // The user's own recording follows its toast rows (toast_events.h), as the user's saves do.
     pipe_api.user_record_feedback = [&cfg] {
-        const auto toasts = [&cfg] { return ReadLiveConfig(cfg, [](const Config& c) { return c.ui_toast_enabled; }); };
+        const auto wanted = [&cfg](const wchar_t* event) {
+            return ReadLiveConfig(cfg, [event](const Config& c) { return ToastPopupOn(c, event); });
+        };
         RecordFeedback feedback;
-        feedback.started = [toasts] { if (toasts()) SpawnAppToast(L"record_started", {}); };
-        feedback.ended   = [toasts](const RecordingResults& r) {
-            if (toasts()) SpawnAppToast(RecordEndToast(r), {}, r.Seconds());
+        feedback.started = [wanted] { if (wanted(L"record_started")) SpawnAppToast(L"record_started", {}); };
+        feedback.ended   = [wanted](const RecordingResults& r) {
+            const wchar_t* event = RecordEndToast(r);
+            if (wanted(event)) SpawnAppToast(event, {}, r.Seconds());
         };
         return feedback;
     };
@@ -812,7 +839,8 @@ int RunEngine(int argc, wchar_t** argv) {
                         private_fields.Set("paths", std::move(paths));
                     });
                 }
-                if (!recovered.empty() && ReadLiveConfig(cfg, [](const Config& c) { return c.ui_toast_enabled; }))
+                if (!recovered.empty() &&
+                    ReadLiveConfig(cfg, [](const Config& c) { return ToastPopupOn(c, ToastRow::kRecording); }))
                     SpawnAppToast(L"record_recovered", WideFromUtf8(app), seconds, static_cast<uint32_t>(recovered.size()));
             });
         }
@@ -1104,7 +1132,7 @@ int RunEngine(int argc, wchar_t** argv) {
     ScreenshotContext screenshot_ctx;
     screenshot_ctx.fallback_root = FallbackClipsDir();
     screenshot_ctx.notify = [&cfg](const wchar_t* event) {
-        if (ReadLiveConfig(cfg, [](const Config& c) { return c.ui_toast_enabled; })) SpawnToast(event);
+        if (ReadLiveConfig(cfg, [event](const Config& c) { return ToastPopupOn(c, event); })) SpawnToast(event);
     };
     screenshot_ctx.worker = std::thread([&screenshot_ctx] {
         Log::SetThreadName("screenshot");
@@ -1158,10 +1186,14 @@ int RunEngine(int argc, wchar_t** argv) {
     for (auto& mp : pipelines) audio_gate->supervisors.push_back(mp->supervisor.get());
     for (auto& mp : pipelines) {
         if (resident) {
-            mp->supervisor->SetEncoderFallbackCallback([](const std::string& code) {
-                SpawnToast(code == IVideoEncoder::kFaultDriverTooOld ? L"cpu_encoder_old_driver" : L"cpu_encoder");
+            const auto problem = [&cfg](const wchar_t* event) {
+                if (ReadLiveConfig(cfg, [](const Config& c) { return ToastPopupOn(c, ToastRow::kProblems); }))
+                    SpawnToast(event);
+            };
+            mp->supervisor->SetEncoderFallbackCallback([problem](const std::string& code) {
+                problem(code == IVideoEncoder::kFaultDriverTooOld ? L"cpu_encoder_old_driver" : L"cpu_encoder");
             });
-            mp->supervisor->SetRingStorageLostCallback([] { SpawnToast(L"buffer_storage_lost"); });
+            mp->supervisor->SetRingStorageLostCallback([problem] { problem(L"buffer_storage_lost"); });
         }
         mp->supervisor->SetRingReleaseCallbacks(
             [audio_gate] {
@@ -1532,7 +1564,7 @@ int RunEngine(int argc, wchar_t** argv) {
             return HandlePipeRequest(req, cfg, supervisor, controller, save_ctx, gpu_summary,
                                       tray.get(), &screenshot_ctx, &autotune_ctx, &pipelines,
                                       &raw_config, &memory_layout, &audio_control,
-                                      ReplayFeedback(true, caller ? WideFromUtf8(caller->app) : std::wstring{}),
+                                      ReplayFeedback(cfg, caller ? WideFromUtf8(caller->app) : std::wstring{}),
                                       surface, &pipe_api, caller);
         };
         pipe_server = std::make_unique<PipeServer>(
@@ -1576,15 +1608,14 @@ int RunEngine(int argc, wchar_t** argv) {
 
     // Shared by the hotkeys and the tray menu.
     const auto save_clip = [&] {
-        const bool toast = ReadLiveConfig(cfg, [](const Config& c) { return c.ui_toast_enabled && c.ui_toast_on_save; });
-        SaveReplay(all_save_ctxs, ReplayFeedback(toast));
+        SaveReplay(all_save_ctxs, ReplayFeedback(cfg));
     };
     const auto toggle_replay = [&] {
         // The Instant Replay switch, not the pipelines' armed state: while waiting for a game the
         // pipelines are disarmed but the switch is on, and this must turn it off.
         const bool next_armed = controller.ToggleUserEnabled();
         if (tray) tray->SetTooltip(TrayTooltip(next_armed));
-        if (ReadLiveConfig(cfg, [](const Config& c) { return c.ui_toast_enabled && c.ui_toast_on_buffer_toggle; })) {
+        if (ReadLiveConfig(cfg, [](const Config& c) { return ToastPopupOn(c, ToastRow::kBuffer); })) {
             SpawnToast(next_armed ? L"buffer_on" : L"buffer_off");
         }
     };

@@ -22,11 +22,12 @@ class ToastCard;
 // options. False for an unrecognized event. Settings' sample toast is a "save_ok".
 bool ToastCardFor(const std::wstring& event, ToastCard* out);
 
+// Every event the popup knows, for the test that each sits on a Settings row (ombra/toast_events.h).
+std::vector<std::wstring> ToastEventNames();
+
 // Real entry point: creates a small, click-through, non-activating popup window near the corner of
 // the foreground app's monitor, slides/fades it in, holds, slides/fades it out, and returns once the window is
-// gone. `event` is one of "save" | "save_ok" | "save_nothing_new" | "save_failed" | "shot_failed" | "shot_elsewhere" | "buffer_on" | "buffer_off" |
-// "record_started" | "record_saved" | "record_nothing" | "record_disk_low" | "record_write_failed" | "record_failed";
-// an unrecognized event logs and returns 1 without creating any window. "save" is spawned at the
+// gone. `event` is one of ToastEventNames(); an unrecognized event logs and returns 1 without creating any window. "save" is spawned at the
 // hotkey press with `save_waits` = inherited {ok, nothing_new, failed, engine process, elsewhere}
 // handles: it shows "Saving clip…" until one is signalled, then the matching result. `save_info`
 // maps the clip count and length (save_toast.h) for "Saved last 30 s".

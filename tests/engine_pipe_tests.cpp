@@ -119,7 +119,7 @@ std::vector<std::wstring> ScreenshotToasts(const std::wstring& path, const std::
 
 }  // namespace
 
-TEST_CASE("screenshot worker: a failure or a fallback reaches the user, a plain success doesn't") {
+TEST_CASE("screenshot worker: a success, a failure and a fallback each tell the user (the callee gates them)") {
     const std::vector<uint8_t> pixels(16, 0x80);
     const std::wstring blocker = TestOutputPath(L"shot_blocker");
     std::ofstream(blocker) << "a file, not a folder";
@@ -129,7 +129,7 @@ TEST_CASE("screenshot worker: a failure or a fallback reaches the user, a plain 
     DeleteFileW(good.c_str());
     DeleteFileW(other.c_str());
 
-    CHECK(ScreenshotToasts(good, other, pixels).empty());
+    CHECK(ScreenshotToasts(good, other, pixels) == std::vector<std::wstring>{L"shot_saved"});
     CHECK(GetFileAttributesW(good.c_str()) != INVALID_FILE_ATTRIBUTES);
 
     CHECK(ScreenshotToasts(dead, other, pixels) == std::vector<std::wstring>{L"shot_elsewhere"});

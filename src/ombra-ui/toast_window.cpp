@@ -96,18 +96,19 @@ struct ToastInfo {
 // event string (engine.cpp's SpawnToast argv) -> {icon, headline and detail, tone}. The headline
 // says what happened; the detail line why, or what follows. Returns false for an unrecognized
 // event: log and return 1, no window.
-bool LookupToastInfo(const std::wstring& event, ToastInfo* out) {
-    struct Entry {
-        const wchar_t* event;
-        IconType       icon;
-        const wchar_t* title;
-        const wchar_t* detail;
-        ToastTone      tone;
-        bool           brand;
-    };
+struct ToastEntry {
+    const wchar_t* event;
+    IconType       icon;
+    const wchar_t* title;
+    const wchar_t* detail;
+    ToastTone      tone;
+    bool           brand;
+};
+// Every event, each on one Settings row (ombra/toast_events.h kToastEventRows; a ui test checks both).
+const ToastEntry* ToastEntries(size_t* count) {
     using I = IconType;
     using T = ToastTone;
-    static const Entry kEntries[] = {
+    static const ToastEntry kEntries[] = {
         {L"save", I::None, L"Saving clip…", L"", T::Neutral, true},
         // Gains its length and game once the engine says (save_toast.h SavedToastText).
         {L"save_ok", I::None, L"Clip saved", L"", T::Success, true},
@@ -120,7 +121,8 @@ bool LookupToastInfo(const std::wstring& event, ToastInfo* out) {
         {L"trim_replaced", I::None, L"Trim saved", L"Replaced the original", T::Success, true},
         {L"trim_kept", I::Alert, L"Trim saved", L"Original kept", T::Warning, false},
         {L"trim_failed", I::Alert, L"Trim not saved", L"See the log", T::Danger, false},
-        // A screenshot's failure, and its fallback (ScreenshotWorkerLoop). A plain success shows nothing.
+        // A screenshot saved, failed, or written to the fallback folder (ScreenshotWorkerLoop).
+        {L"shot_saved", I::Camera, L"Screenshot saved", L"", T::Success, false},
         {L"shot_failed", I::Alert, L"Screenshot not saved", L"See the log", T::Danger, false},
         {L"shot_elsewhere", I::Alert, L"Screenshot saved to Videos\\" OMBRA_PRODUCT_NAME, L"Output folder unavailable", T::Warning, false},
         // The buffer's file became unusable (Ring::TakeStorageLost).
@@ -140,7 +142,15 @@ bool LookupToastInfo(const std::wstring& event, ToastInfo* out) {
         {L"cpu_encoder", I::Alert, L"Recording on the CPU", L"The GPU encoder failed", T::Warning, false},
         {L"cpu_encoder_old_driver", I::Alert, L"Recording on the CPU", L"NVIDIA driver too old", T::Warning, false},
     };
-    for (const Entry& e : kEntries) {
+    *count = std::size(kEntries);
+    return kEntries;
+}
+
+bool LookupToastInfo(const std::wstring& event, ToastInfo* out) {
+    size_t n = 0;
+    const ToastEntry* entries = ToastEntries(&n);
+    for (size_t i = 0; i < n; ++i) {
+        const ToastEntry& e = entries[i];
         if (event != e.event) continue;
         *out = {e.icon, {e.title, e.detail, {}}, e.tone, e.brand};
         return true;
@@ -933,6 +943,14 @@ LRESULT ToastWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 }  // namespace
+
+std::vector<std::wstring> ToastEventNames() {
+    size_t n = 0;
+    const ToastEntry* entries = ToastEntries(&n);
+    std::vector<std::wstring> names;
+    for (size_t i = 0; i < n; ++i) names.emplace_back(entries[i].event);
+    return names;
+}
 
 bool ToastCardFor(const std::wstring& event, ToastCard* out) {
     ToastInfo info{};

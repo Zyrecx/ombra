@@ -83,6 +83,43 @@ private:
     Microsoft::WRL::ComPtr<ID2D1Bitmap1> icon_bitmap_;  // `icon` on this device, built on the first Draw
 };
 
+// A table of switches in a card (Notifications' events x Popup/Sound): a line above, a caption
+// header naming the first column and each switch column, then one row per item (glyph, title,
+// help) with a switch per column, each centred under its column's name. The text column takes
+// what the switch columns leave; help wraps. Put it in a CardContainer as a row.
+class SwitchTable : public Widget {
+public:
+    struct Row {
+        IconType glyph = IconType::None;
+        std::wstring title, help;
+        std::vector<std::shared_ptr<SwitchControl>> cells;  // one per column; null: an empty cell
+    };
+    std::wstring first_column;          // over the text column
+    std::vector<std::wstring> columns;  // over the switches, left to right
+    std::vector<Row> rows;
+
+    D2D1_SIZE_F Measure(const LayoutConstraints& c, const LayoutContext& ctx) override;
+    void Arrange(const D2D1_RECT_F& rect, const LayoutContext& ctx) override;
+    void Draw(ID2D1DeviceContext* dc, const Theme& theme, float s) override;
+    CursorKind CursorAt(D2D1_POINT_2F pt) const override;
+    bool OnMouseMove(D2D1_POINT_2F pt) override;
+    bool OnMouseDown(D2D1_POINT_2F pt) override;
+    bool OnMouseUp(D2D1_POINT_2F pt) override;
+    bool OnKeyDown(UINT vk) override;
+    bool QueryTooltip(std::wstring* text, D2D1_POINT_2F* anchor) const override;
+
+private:
+    // Pixels for a table `w` wide: the column width, the text column, the header and each row.
+    struct Geometry {
+        float col_w = 0, text_x = 0, text_w = 0, header_h = 0;
+        std::vector<float> row_h, help_h;
+        float height = 0;
+    };
+    Geometry Layout(float w, const LayoutContext& ctx) const;
+    Geometry g_;
+    std::vector<std::shared_ptr<Widget>> cells_;  // every switch, for routing; refreshed by Arrange
+};
+
 // A titled group of rows: one card, a line between rows.
 // `actions` sit at the trailing end of the title line (a list's Add/Edit), right to left order kept.
 class CardContainer : public Widget {

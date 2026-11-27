@@ -265,8 +265,17 @@ const FieldFormEntry kFieldForms[] = {
     { "ui.screen_frame_radius",    FieldForm::Custom },
     { "ui.screen_frame_thickness", FieldForm::Custom },
     { "ui.screen_frame_color",     FieldForm::Custom },
+    // The per-event table (ToastEventTable): one Popup and one Sound column.
     { "ui.toast_on_save",          FieldForm::Custom },
+    { "ui.toast_on_record",        FieldForm::Custom },
+    { "ui.toast_on_screenshot",    FieldForm::Custom },
     { "ui.toast_on_buffer_toggle", FieldForm::Custom },
+    { "ui.toast_on_problem",       FieldForm::Custom },
+    { "ui.toast_sound_on_save",          FieldForm::Custom },
+    { "ui.toast_sound_on_record",        FieldForm::Custom },
+    { "ui.toast_sound_on_screenshot",    FieldForm::Custom },
+    { "ui.toast_sound_on_buffer_toggle", FieldForm::Custom },
+    { "ui.toast_sound_on_problem",       FieldForm::Custom },
     { "ui.toast_position",         FieldForm::Custom },     // a corner is spatial: a 2x2 picture
     { "ui.toast_style",            FieldForm::Custom },
     { "ui.toast_details",          FieldForm::Custom },
@@ -2173,6 +2182,40 @@ std::shared_ptr<ToastCornerControl> SettingsScreen::MakeToastCorner(const FieldS
     return corner;
 }
 
+// One row per toast row (ombra/toast_events.h), a Popup and a Sound switch each. Sound shows once
+// its keys are implemented. An app's clips and recordings always pop up; its save_now follows Clip
+// saved like the user's saves.
+std::shared_ptr<Widget> SettingsScreen::MakeToastEventTable() {
+    struct Event { IconType glyph; const wchar_t* title; const wchar_t* help; const char* popup; const char* sound; };
+    static const Event kEvents[] = {
+        {IconType::Film, L"Clip saved", L"Saves and trims, and \"Nothing new to save\".", "ui.toast_on_save", "ui.toast_sound_on_save"},
+        {IconType::Record, L"Recording", L"Started, saved, recovered after a crash.", "ui.toast_on_record",
+         "ui.toast_sound_on_record"},
+        {IconType::Camera, L"Screenshots", L"Each one saved.", "ui.toast_on_screenshot", "ui.toast_sound_on_screenshot"},
+        {IconType::Replay, L"Buffer on/off", L"The replay buffer turning on or off.", "ui.toast_on_buffer_toggle",
+         "ui.toast_sound_on_buffer_toggle"},
+        {IconType::Alert, L"Problems", L"A failed save, a full disk, recording on the CPU.", "ui.toast_on_problem",
+         "ui.toast_sound_on_problem"},
+    };
+    bool sounds = false;
+    for (const Event& e : kEvents) sounds |= FindSpec(e.sound) != nullptr;
+    auto table = std::make_shared<SwitchTable>();
+    table->first_column = L"Event";
+    table->columns = {L"Popup"};
+    if (sounds) table->columns.push_back(L"Sound");
+    for (const Event& e : kEvents) {
+        SwitchTable::Row row{e.glyph, e.title, e.help, {}};
+        const FieldSpec* popup = FindSpec(e.popup);
+        row.cells.push_back(popup ? MakeSwitch(*popup) : nullptr);
+        if (sounds) {
+            const FieldSpec* sound = FindSpec(e.sound);
+            row.cells.push_back(sound ? MakeSwitch(*sound) : nullptr);
+        }
+        table->rows.push_back(std::move(row));
+    }
+    return table;
+}
+
 void SettingsScreen::BuildAppearanceNotificationsPage() {
     GroupSection sec;
     sec.name = L"Notifications";
@@ -2184,10 +2227,6 @@ void SettingsScreen::BuildAppearanceNotificationsPage() {
     if (const FieldSpec* s = FindSpec("ui.toast_enabled")) card->actions.push_back(MakeSwitch(*s));
     if (toasts_on) {
         if (const FieldSpec* s = FindSpec("ui.toast_position")) card->rows.push_back(MakeToastCorner(*s));
-        if (const FieldSpec* s = FindSpec("ui.toast_on_save"))
-            AddRow(*card, AppearanceRow(L"Clip saved", L"A popup when a save finishes.", MakeSwitch(*s)));
-        if (const FieldSpec* s = FindSpec("ui.toast_on_buffer_toggle"))
-            AddRow(*card, AppearanceRow(L"Buffer on/off", L"A popup when the replay buffer turns on or off.", MakeSwitch(*s)));
         if (const FieldSpec* s = FindSpec("ui.toast_style"))
             AddRow(*card, AppearanceRow(L"Style", L"A card, or a pill as wide as its text.",
                                         MakeSegmented(*s, [k = s->key](const std::string& v) { return OptionLabelFor(k, v); })));
@@ -2200,6 +2239,7 @@ void SettingsScreen::BuildAppearanceNotificationsPage() {
         if (const FieldSpec* s = FindSpec("ui.toast_duration"))
             AddRow(*card, AppearanceRow(L"Duration", L"How long a popup stays once it has its result.",
                                         MakeSegmented(*s, [](const std::string& v) { return Utf8ToWide(v) + L" s"; })));
+        card->rows.push_back(MakeToastEventTable());
     } else {
         card->help = L"No popups. Saves and the buffer work the same; you just aren't told on screen.";
     }

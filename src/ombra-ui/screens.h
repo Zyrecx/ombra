@@ -736,6 +736,7 @@ private:
     std::shared_ptr<SelectControl> MakeSelect(const FieldSpec& spec, const ChoiceLabel& label);
     std::shared_ptr<SegmentedControl> MakeSegmented(const FieldSpec& spec, const ChoiceLabel& label);
     std::shared_ptr<SwitchControl> MakeSwitch(const FieldSpec& spec);
+    std::shared_ptr<Widget> MakeToastEventTable();  // Notifications: Popup/Sound per event
     void ConfirmAutotune(const FieldSpec& spec);  // engine.autotune: a modal, then the run
     void BuildOutputPage();
     void BuildAdvancedEncoderPage();

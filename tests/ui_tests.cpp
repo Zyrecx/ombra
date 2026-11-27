@@ -15,6 +15,7 @@
 #include "ombra-ui/overlay_window.h"
 #include "ombra-ui/screens.h"
 #include "ombra-ui/setup_screen.h"
+#include "ombra-ui/toast_window.h"
 #include "ombra-ui/pipe_client.h"
 #include "ombra-ui/ui/attached_panel.h"
 #include "ombra-ui/ui/disk_location.h"
@@ -28,6 +29,7 @@
 #include "ombra/json.h"
 #include "ombra/paths.h"
 #include "ombra/screenshot.h"
+#include "ombra/toast_events.h"
 #include "ombra/util.h"
 
 #include <d2d1_1.h>
@@ -2767,7 +2769,12 @@ TEST_CASE("ui: Appearance shows a setting's dependents only while they apply") {
 
     screen.SetActiveSubTab(kNotifications);
     screen.Layout(D2D1::RectF(0, 0, 1280, 800), 1.0f);
-    CHECK(screen.ControlForTest("ui.toast_on_save"));
+    for (const char* key : {"ui.toast_on_save", "ui.toast_on_record", "ui.toast_on_screenshot", "ui.toast_on_buffer_toggle",
+                            "ui.toast_on_problem"}) {
+        CAPTURE(key);
+        CHECK(screen.ControlForTest(key));  // the event table's Popup column
+    }
+    CHECK_FALSE(screen.ControlForTest("ui.toast_sound_on_save"));  // no Sound column until sounds play
     CHECK(screen.ControlForTest("ui.toast_position"));       // its own corner picture
     CHECK(screen.ControlForTest("ui.toast_style"));
     screen.ApplySettingChangeForTest("ui.toast_enabled", JsonValue::MakeBool(false));
@@ -2775,6 +2782,36 @@ TEST_CASE("ui: Appearance shows a setting's dependents only while they apply") {
     CHECK_FALSE(screen.ControlForTest("ui.toast_on_save"));
     CHECK_FALSE(screen.ControlForTest("ui.toast_position"));
     CHECK_FALSE(screen.ControlForTest("ui.toast_style"));
+}
+
+TEST_CASE("ui: every toast event sits on exactly one Notifications row, and the row gates it") {
+    using ombra::ToastRow;
+    std::set<std::wstring> known;
+    for (const std::wstring& e : ombra_ui::ToastEventNames()) {
+        CAPTURE(ombra::NarrowUtf8(e));
+        CHECK(known.insert(e).second);
+        bool listed = false;
+        for (const auto& r : ombra::kToastEventRows) listed |= r.event == e;
+        CHECK(listed);  // else it would fall to Problems unasked
+    }
+    for (const auto& r : ombra::kToastEventRows) {
+        CAPTURE(ombra::NarrowUtf8(std::wstring(r.event)));
+        CHECK(known.count(std::wstring(r.event)) == 1);  // no row for an event the popup doesn't know
+    }
+    CHECK(ombra::ToastRowFor(L"save_failed") == ToastRow::kProblems);  // Clip saved off still shows a failure
+    CHECK(ombra::ToastRowFor(L"save_nothing_new") == ToastRow::kClipSaved);
+    CHECK(ombra::ToastRowFor(L"not_an_event") == ToastRow::kProblems);
+
+    ombra::Config c;
+    CHECK(ombra::ToastPopupOn(c, L"shot_saved"));
+    c.ui_toast_on_save = false;
+    CHECK_FALSE(ombra::ToastPopupOn(c, L"save_ok"));
+    CHECK(ombra::ToastPopupOn(c, L"save_failed"));
+    c.ui_toast_on_problem = false;
+    CHECK_FALSE(ombra::ToastPopupOn(c, L"cpu_encoder"));
+    CHECK(ombra::ToastPopupOn(c, L"buffer_on"));
+    c.ui_toast_enabled = false;  // the master switch silences every row
+    CHECK_FALSE(ombra::ToastPopupOn(c, L"buffer_on"));
 }
 
 // No scroll: each tab fits the narrowest Settings row with every dependent shown and an
@@ -2975,7 +3012,7 @@ TEST_CASE("ui: the cursor is a hand over controls and an arrow elsewhere") {
     screen.Layout(D2D1::RectF(0, 0, 1280, 450), 1.0f);
     const float sy = 40.0f;
     REQUIRE(screen.MaxScrollForTest() >= sy);
-    sw = screen.ControlForTest("ui.toast_on_save");  // lower down: still in view once scrolled
+    sw = screen.ControlForTest("ui.toast_style");  // lower down: still in view once scrolled
     REQUIRE(sw);
     const D2D1_RECT_F hs = sw->bounds;
     REQUIRE(hs.top - sy > 0.0f);
@@ -3199,6 +3236,9 @@ TEST_CASE("ui: every Custom setting has a control on some Settings page") {
             }
             if (auto r = std::dynamic_pointer_cast<SettingRow>(w)) for (const auto& k : r->controls) walk(k, out);
             if (auto d = std::dynamic_pointer_cast<LevelDetail>(w)) walk(d->tiles, out);
+            if (auto t = std::dynamic_pointer_cast<SwitchTable>(w))
+                for (const auto& row : t->rows)
+                    for (const auto& cell : row.cells) walk(cell, out);
         };
     std::set<std::string> drawn;
     for (int rail = 0; rail < kRailCount; ++rail) {

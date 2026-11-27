@@ -607,11 +607,121 @@ void DropSlot::Draw(ID2D1DeviceContext* dc, const Theme& t, float s) {
     p.Text(label, TypeRole::Body, bounds, active ? c.accent_text : c.text2, {TextAlign::Center});
 }
 
+// --- Switch table -------------------------------------------------------------------------------
+
+SwitchTable::Geometry SwitchTable::Layout(float w, const LayoutContext& ctx) const {
+    const Sizes z = ctx.theme ? ctx.theme->size : Sizes{};
+    const float s = ctx.dpi_scale, pad_x = z.card_padding() * s, pad_y = z.space_md() * s;
+    Geometry g;
+    // Every column as wide as the widest of its name and a switch, so the switches line up.
+    g.col_w = z.switch_w() * s;
+    if (ctx.theme)
+        for (const auto& name : columns)
+            g.col_w = (std::max)(g.col_w, std::ceil(ctx.theme->MeasureText(ctx.theme->Font(TypeRole::Caption), name).width));
+    const float cols_w = columns.empty() ? 0.0f : columns.size() * g.col_w + (columns.size() - 1) * z.space_lg() * s;
+    bool glyphs = false;
+    for (const Row& r : rows) glyphs |= r.glyph != IconType::None;
+    g.text_x = pad_x + (glyphs ? (z.icon() + z.space_md()) * s : 0.0f);
+    g.text_w = (std::max)(0.0f, w - g.text_x - pad_x - cols_w - z.space_xl() * s);
+    g.header_h = LineHeight(TypeRole::Caption) * s + 2 * z.space_sm() * s;
+    g.height = g.header_h;
+    for (const Row& r : rows) {
+        const float help_h = HelpHeight(r.help, g.text_w, ctx);
+        const float text_h = LineHeight(TypeRole::Body) * s + (help_h > 0 ? z.space_xxs() * s + help_h : 0.0f);
+        const float h = (std::max)(2 * pad_y + (std::max)(text_h, z.switch_h() * s), (z.control_sm() + 2 * z.space_md()) * s);
+        g.help_h.push_back(help_h);
+        g.row_h.push_back(h);
+        g.height += h;
+    }
+    return g;
+}
+
+D2D1_SIZE_F SwitchTable::Measure(const LayoutConstraints& c, const LayoutContext& ctx) {
+    const float w = c.BoundedWidth() ? c.max_w : 600 * ctx.dpi_scale;
+    return D2D1::SizeF(w, Layout(w, ctx).height);
+}
+
+void SwitchTable::Arrange(const D2D1_RECT_F& rect, const LayoutContext& ctx) {
+    bounds = rect;
+    g_ = Layout(rect.right - rect.left, ctx);
+    cells_.clear();
+    for (const Row& r : rows)
+        for (const auto& cell : r.cells)
+            if (cell) cells_.push_back(cell);
+    const Sizes z = ctx.theme ? ctx.theme->size : Sizes{};
+    const float s = ctx.dpi_scale, gap = z.space_lg() * s;
+    const float first_col = rect.right - z.card_padding() * s - columns.size() * g_.col_w - (columns.empty() ? 0 : columns.size() - 1) * gap;
+    float y = rect.top + g_.header_h;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const float cy = y + g_.row_h[i] * 0.5f;
+        for (size_t j = 0; j < rows[i].cells.size() && j < columns.size(); ++j) {
+            const auto& cell = rows[i].cells[j];
+            if (!cell) continue;
+            const D2D1_SIZE_F m = cell->Measure(LayoutConstraints{}, ctx);
+            const float cx = first_col + j * (g_.col_w + gap) + g_.col_w * 0.5f;
+            cell->Arrange(D2D1::RectF(cx - m.width * 0.5f, cy - m.height * 0.5f, cx + m.width * 0.5f, cy + m.height * 0.5f), ctx);
+        }
+        y += g_.row_h[i];
+    }
+}
+
+void SwitchTable::Draw(ID2D1DeviceContext* dc, const Theme& t, float s) {
+    if (!visible) return;
+    const Paint p{dc, t, s};
+    const ColorRoles& c = t.color;
+    const Sizes& z = t.size;
+    const D2D1_RECT_F& r = bounds;
+    const float gap = z.space_lg() * s;
+    p.Line(r.left, r.top + 0.5f * s, r.right, r.top + 0.5f * s, c.line, 1.0f);
+    // The header: captions on one line, each switch column's name centred over it.
+    const float hy = r.top + z.space_sm() * s, hh = LineHeight(TypeRole::Caption) * s;
+    const float first_col = r.right - z.card_padding() * s - columns.size() * g_.col_w - (columns.empty() ? 0 : columns.size() - 1) * gap;
+    if (!first_column.empty())
+        p.Text(first_column, TypeRole::Caption, D2D1::RectF(r.left + z.card_padding() * s, hy, first_col - gap, hy + hh), c.text3,
+               {TextAlign::Leading, false, true});
+    for (size_t j = 0; j < columns.size(); ++j) {
+        const float x = first_col + j * (g_.col_w + gap);
+        p.Text(columns[j], TypeRole::Caption, D2D1::RectF(x, hy, x + g_.col_w, hy + hh), c.text3, {TextAlign::Center});
+    }
+    float y = r.top + g_.header_h;
+    for (size_t i = 0; i < rows.size() && i < g_.row_h.size(); ++i) {
+        const Row& row = rows[i];
+        const float help_h = g_.help_h[i];
+        const float title_h = LineHeight(TypeRole::Body) * s;
+        const float text_h = title_h + (help_h > 0 ? z.space_xxs() * s + help_h : 0.0f);
+        const float top = y + (g_.row_h[i] - text_h) * 0.5f, x = r.left + g_.text_x;
+        if (row.glyph != IconType::None)
+            DrawIcon(dc, t, row.glyph, r.left + z.card_padding() * s + z.icon() * s * 0.5f, top + title_h * 0.5f, z.icon() * s,
+                     p.B(c.text2).Get());
+        p.Text(row.title, TypeRole::Body, D2D1::RectF(x, top, x + g_.text_w, top + title_h), c.text, {TextAlign::Leading, false, true});
+        if (help_h > 0) {
+            const float ty = top + title_h + z.space_xxs() * s;
+            p.Text(row.help, TypeRole::Caption, D2D1::RectF(x, ty, x + g_.text_w, ty + help_h), c.text3,
+                   {TextAlign::Leading, true, false, false});
+        }
+        for (const auto& cell : row.cells) if (cell) cell->Draw(dc, t, s);
+        y += g_.row_h[i];
+    }
+}
+
+CursorKind SwitchTable::CursorAt(D2D1_POINT_2F pt) const { return RouteCursor(cells_, pt); }
+bool SwitchTable::OnMouseMove(D2D1_POINT_2F pt) {
+    const bool self = Widget::OnMouseMove(pt);
+    return RouteMove(cells_, pt) || self;
+}
+bool SwitchTable::OnMouseDown(D2D1_POINT_2F pt) { return RouteDown(cells_, pt); }
+bool SwitchTable::OnMouseUp(D2D1_POINT_2F pt) { return RouteUp(cells_, pt); }
+bool SwitchTable::OnKeyDown(UINT vk) { return RouteKey(cells_, vk); }
+bool SwitchTable::QueryTooltip(std::wstring* text, D2D1_POINT_2F* anchor) const { return RouteTooltip(cells_, text, anchor); }
+
 // --- Card ---------------------------------------------------------------------------------------
 
 namespace {
 // A SettingRow (or a list of them) pads itself; anything else in a card (a tile grid) gets the card's padding.
-bool FullBleed(Widget& r) { return dynamic_cast<SettingRow*>(&r) || dynamic_cast<RowList*>(&r) || dynamic_cast<SentList*>(&r); }
+bool FullBleed(Widget& r) {
+    return dynamic_cast<SettingRow*>(&r) || dynamic_cast<RowList*>(&r) || dynamic_cast<SentList*>(&r) ||
+           dynamic_cast<SwitchTable*>(&r);
+}
 float BlockHeight(Widget& r, float w, const LayoutContext& ctx) {
     if (FullBleed(r)) return r.Measure(LayoutConstraints::Exact(w), ctx).height;
     const Sizes z = ctx.theme ? ctx.theme->size : Sizes{};

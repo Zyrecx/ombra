@@ -230,7 +230,9 @@ void RecordGameSession(const GameSession& s);
 // Sent as they are (enum values normalised, see UsageSettings).
 inline constexpr const char* kUsageSettingsSent[] = {
     "capture.capture_cursor", "output.per_game_folders", "engine.autostart", "ui.toast_enabled",
-    "ui.toast_on_save", "ui.toast_on_buffer_toggle", "ui.screen_frame", "ui.memory_card", "ui.card_borders",
+    "ui.toast_on_save", "ui.toast_on_buffer_toggle", "ui.toast_on_record", "ui.toast_on_screenshot",
+    "ui.toast_on_problem", "ui.toast_sound_on_save", "ui.toast_sound_on_record", "ui.toast_sound_on_screenshot",
+    "ui.toast_sound_on_buffer_toggle", "ui.toast_sound_on_problem", "ui.screen_frame", "ui.memory_card", "ui.card_borders",
     "audio.full_mix_track", "audio.per_app_mode", "updates.check", "updates.auto_install", "engine.telemetry",
     "capture.framerate", "encode.bitrate_kbps", "encode.max_bitrate_kbps", "encode.cq", "encode.keyframe_sec",
     "buffer.max_bytes", "audio.bitrate_kbps", "log.max_bytes", "ui.screen_frame_radius",
