@@ -352,6 +352,20 @@ private:
         return eq.empty() ? prefix : eq;
     }
 
+    // After a miss: visible texts that contain the needle somewhere other than at the start, which
+    // exact-then-prefix matching passes over. Up to three, so a near miss doesn't read as "absent".
+    void PrintNearMatches(const std::wstring& needle) {
+        const std::wstring n = Lower(needle);
+        int shown = 0;
+        for (const DrawnText& t : probe_->texts) {
+            if (!InView(t.rect) || t.occluded) continue;
+            if (Lower(Trim(t.text)).find(n) == std::wstring::npos) continue;
+            if (shown == 0) std::printf("  targets match exact text or a prefix; texts containing it:\n");
+            std::printf("    \"%s\"\n", Narrow(t.text).c_str());
+            if (++shown == 3) break;
+        }
+    }
+
     std::optional<Hit> Target(const std::string& spec) {
         Frame();
         if (spec.size() >= 2 && spec[0] == '"') {
@@ -363,6 +377,7 @@ private:
             const auto found = FindText(needle, &exact);
             if (found.empty()) {
                 std::printf("  no text matching %s on screen\n", spec.c_str());
+                PrintNearMatches(needle);
                 return std::nullopt;
             }
             if (nth > static_cast<int>(found.size())) {
@@ -608,9 +623,11 @@ private:
         if (c == "expect" || c == "expect-not") {
             Frame();
             bool exact = false;
-            const bool found = !FindText(Widen(arg(1).substr(1, arg(1).size() - 2)), &exact).empty();
+            const std::wstring needle = Widen(arg(1).substr(1, arg(1).size() - 2));
+            const bool found = !FindText(needle, &exact).empty();
             if (found == (c == "expect")) std::printf("  ok\n");
             else Fail(found ? "text is on screen" : "text not on screen");
+            if (!found && c == "expect") PrintNearMatches(needle);
             return;
         }
         if (c == "status") return Status();
@@ -1198,7 +1215,10 @@ private:
                 std::printf("  appeared after %lld ms\n", static_cast<long long>(took));
                 return;
             }
-            if (std::chrono::steady_clock::now() - start > std::chrono::milliseconds(ms)) return Fail("timed out");
+            if (std::chrono::steady_clock::now() - start > std::chrono::milliseconds(ms)) {
+                Fail("timed out");
+                return PrintNearMatches(needle);
+            }
         }
     }
 
