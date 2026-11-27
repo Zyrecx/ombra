@@ -1468,10 +1468,10 @@ int RunDrive(int argc, wchar_t** argv) {
     {
         Driver d(opt);
         rc = d.Run();
-        // `--drive --gpu` hung at exit at least once after a clip was opened (2026-11-06; 38 runs
-        // later it wouldn't reproduce). If teardown stalls, dump every thread's stack and exit, so a
-        // scripted caller (the demo renderer) isn't blocked and the dump in the sandbox's crashes
-        // folder shows where it stuck. ExitProcess kills this thread on a normal exit.
+        // If teardown stalls, dump every thread's stack and exit, so a scripted caller (the demo
+        // renderer) isn't blocked and the dump in the sandbox's crashes folder shows where it stuck.
+        // (Runs while the display was off once hung here joining the frame clock; frame_clock.h.)
+        // ExitProcess kills this thread on a normal exit.
         std::thread([] {
             std::this_thread::sleep_for(std::chrono::seconds(10));
             std::printf("FAIL  exit hung for 10 s; dump in %s\n", Narrow(ombra::crash::CrashesDir()).c_str());

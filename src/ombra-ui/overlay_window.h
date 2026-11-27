@@ -14,6 +14,7 @@
 #include "ombra-ui/setup_screen.h"
 #include "ombra-ui/ui/motion.h"
 #include "ombra-ui/engine_events.h"
+#include "ombra-ui/frame_clock.h"
 #include "ombra-ui/pipe_client.h"
 #include "ombra-ui/screens.h"
 #include "ombra-ui/ui/theme.h"
@@ -266,17 +267,13 @@ private:
     // they were asked for (a thread per request could deliver a quick Esc's resume before the
     // suspend), and it renews the engine's lease every few seconds while recording.
     void HotkeySuspendLoop();
-    // SetFrameTimer: a worker waits on DWM's compositor clock and posts one tick per refresh
-    // (coalesced: never more than one queued), so clip frames land on vsync instead of the 15.6 ms
-    // system timer, which skipped 3-6% of a 60 fps clip's frames (--drive --gpu, 2026-10-20).
-    // Two callers want ticks: Clips playback (SetFrameTimer) and a fade still running at the end of
-    // RenderFrame (motion::TakeRunning). The clock runs while either does; neither turns off the other's.
+    // Vsync ticks (frame_clock.h). Two callers want them: Clips playback (SetFrameTimer) and a fade
+    // still running at the end of RenderFrame (motion::TakeRunning). The clock runs while either
+    // does; neither turns off the other's.
     FrameDemand             frame_demand_;
     bool                    meter_timer_on_ = false;
     void                    UpdateFrameClock();
-    std::thread             frame_clock_worker_;
-    HANDLE                  frame_clock_stop_ = nullptr;
-    std::atomic<bool>       frame_tick_pending_{false};
+    FrameClock              frame_clock_;
     std::thread             hotkey_suspend_worker_;
     std::mutex              hotkey_suspend_mutex_;
     std::condition_variable hotkey_suspend_cv_;

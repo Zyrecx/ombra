@@ -221,6 +221,7 @@ add_library(ombra_ui_core STATIC
     src/ombra-ui/clips_screen.cpp
     src/ombra-ui/setup_screen.cpp
     src/ombra-ui/clip_player.cpp
+    src/ombra-ui/frame_clock.cpp
     src/ombra-ui/overlay_window.cpp
     src/ombra-ui/toast_window.cpp
     src/ombra-ui/ui/theme.cpp
@@ -305,6 +306,7 @@ add_executable(ombra-tests
     tests/color_tests.cpp
     tests/controls_tests.cpp
     tests/motion_tests.cpp
+    tests/frame_clock_tests.cpp
     src/ombra-ui/fonts.rc)  # the UI tests render with the embedded fonts, as ombra-ui does
 # The UI fonts (third_party/fonts): rc.exe finds RCDATA files on the include path, so the repo root
 # goes on fonts.rc's, and the .ttf files are its dependencies.

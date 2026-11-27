@@ -273,7 +273,7 @@ bool DecodeThumbnailPng(const std::wstring& path, UINT& out_w, UINT& out_h, std:
     return DecodePngToBgraLocal(path, out_w, out_h, out_bgra);
 }
 
-OverlayHost::OverlayHost() {
+OverlayHost::OverlayHost() : frame_clock_(kWmFrameTick) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
                      IID_PPV_ARGS(&wic_factory_));
@@ -316,7 +316,6 @@ OverlayHost::~OverlayHost() {
     hotkey_suspend_cv_.notify_all();
     if (hotkey_suspend_worker_.joinable()) hotkey_suspend_worker_.join();
     SetFrameTimer(false);
-    if (frame_clock_stop_) CloseHandle(frame_clock_stop_);
 
     // Release every COM interface this object holds before uninitializing the apartment --
     // Release()ing a COM object after CoUninitialize() is undefined behavior (member
@@ -1404,29 +1403,8 @@ void OverlayHost::SetFrameTimer(bool on) {
 }
 
 void OverlayHost::UpdateFrameClock() {
-    if (!frame_demand_.Running() || !hwnd_) {
-        if (frame_clock_worker_.joinable()) {
-            SetEvent(frame_clock_stop_);
-            frame_clock_worker_.join();
-        }
-        return;
-    }
-    if (frame_clock_worker_.joinable()) return;
-    if (!frame_clock_stop_) frame_clock_stop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (!frame_clock_stop_) return;
-    ResetEvent(frame_clock_stop_);
-    frame_tick_pending_ = false;
-    const HWND hwnd = hwnd_;
-    frame_clock_worker_ = std::thread([this, hwnd] {
-        ombra::Log::SetThreadName("frame-clock");
-        for (;;) {
-            // The timeout keeps frames coming if the clock idles (nothing else on screen changing).
-            const DWORD r = DCompositionWaitForCompositorClock(1, &frame_clock_stop_, 20);
-            if (r == WAIT_OBJECT_0) return;
-            if (r == WAIT_FAILED) Sleep(15);
-            if (!frame_tick_pending_.exchange(true)) PostMessageW(hwnd, kWmFrameTick, 0, 0);
-        }
-    });
+    if (frame_demand_.Running() && hwnd_) frame_clock_.Start(hwnd_);
+    else frame_clock_.Stop();
 }
 
 IconButtonControl& OverlayHost::NavButton() {
@@ -2536,7 +2514,7 @@ LRESULT OverlayHost::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (msg == kWmFrameTick) {
-                frame_tick_pending_ = false;
+                frame_clock_.TickHandled();
                 const bool clips_frame = frame_demand_.clips && active_screen_ == ActiveScreen::Clips && clips_screen_ &&
                                          clips_screen_->OnFrameTimer();
                 if (frame_demand_.PaintOnTick(clips_frame)) RenderFrame();
