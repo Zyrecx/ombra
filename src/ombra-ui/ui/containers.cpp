@@ -1678,7 +1678,8 @@ void ToastCard::Draw(ID2D1DeviceContext* dc, const Theme& t, float s) {
     const Sizes& z = t.size;
     const float pad = z.space_md() * s, d = z.control() * s;
     D2D1_RECT_F r = bounds;
-    float rad = z.radius_panel() * s;
+    // ui.corners round: a stadium, its ends half circles, as the pill buttons are.
+    float rad = z.pill ? (r.bottom - r.top) / 2 : z.radius_panel() * s;
     float lead = pad, glyph = brand ? 40.0f * s : d, gap = z.space_md() * s;
     TypeRole role = TypeRole::Title;
     bool wrap = false;
