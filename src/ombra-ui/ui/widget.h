@@ -49,9 +49,21 @@ enum class IconType {
     Scissors,
     Power,     // Setup: Start with Windows
     Bug,       // Setup: the Reports step
-    Stop       // a recording's stop: an app's, in the overlay header
+    Stop,      // a recording's stop: an app's, in the overlay header; also a round end marker
+    // Clips timeline markers (ombra::MarkerType); clip saved draws Film.
+    MarkerGeneric,
+    Kill,
+    Death,
+    Assist,
+    Win,
+    Loss,
+    Objective,
+    Highlight,
+    RoundStart,
+    GameStart,
+    GameEnd
 };
-constexpr int kIconTypeCount = static_cast<int>(IconType::Stop) + 1;
+constexpr int kIconTypeCount = static_cast<int>(IconType::GameEnd) + 1;
 
 // Mirrors ombra::ApplyTier (config.h) without pulling the engine header into the UI layer --
 // screens.cpp maps the schema's "apply" string onto this.

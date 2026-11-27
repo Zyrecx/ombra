@@ -128,6 +128,27 @@ float HeaderDip(const Sizes& z) {
 }
 float TileMetaDip(const Sizes& z) { return z.space_sm() + LineHeight(TypeRole::Label) + LineHeight(TypeRole::Caption) + z.space_sm(); }
 float TimelineDip(const Sizes& z) { return z.control(); }
+
+IconType MarkerIcon(ombra::MarkerType t) {
+    using T = ombra::MarkerType;
+    switch (t) {
+        case T::kKill:       return IconType::Kill;
+        case T::kDeath:      return IconType::Death;
+        case T::kAssist:     return IconType::Assist;
+        case T::kWin:        return IconType::Win;
+        case T::kLoss:       return IconType::Loss;
+        case T::kObjective:  return IconType::Objective;
+        case T::kHighlight:  return IconType::Highlight;
+        case T::kRoundStart: return IconType::RoundStart;
+        case T::kRoundEnd:   return IconType::Stop;
+        case T::kClipSaved:  return IconType::Film;
+        case T::kGameStart:  return IconType::GameStart;
+        case T::kGameEnd:    return IconType::GameEnd;
+        default:             return IconType::MarkerGeneric;
+    }
+}
+// Which marker of a crowded spot is drawn: important first, then an app's, then Ombra's own.
+int MarkerRank(const ombra::FileMarker& m) { return m.important ? 2 : ombra::IsOmbraMarkerType(m.type) ? 0 : 1; }
 float ControlsDip(const Sizes& z) { return z.control() + z.space_sm(); }
 float StatusDip(const Sizes& z) { return LineHeight(TypeRole::Caption) + z.space_xs(); }
 float PlayerBelowDip(const Sizes& z) { return TimelineDip(z) + ControlsDip(z) + StatusDip(z) + z.space_sm(); }
@@ -147,6 +168,9 @@ const ClipShortcut kClipShortcuts[] = {
     {VK_RIGHT,      L"\u2192", ClipAction::Forward5,  L"Forward 5 s"},
     {VK_OEM_COMMA,  L",",      ClipAction::PrevFrame, L"Previous frame"},
     {VK_OEM_PERIOD, L".",      ClipAction::NextFrame, L"Next frame"},
+    // Up/down: free here and the same key on every layout (DaVinci Resolve: Shift+Up/Down).
+    {VK_UP,         L"\u2191", ClipAction::PrevMarker, L"Previous marker"},
+    {VK_DOWN,       L"\u2193", ClipAction::NextMarker, L"Next marker"},
     {'I',           L"I",      ClipAction::StartHere, L"Start here"},
     {'O',           L"O",      ClipAction::EndHere,   L"End here"},
     {VK_ESCAPE,     L"Esc",    ClipAction::Close,     L"Back to clips"},
@@ -157,7 +181,7 @@ const size_t kClipShortcutCount = sizeof(kClipShortcuts) / sizeof(kClipShortcuts
 static constexpr double kPreviewRates[] = {0.5, 1.0, 1.5, 2.0};
 
 struct ClipsScreen::Hit {
-    enum Kind { None, Tile, Timeline, InHandle, OutHandle, Video } kind = None;
+    enum Kind { None, Tile, Timeline, InHandle, OutHandle, Marker, Video } kind = None;
     int index = -1;
 };
 
@@ -283,6 +307,7 @@ const std::vector<ClipsScreen::KeyRow>& ClipsScreen::KeyRows() {
         {{key(ClipAction::PlayPause)}, L"Play / pause", ClipAction::PlayPause, true, L"Playback"},
         {{key(ClipAction::Back5), key(ClipAction::Forward5)}, L"Skip 5 s", ClipAction::Forward5, false, L""},
         {{key(ClipAction::PrevFrame), key(ClipAction::NextFrame)}, L"Step a frame", ClipAction::NextFrame, false, L""},
+        {{key(ClipAction::PrevMarker), key(ClipAction::NextMarker)}, L"Jump to a marker", ClipAction::NextMarker, false, L""},
         {{key(ClipAction::StartHere)}, L"Start here", ClipAction::StartHere, true, L"Trim"},
         {{key(ClipAction::EndHere)}, L"End here", ClipAction::EndHere, false, L""},
         {{key(ClipAction::Close)}, L"Back to clips", ClipAction::Close, true, L""},
@@ -471,6 +496,7 @@ void ClipsScreen::LoadDetails(uint64_t gen, std::vector<std::wstring> paths) {
                                 trim_out_ = d.info.duration_s;
                             c.duration_s = d.info.duration_s;
                             c.keyframes_s = std::move(d.info.keyframes_s);
+                            c.markers = MarkersOf(d.info);
                         }
                         c.thumb_bgra = std::move(d.bgra);
                         c.thumb_w = d.w;
@@ -523,6 +549,12 @@ std::vector<std::wstring> ClipsScreen::GridNamesForTest(int sort) {
 bool ClipsScreen::QueryHoverTooltip(std::wstring* text, D2D1_POINT_2F* anchor) {
     for (Control* b : Buttons())
         if (b->QueryTooltip(text, anchor)) return true;
+    if (selected_ >= 0 && drag_ == Drag::None && marker_hover_ >= 0 && marker_hover_ < static_cast<int>(marker_groups_.size())) {
+        const MarkerGroup& g = marker_groups_[marker_hover_];
+        if (text) *text = MarkerTooltip(g);
+        if (anchor) *anchor = D2D1::Point2F(g.x, g.icon.top);
+        return true;
+    }
     return false;
 }
 
@@ -540,6 +572,8 @@ void ClipsScreen::OpenClip(int index) {
     selected_ = index;
     status_.clear();
     drag_ = Drag::None;
+    marker_groups_.clear();
+    marker_hover_ = -1;
     const ClipEntry& c = clips_[index];
     trim_in_ = 0.0;
     trim_out_ = c.duration_s;
@@ -586,6 +620,8 @@ void ClipsScreen::CloseClip() {
     frame_bitmap_.Reset();
     selected_ = -1;
     drag_ = Drag::None;
+    marker_groups_.clear();
+    marker_hover_ = -1;
     if (host_) {
         host_->SetFrameTimer(false);
         host_->RequestRepaint();
@@ -623,6 +659,8 @@ void ClipsScreen::RunAction(ClipAction a) {
         case ClipAction::Forward5: if (player_) SeekTo(player_->Position() + 5.0); break;
         case ClipAction::PrevFrame: StepFrame(-1); break;
         case ClipAction::NextFrame: StepFrame(+1); break;
+        case ClipAction::PrevMarker: JumpMarker(-1); break;
+        case ClipAction::NextMarker: JumpMarker(+1); break;
         case ClipAction::StartHere: SetStartHere(); break;
         case ClipAction::EndHere: SetEndHere(); break;
         case ClipAction::Close: CloseClip(); return;
@@ -648,6 +686,22 @@ void ClipsScreen::StepFrame(int dir) {
     const int64_t target = std::clamp<int64_t>(CurrentFrame() + dir, 0, last);
     player_->Seek(FrameSeekTime(target, fps_));
     step_frame_ = target;
+}
+
+void ClipsScreen::SeekToMarker(int i) {
+    if (!player_ || selected_ < 0 || i < 0 || i >= static_cast<int>(clips_[selected_].markers.size())) return;
+    const double at = clips_[selected_].markers[i].at_s;
+    if (fps_ <= 0.0) { SeekTo(at); return; }  // a click still works without the grid
+    const int64_t target = FrameAt(at, fps_);
+    player_->Seek(FrameSeekTime(target, fps_));
+    // Paused, the clock may not show the target yet; playing, it moves on (and Play resets this).
+    step_frame_ = player_->Playing() ? -1 : target;
+}
+
+void ClipsScreen::JumpMarker(int dir) {
+    // As a frame step, it needs the frame grid.
+    if (!player_ || player_->GetState() != ClipPlayer::State::Ready || fps_ <= 0.0 || selected_ < 0) return;
+    SeekToMarker(AdjacentMarker(clips_[selected_].markers, CurrentFrame(), fps_, dir));
 }
 
 // Start at the playhead, on the frame on screen (a start between keyframes re-encodes on save).
@@ -793,6 +847,9 @@ void ClipsScreen::SaveFinished(const SaveDone& d) {
                 if (ombra::ReadClipInfo(d.src, info)) {
                     c.duration_s = info.duration_s;
                     c.keyframes_s = std::move(info.keyframes_s);
+                    c.markers = MarkersOf(info);
+                } else {
+                    c.markers.clear();  // the old ones point into footage the file no longer has
                 }
                 c.thumb.Reset();
                 LoadDetails(d.gen, {d.src});
@@ -1128,7 +1185,7 @@ void ClipsScreen::Layout(const D2D1_RECT_F& outer, float dpi_scale) {
     float y = video_rect_.bottom + z.space_sm() * s;
     // Inset by the handle's half-width so a handle at either end stays inside the panel.
     const float inset = z.space_sm() * s;
-    timeline_rect_ = D2D1::RectF(bounds.left + inset, y, bounds.right - inset, y + TimelineDip(z) * s);
+    timeline_rect_ = D2D1::RectF(bounds.left + inset, y, bounds.right - inset, y + z.control() * s);
     y = timeline_rect_.bottom;
 
     const float bh = z.control() * s;
@@ -1380,6 +1437,7 @@ void ClipsScreen::Draw(ID2D1DeviceContext* dc, const Theme& theme, float dpi_sca
             p.Line(x, track.bottom + th, x, track.bottom + th + z.space_xs() * s, c.text_off, 1.0f);
             last_x = x;
         }
+        DrawMarkers(dc, theme, track);
         const float hw = z.space_xs() * s;
         for (float hx : {x_in, x_out}) {
             const D2D1_RECT_F h = D2D1::RectF(hx - hw, timeline_rect_.top + hw, hx + hw, timeline_rect_.bottom - hw);
@@ -1487,6 +1545,89 @@ double ClipsScreen::TimelineTime(float x) const {
     return std::clamp(static_cast<double>((x - timeline_rect_.left) / w), 0.0, 1.0) * dur;
 }
 
+std::vector<ClipsScreen::MarkerGroup> ClipsScreen::GroupMarkers(float min_gap) const {
+    std::vector<MarkerGroup> out;
+    if (selected_ < 0) return out;
+    const auto& ms = clips_[selected_].markers;
+    float last_x = 0.0f;
+    for (int i = 0; i < static_cast<int>(ms.size()); ++i) {
+        const float x = TimelineX(ms[i].at_s);
+        // A run of markers each close to the one before is one group, drawn where the run starts.
+        if (out.empty() || x - last_x >= min_gap) {
+            out.push_back({x, i, {i}});
+        } else {
+            MarkerGroup& g = out.back();
+            g.members.push_back(i);
+            if (MarkerRank(ms[i]) > MarkerRank(ms[g.lead])) g.lead = i;
+        }
+        last_x = x;
+    }
+    return out;
+}
+
+void ClipsScreen::DrawMarkers(ID2D1DeviceContext* dc, const Theme& theme, const D2D1_RECT_F& track) {
+    const ClipEntry& clip = clips_[selected_];
+    // Rebuilt each draw: the clip's markers can be replaced (a save over it) between draws.
+    marker_groups_.clear();
+    if (clip.markers.empty()) {
+        marker_hover_ = -1;
+        return;
+    }
+    const float s = s_;
+    const paint::Paint p{dc, theme, s};
+    const Sizes& z = theme.size;
+    const auto& c = theme.color;
+    const auto color_of = [&](const ombra::FileMarker& m) {
+        // Outside the kept range: a save leaves it out.
+        if (m.at_s < trim_in_ - 1e-3 || m.at_s >= trim_out_) return c.text_off;
+        if (m.important) return c.accent_text;
+        return ombra::IsOmbraMarkerType(m.type) ? c.text3 : c.text;
+    };
+
+    // Icons sit in the band between the timeline's top and the track, so the bar keeps its height.
+    const float icon = (z.icon() - 2.0f) * s;
+    const float cy = (timeline_rect_.top + track.top) * 0.5f;
+    const float count_w = p.TextW(L"9", TypeRole::Caption);
+    const float lh = LineHeight(TypeRole::Caption) * s;
+    // The target is the icon (and its count), not the run it stands for: a hover there names
+    // every member, a click goes to where it is drawn.
+    const float half_h = (std::max)(icon, lh) * 0.5f;
+    marker_groups_ = GroupMarkers(icon + count_w + z.space_xs() * s);
+    if (marker_hover_ >= static_cast<int>(marker_groups_.size())) marker_hover_ = -1;
+    for (size_t gi = 0; gi < marker_groups_.size(); ++gi) {
+        MarkerGroup& g = marker_groups_[gi];
+        const ombra::FileMarker& m = clip.markers[g.lead];
+        const D2D1_COLOR_F col = color_of(m);
+        const float size = m.important ? icon + z.space_xxs() * s : icon;  // Steam's "more prominent"
+        std::wstring n;
+        if (g.members.size() > 1) n = g.members.size() > 9 ? L"9+" : std::to_wstring(g.members.size());
+        const float x0 = g.x + icon * 0.5f + 1.0f * s;
+        const float right = n.empty() ? g.x + size * 0.5f : x0 + p.TextW(n, TypeRole::Caption) + 1.0f;
+        const float pad = z.space_xxs() * s;
+        g.icon = D2D1::RectF(g.x - size * 0.5f - pad, cy - half_h - pad, right + pad, cy + half_h + pad);
+        if (static_cast<int>(gi) == marker_hover_) p.Fill(g.icon, z.radius_control() * s, c.HoverLayer());
+        DrawIcon(dc, theme, MarkerIcon(m.type), g.x, cy, size, p.B(col).Get());
+        if (!n.empty())
+            p.Text(n, TypeRole::Caption, D2D1::RectF(x0, cy - lh * 0.5f, x0 + p.TextW(n, TypeRole::Caption) + 1.0f, cy + lh * 0.5f), c.text3);
+    }
+}
+
+std::wstring ClipsScreen::MarkerTooltip(const MarkerGroup& g) const {
+    const auto& ms = clips_[selected_].markers;
+    constexpr size_t kMaxLines = 6;  // a crowded spot names the first few, then a count
+    std::wstring out;
+    for (size_t k = 0; k < g.members.size() && k < kMaxLines; ++k) {
+        if (g.members[k] >= static_cast<int>(ms.size())) return {};  // drawn from a list since replaced
+        const ombra::FileMarker& m = ms[g.members[k]];
+        if (!out.empty()) out += L"\n";
+        out += m.label.empty() ? ombra::WideFromUtf8(ombra::MarkerTypeTitle(m.type)) : ombra::WideFromUtf8(m.label);
+        if (!m.app.empty()) out += L"  ·  " + ombra::WideFromUtf8(m.app);
+        out += L"  " + FormatPrecise(m.at_s);
+    }
+    if (g.members.size() > kMaxLines) out += L"\n+" + std::to_wstring(g.members.size() - kMaxLines) + L" more";
+    return out;
+}
+
 // ---- input ---------------------------------------------------------------------------------
 
 ClipsScreen::Hit ClipsScreen::HitAt(D2D1_POINT_2F pt) const {
@@ -1503,6 +1644,8 @@ ClipsScreen::Hit ClipsScreen::HitAt(D2D1_POINT_2F pt) const {
     if (pt.y >= timeline_rect_.top && pt.y <= timeline_rect_.bottom) {
         if (std::abs(pt.x - TimelineX(trim_in_)) <= grab) return {Hit::InHandle, 0};
         if (std::abs(pt.x - TimelineX(trim_out_)) <= grab) return {Hit::OutHandle, 0};
+        for (size_t i = 0; i < marker_groups_.size(); ++i)
+            if (PointIn(marker_groups_[i].icon, pt)) return {Hit::Marker, static_cast<int>(i)};
         if (pt.x >= timeline_rect_.left - grab && pt.x <= timeline_rect_.right + grab) return {Hit::Timeline, 0};
     }
     if (PointIn(video_rect_, pt)) return {Hit::Video, 0};
@@ -1543,6 +1686,9 @@ bool ClipsScreen::OnMouseMove(D2D1_POINT_2F pt) {
     const int tile = h.kind == Hit::Tile ? h.index : -1;
     rep |= tile != hover_tile_;
     hover_tile_ = tile;
+    const int marker = h.kind == Hit::Marker ? h.index : -1;
+    rep |= marker != marker_hover_;
+    marker_hover_ = marker;
     return rep;
 }
 
@@ -1552,7 +1698,7 @@ CursorKind ClipsScreen::CursorAt(D2D1_POINT_2F pt) const {
         if (b->visible && b->CursorAt(pt) != CursorKind::Arrow) return b->CursorAt(pt);
     }
     switch (HitAt(pt).kind) {
-        case Hit::Tile: case Hit::Timeline: case Hit::Video:
+        case Hit::Tile: case Hit::Timeline: case Hit::Marker: case Hit::Video:
             return CursorKind::Hand;
         case Hit::InHandle: case Hit::OutHandle: return CursorKind::Move;
         default: return CursorKind::Arrow;
@@ -1592,6 +1738,8 @@ bool ClipsScreen::OnMouseDown(D2D1_POINT_2F pt) {
             player_->Pause();
             SeekTo(TimelineTime(pt.x));
             break;
+        // A seek, no scrub: a pixel of jitter would move the playhead off the marker.
+        case Hit::Marker: SeekToMarker(marker_groups_[h.index].members.front()); break;
         case Hit::Video: TogglePlay(); return true;
         default: return false;
     }

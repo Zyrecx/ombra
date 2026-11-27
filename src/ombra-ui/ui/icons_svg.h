@@ -165,6 +165,51 @@ inline constexpr const char* kIconSvgStop =
 inline constexpr const char* kIconSvgPower =
     R"svg(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"> <path d="M12 2v10" /> <path d="M18.4 6.6a9 9 0 1 1-12.77.04" /> </svg>)svg";
 
+// IconType::MarkerGeneric -- a Clips timeline marker (lucide-static "circle-dot").
+inline constexpr const char* kIconSvgMarkerGeneric =
+    R"svg(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"> <circle cx="12" cy="12" r="1" /> <circle cx="12" cy="12" r="10" /> </svg>)svg";
+
+// IconType::Kill -- a Clips timeline marker (lucide-static "crosshair").
+inline constexpr const char* kIconSvgKill =
+    R"svg(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"> <circle cx="12" cy="12" r="10" /> <line x1="22" x2="18" y1="12" y2="12" /> <line x1="6" x2="2" y1="12" y2="12" /> <line x1="12" x2="12" y1="6" y2="2" /> <line x1="12" x2="12" y1="22" y2="18" /> </svg>)svg";
+
+// IconType::Death -- a Clips timeline marker (lucide-static "skull").
+inline constexpr const char* kIconSvgDeath =
+    R"svg(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"> <path d="m12.5 17-.5-1-.5 1h1z" /> <path d="M15 22a1 1 0 0 0 1-1v-1a2 2 0 0 0 1.56-3.25 8 8 0 1 0-11.12 0A2 2 0 0 0 8 20v1a1 1 0 0 0 1 1z" /> <circle cx="15" cy="12" r="1" /> <circle cx="9" cy="12" r="1" /> </svg>)svg";
+
+// IconType::Assist -- a Clips timeline marker (lucide-static "handshake").
+inline constexpr const char* kIconSvgAssist =
+    R"svg(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"> <path d="m11 17 2 2a1 1 0 1 0 3-3" /> <path d="m14 14 2.5 2.5a1 1 0 1 0 3-3l-3.88-3.88a3 3 0 0 0-4.24 0l-.88.88a1 1 0 1 1-3-3l2.81-2.81a5.79 5.79 0 0 1 7.06-.87l.47.28a2 2 0 0 0 1.42.25L21 4" /> <path d="m21 3 1 11h-2" /> <path d="M3 3 2 14l6.5 6.5a1 1 0 1 0 3-3" /> <path d="M3 4h8" /> </svg>)svg";
+
+// IconType::Win -- a Clips timeline marker (lucide-static "trophy").
+inline constexpr const char* kIconSvgWin =
+    R"svg(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"> <path d="M10 14.66V17a1 1 0 0 1-1 1 2 2 0 0 0-2 2v2" /> <path d="M14 14.66V17a1 1 0 0 0 1 1 2 2 0 0 1 2 2v2" /> <path d="M17.916 10H19.5A2.5 2.5 0 0 0 22 7.5V5a1 1 0 0 0-1-1h-3" /> <path d="M4 22h16" /> <path d="M6 9a6 6 0 0 0 12 0V3a1 1 0 0 0-1-1H7a1 1 0 0 0-1 1z" /> <path d="M6.084 10H4.5A2.5 2.5 0 0 1 2 7.5V5a1 1 0 0 1 1-1h3" /> </svg>)svg";
+
+// IconType::Loss -- a Clips timeline marker (lucide-static "circle-x").
+inline constexpr const char* kIconSvgLoss =
+    R"svg(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"> <circle cx="12" cy="12" r="10" /> <path d="m15 9-6 6" /> <path d="m9 9 6 6" /> </svg>)svg";
+
+// IconType::Objective -- a Clips timeline marker (lucide-static "flag").
+inline constexpr const char* kIconSvgObjective =
+    R"svg(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"> <path d="M4 22V4a1 1 0 0 1 .4-.8A6 6 0 0 1 8 2c3 0 5 2 7.333 2q2 0 3.067-.8A1 1 0 0 1 20 4v10a1 1 0 0 1-.4.8A6 6 0 0 1 16 16c-3 0-5-2-8-2a6 6 0 0 0-4 1.528" /> </svg>)svg";
+
+// IconType::Highlight -- a Clips timeline marker (lucide-static "star").
+inline constexpr const char* kIconSvgHighlight =
+    R"svg(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"> <path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z" /> </svg>)svg";
+
+// IconType::RoundStart -- a Clips timeline marker (lucide-static "circle-play"). A round end draws
+// IconType::Stop (the same "circle-stop").
+inline constexpr const char* kIconSvgRoundStart =
+    R"svg(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"> <path d="M9 9.003a1 1 0 0 1 1.517-.859l4.997 2.997a1 1 0 0 1 0 1.718l-4.997 2.997A1 1 0 0 1 9 14.996z" /> <circle cx="12" cy="12" r="10" /> </svg>)svg";
+
+// IconType::GameStart -- a Clips timeline marker (lucide-static "log-in").
+inline constexpr const char* kIconSvgGameStart =
+    R"svg(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"> <path d="m10 17 5-5-5-5" /> <path d="M15 12H3" /> <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" /> </svg>)svg";
+
+// IconType::GameEnd -- a Clips timeline marker (lucide-static "log-out").
+inline constexpr const char* kIconSvgGameEnd =
+    R"svg(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"> <path d="m16 17 5-5-5-5" /> <path d="M21 12H9" /> <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /> </svg>)svg";
+
 // IconType -> embedded SVG source, or nullptr if this icon has no SVG (falls back to widget.cpp's
 // hand-drawn switch in DrawIcon).
 inline const char* IconSvgSource(IconType icon) {
@@ -200,6 +245,17 @@ inline const char* IconSvgSource(IconType icon) {
         case IconType::Power:    return kIconSvgPower;
         case IconType::Bug:      return kIconSvgBug;
         case IconType::Stop:     return kIconSvgStop;
+        case IconType::MarkerGeneric: return kIconSvgMarkerGeneric;
+        case IconType::Kill:     return kIconSvgKill;
+        case IconType::Death:    return kIconSvgDeath;
+        case IconType::Assist:   return kIconSvgAssist;
+        case IconType::Win:      return kIconSvgWin;
+        case IconType::Loss:     return kIconSvgLoss;
+        case IconType::Objective: return kIconSvgObjective;
+        case IconType::Highlight: return kIconSvgHighlight;
+        case IconType::RoundStart: return kIconSvgRoundStart;
+        case IconType::GameStart: return kIconSvgGameStart;
+        case IconType::GameEnd:  return kIconSvgGameEnd;
         case IconType::None:
         case IconType::Toggle:
         default:

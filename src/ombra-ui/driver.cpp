@@ -42,6 +42,7 @@
 //     with LEFT s of space left, APPS (0-5) sample apps' recordings as header pills, KEYS the record hotkey
 //   fixture run GAME|"GAME"|- TARGET MODE [off]: the status Capture > Video reads (- = no game running)
 //   fixture export PCT: the open clip shows a frame-exact save at PCT%
+//   fixture markers [few]: the open clip gets a sample match's markers (few: two)
 //   fixture sent [empty]: nine made-up records of what was sent (every kind; failed, unconfirmed)
 //     in the sandbox's sent_reports, then Settings; `empty` leaves none
 //   fixture ask: a made-up crash from before setup was finished, and Home asking whether to send it
@@ -80,6 +81,7 @@
 #include <fstream>
 #include <iostream>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -434,6 +436,32 @@ private:
                 ClipsScreen* cs = host_.GetClipsScreen();
                 if (!cs || !cs->PlayerOpen()) return Fail("fixture export: open a clip first");
                 cs->SetExportForTest(static_cast<uint32_t>(std::atoi(arg(2).c_str())), 100);
+                return Settle();
+            }
+            if (arg(1) == "markers") {  // fixture markers [few]: the open clip gets a sample match's markers
+                ClipsScreen* cs = host_.GetClipsScreen();
+                if (!cs || !cs->PlayerOpen()) return Fail("fixture markers: open a clip first");
+                const int i = cs->SelectedForTest();
+                const double d = cs->ClipDurationForTest(i);
+                using T = ombra::MarkerType;
+                struct M { double f; T t; const char* label; const char* app; bool important; };
+                static const M kMatch[] = {
+                    {0.03, T::kGameStart, "VALORANT", "Ombra", false}, {0.14, T::kRoundStart, "", "Tracker", false},
+                    {0.26, T::kKill, "", "Tracker", false},           {0.275, T::kKill, "", "Tracker", false},
+                    {0.29, T::kKill, "Triple kill", "Tracker", true}, {0.41, T::kDeath, "", "Tracker", false},
+                    {0.52, T::kObjective, "Spike planted", "Tracker", false}, {0.60, T::kAssist, "", "Tracker", false},
+                    {0.71, T::kRoundEnd, "", "Tracker", false},       {0.715, T::kWin, "Round won", "Tracker", true},
+                    {0.80, T::kHighlight, "Clutch", "Tracker", false}, {0.88, T::kClipSaved, "", "Ombra", false},
+                    {0.96, T::kGameEnd, "VALORANT", "Ombra", false},
+                };
+                static const M kFew[] = {
+                    {0.35, T::kKill, "", "Tracker", false}, {0.88, T::kClipSaved, "", "Ombra", false},
+                };
+                const bool few = arg(2) == "few";
+                std::vector<ombra::FileMarker> out;
+                for (const M& m : few ? std::span<const M>(kFew) : std::span<const M>(kMatch))
+                    out.push_back({m.f * d, m.t, m.label, m.app, m.important});
+                cs->SetClipMarkersForTest(i, std::move(out));
                 return Settle();
             }
             if (arg(1) == "setup") {

@@ -4836,6 +4836,27 @@ TEST_CASE("clips: frame steps count frames, never round onto the same one") {
     }
 }
 
+TEST_CASE("clips: a marker jump always moves, compared as frames") {
+    const double fps = 60.0;
+    std::vector<ombra::FileMarker> ms(5);
+    ms[0].at_s = 1.0;
+    ms[1].at_s = 2.004;  // mid-frame: its seek lands a quarter frame in, before 2.004
+    ms[2].at_s = 2.006;  // the same frame as [1]
+    ms[3].at_s = 2.030;  // the next frames
+    ms[4].at_s = 2.050;
+    CHECK(AdjacentMarker(ms, 0, fps, +1) == 0);
+    CHECK(AdjacentMarker(ms, 0, fps, -1) == -1);
+    // From marker [1]'s frame (where its seek put the playhead), next skips [2] on the same frame.
+    const int64_t f1 = FrameAt(ms[1].at_s, fps);
+    CHECK(FrameAt(FrameSeekTime(f1, fps), fps) == f1);
+    CHECK(AdjacentMarker(ms, f1, fps, +1) == 3);
+    CHECK(AdjacentMarker(ms, f1, fps, -1) == 0);
+    CHECK(AdjacentMarker(ms, FrameAt(ms[3].at_s, fps), fps, +1) == 4);
+    CHECK(AdjacentMarker(ms, FrameAt(ms[3].at_s, fps), fps, -1) == 2);
+    CHECK(AdjacentMarker(ms, FrameAt(ms[4].at_s, fps), fps, +1) == -1);
+    CHECK(AdjacentMarker({}, 10, fps, +1) == -1);
+}
+
 // Every shortcut is dispatched from the one table the shortcuts list draws from.
 TEST_CASE("clips: the shortcut table has one action per key") {
     std::set<UINT> keys;

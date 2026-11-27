@@ -9,6 +9,7 @@
 
 #include "ombra-ui/clip_player.h"
 #include "ombra/clip_file.h"
+#include "ombra/marker.h"
 #include "ombra-ui/screens.h"
 #include "ombra-ui/ui/controls.h"
 #include "ombra-ui/ui/theme.h"
@@ -28,7 +29,7 @@ namespace ombra_ui {
 
 // The player's keyboard shortcuts, one table: OnKeyDown dispatches from it and anything that
 // lists the keys draws from it, so the two can't disagree.
-enum class ClipAction { PlayPause, Back5, Forward5, PrevFrame, NextFrame, StartHere, EndHere, Close };
+enum class ClipAction { PlayPause, Back5, Forward5, PrevFrame, NextFrame, PrevMarker, NextMarker, StartHere, EndHere, Close };
 struct ClipShortcut {
     UINT        vk;
     const wchar_t* key;    // as drawn
@@ -43,6 +44,29 @@ extern const size_t kClipShortcutCount;
 inline double FrameSeekTime(int64_t index, double fps) { return (static_cast<double>(index) + 0.25) / fps; }
 // The frame showing at `seconds`.
 inline int64_t FrameAt(double seconds, double fps) { return static_cast<int64_t>(std::floor(seconds * fps + 1e-6)); }
+// A clip's markers on its presentation timeline: the tag counts from the first video sample.
+inline std::vector<ombra::FileMarker> MarkersOf(const ombra::ClipInfo& info) {
+    std::vector<ombra::FileMarker> m = ombra::ReadFileMarkers(info.markers_json);
+    for (ombra::FileMarker& f : m) f.at_s += info.video_offset_s;
+    // A marker past the end has nothing to show (and a huge time breaks frame math).
+    if (info.duration_s > 0.0)
+        std::erase_if(m, [&](const ombra::FileMarker& f) { return f.at_s > info.duration_s; });
+    return m;
+}
+// The marker a jump from `frame` lands on (dir +1 next, -1 previous), or -1: compared as frames,
+// since a seek lands a quarter frame in, which can be before the marker's own time. Markers on
+// the frame on screen are skipped, so a repeated jump always moves.
+inline int AdjacentMarker(const std::vector<ombra::FileMarker>& markers, int64_t frame, double fps, int dir) {
+    const int n = static_cast<int>(markers.size());
+    if (dir > 0) {
+        for (int i = 0; i < n; ++i)
+            if (FrameAt(markers[i].at_s, fps) > frame) return i;
+    } else {
+        for (int i = n - 1; i >= 0; --i)
+            if (FrameAt(markers[i].at_s, fps) < frame) return i;
+    }
+    return -1;
+}
 
 struct ClipEntry {
     std::wstring path;
@@ -52,6 +76,7 @@ struct ClipEntry {
     bool         info_loaded = false;
     double       duration_s = 0.0;
     std::vector<double> keyframes_s;
+    std::vector<ombra::FileMarker> markers;  // at_s in presentation time, as keyframes_s (MarkersOf)
     std::vector<uint8_t> thumb_bgra;  // decoded off the UI thread; becomes `thumb` in Draw
     UINT         thumb_w = 0, thumb_h = 0;
     ComPtr<ID2D1Bitmap1> thumb;
@@ -94,11 +119,13 @@ public:
         clips_[index].duration_s = duration_s;
         clips_[index].game = game;
     }
+    void SetClipMarkersForTest(int index, std::vector<ombra::FileMarker> markers) { clips_[index].markers = std::move(markers); }
     // The split button's menu, as if its arrow was clicked.
     void OpenSaveMenuForTest() { if (save_split_.on_menu) save_split_.on_menu(); }
     const std::wstring& Root() const { return root_; }
     size_t ClipCount() const { return clips_.size(); }
     bool PlayerOpen() const { return selected_ >= 0; }
+    int SelectedForTest() const { return selected_; }
     void OpenClipForTest(int index) { OpenClip(index); }
     // A refresh's reply holding these of the current entries, in this order.
     void ApplyListForTest(const std::vector<int>& keep) {
@@ -169,6 +196,20 @@ private:
     void ShowInFolder();
     void DeleteClip();
 
+    // Markers close enough to overlap draw as one: the highest-ranked, with a count.
+    struct MarkerGroup {
+        float            x = 0.0f;
+        int              lead = 0;   // index into the clip's markers
+        std::vector<int> members;
+        D2D1_RECT_F      icon{};     // as last drawn: hover and click test this
+    };
+    std::vector<MarkerGroup> GroupMarkers(float min_gap) const;
+    void DrawMarkers(ID2D1DeviceContext* dc, const Theme& theme, const D2D1_RECT_F& track);
+    std::wstring MarkerTooltip(const MarkerGroup& g) const;
+    // Seeks to the open clip's marker `i`, onto its frame.
+    void SeekToMarker(int i);
+    void JumpMarker(int dir);
+
     double TimelineTime(float x) const;
     float  TimelineX(double seconds) const;
 
@@ -229,6 +270,8 @@ private:
     D2D1_RECT_F  grid_rect_{};
     D2D1_RECT_F  video_rect_{};
     D2D1_RECT_F  timeline_rect_{};
+    std::vector<MarkerGroup> marker_groups_;  // as DrawMarkers last drew them
+    int          marker_hover_ = -1;          // index into marker_groups_
     ChipGroupControl filter_chips_;  // [0] = All, then games_
     std::vector<D2D1_RECT_F> tile_rects_;  // per Visible() entry, unscrolled
 
